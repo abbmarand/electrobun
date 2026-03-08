@@ -7026,7 +7026,8 @@ NSWindow *createNSWindowWithFrameAndStyle(uint32_t windowId,
                                                              screen:primaryScreen];
     
     [window setFrameTopLeftPoint:config.frame.origin];
-    if (strcmp(config.titleBarStyle, "hiddenInset") == 0) {
+    if (strcmp(config.titleBarStyle, "hiddenInset") == 0 ||
+        strcmp(config.titleBarStyle, "hidden") == 0) {
         window.titlebarAppearsTransparent = YES;
         window.titleVisibility = NSWindowTitleHidden;
     }

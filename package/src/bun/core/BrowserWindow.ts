@@ -188,10 +188,10 @@ export class BrowserWindow<T extends RPCWithTransport = RPCWithTransport> {
 							FullSizeContentView: true,
 						}
 					: {}),
-				// hidden: no titlebar, no native controls (for fully custom chrome)
+				// hidden: transparent titlebar, no native controls (for fully custom chrome)
 				...(titleBarStyle === "hidden"
 					? {
-							Titled: false,
+							Titled: true,
 							FullSizeContentView: true,
 						}
 					: {}),
