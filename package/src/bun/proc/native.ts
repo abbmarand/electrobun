@@ -119,6 +119,10 @@ export const native = (() => {
 				],
 				returns: FFIType.void,
 			},
+			hideWindow: {
+				args: [FFIType.ptr],
+				returns: FFIType.void,
+			},
 			closeWindow: {
 				args: [
 					FFIType.ptr, // window ptr
@@ -861,6 +865,17 @@ export const ffi = {
 			native.symbols.showWindow(windowPtr);
 		},
 
+		hideWindow: (params: { winId: number }) => {
+			const { winId } = params;
+			const windowPtr = getWindowPtr(winId);
+
+			if (!windowPtr) {
+				throw `Can't hide window. Window no longer exists`;
+			}
+
+			native.symbols.hideWindow(windowPtr);
+		},
+
 		minimizeWindow: (params: { winId: number }) => {
 			const { winId } = params;
 			const windowPtr = getWindowPtr(winId);
@@ -1112,6 +1127,7 @@ export const ffi = {
 				preload,
 				frame: { x, y, width, height },
 				autoResize,
+				navigationRules,
 				sandbox,
 				startTransparent,
 				startPassthrough,
@@ -1193,6 +1209,10 @@ window.__electrobunBunBridge = window.__electrobunBunBridge || window.webkit?.me
 
 			if (!webviewPtr) {
 				throw "Failed to create webview";
+			}
+
+			if (navigationRules) {
+				native.symbols.setWebviewNavigationRules(webviewPtr, toCString(navigationRules));
 			}
 
 			return webviewPtr;
