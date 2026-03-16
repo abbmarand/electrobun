@@ -636,6 +636,10 @@ export const native = (() => {
 				args: [FFIType.function],
 				returns: FFIType.void,
 			},
+			setDockIcon: {
+				args: [FFIType.cstring],
+				returns: FFIType.void,
+			},
 			setDockIconVisible: {
 				args: [FFIType.bool],
 				returns: FFIType.void,
@@ -1495,6 +1499,9 @@ window.__electrobunBunBridge = window.__electrobunBunBridge || window.webkit?.me
 				toCString(subtitle),
 				silent,
 			);
+		},
+		setDockIcon: (params: { imagePath: string }): void => {
+			native.symbols.setDockIcon(toCString(params.imagePath));
 		},
 		setDockIconVisible: (params: { visible: boolean }): void => {
 			native.symbols.setDockIconVisible(params.visible);

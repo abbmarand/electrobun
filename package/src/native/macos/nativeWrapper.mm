@@ -7855,6 +7855,58 @@ extern "C" void setAppReopenHandler(AppReopenHandler handler) {
     g_appReopenHandler = handler;
 }
 
+extern "C" void setDockIcon(const char* imagePath) {
+    void (^apply)(void) = ^{
+        if (imagePath && strlen(imagePath) > 0) {
+            NSString *path = [NSString stringWithUTF8String:imagePath];
+            NSImage *favicon = [[NSImage alloc] initWithContentsOfFile:path];
+            if (!favicon) return;
+
+            CGFloat canvasSize = 1024;
+            CGFloat iconSize = 832;
+            CGFloat radius = 183;
+            CGFloat offset = (canvasSize - iconSize) / 2;
+
+            CGColorSpaceRef colorSpace = CGColorSpaceCreateDeviceRGB();
+            CGContextRef ctx = CGBitmapContextCreate(NULL, canvasSize, canvasSize, 8, canvasSize * 4,
+                colorSpace, kCGImageAlphaPremultipliedLast);
+            CGColorSpaceRelease(colorSpace);
+            if (!ctx) return;
+
+            CALayer *layer = [CALayer layer];
+            layer.frame = CGRectMake(0, 0, iconSize, iconSize);
+            layer.cornerRadius = radius;
+            layer.cornerCurve = kCACornerCurveContinuous;
+            layer.masksToBounds = YES;
+
+            CGImageRef faviconCG = [favicon CGImageForProposedRect:NULL context:nil hints:nil];
+            layer.contents = (__bridge id)faviconCG;
+            layer.contentsGravity = kCAGravityResizeAspectFill;
+
+            CGContextTranslateCTM(ctx, offset, offset);
+            CGContextSetShadowWithColor(ctx, CGSizeMake(0, -10), 10,
+                [[NSColor colorWithCalibratedRed:0 green:0 blue:0 alpha:0.3] CGColor]);
+            [layer renderInContext:ctx];
+
+            CGImageRef renderedCG = CGBitmapContextCreateImage(ctx);
+            CGContextRelease(ctx);
+
+            NSImage *icon = [[NSImage alloc] initWithCGImage:renderedCG size:NSMakeSize(512, 512)];;
+            CGImageRelease(renderedCG);
+
+            [NSApp setApplicationIconImage:icon];
+        } else {
+            [NSApp setApplicationIconImage:nil];
+        }
+    };
+
+    if ([NSThread isMainThread]) {
+        apply();
+    } else {
+        dispatch_async(dispatch_get_main_queue(), apply);
+    }
+}
+
 extern "C" void setDockIconVisible(bool visible) {
     void (^applyVisibility)(void) = ^{
         NSApplication *app = [NSApplication sharedApplication];

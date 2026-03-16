@@ -53,6 +53,10 @@ export const openPath = (path: string): boolean => {
 	return ffi.request.openPath({ path });
 };
 
+export const setDockIcon = (imagePath: string): void => {
+	ffi.request.setDockIcon({ imagePath });
+};
+
 export const setDockIconVisible = (visible: boolean): void => {
 	ffi.request.setDockIconVisible({ visible });
 };
