@@ -871,6 +871,14 @@ static NSMutableDictionary<NSNumber *, AbstractView *> *globalAbstractViews = ni
     @property (nonatomic, strong) NSWindow *window;
 @end
 
+// ----------------------- Navigation Toolbar -----------------------
+
+static NSToolbarItemIdentifier const NavigationBackItemIdentifier = @"NavigationBackItem";
+static NSToolbarItemIdentifier const NavigationForwardItemIdentifier = @"NavigationForwardItem";
+
+@interface NavigationToolbarDelegate : NSObject <NSToolbarDelegate, NSToolbarItemValidation>
+@end
+
 @interface StatusItemTarget : NSObject
     @property (nonatomic, assign) NSStatusItem *statusItem;
     @property (nonatomic, assign) ZigStatusItemHandler zigHandler;
@@ -2514,6 +2522,7 @@ runOpenPanelWithParameters:(WKOpenPanelParameters *)parameters
                 self.webView.autoresizingMask = NSViewNotSizable;
                 
                 [self.webView addObserver:self forKeyPath:@"fullscreenState" options:NSKeyValueObservingOptionNew | NSKeyValueObservingOptionOld context:nil];
+                [self.webView addObserver:self forKeyPath:@"title" options:NSKeyValueObservingOptionNew context:nil];
 
                 if (autoResize) {
                     self.fullSize = YES;
@@ -2707,6 +2716,7 @@ runOpenPanelWithParameters:(WKOpenPanelParameters *)parameters
             // Remove KVO observer
             @try {
                 [webViewToClean removeObserver:self forKeyPath:@"fullscreenState"];
+                [webViewToClean removeObserver:self forKeyPath:@"title"];
             } @catch (NSException *exception) {
                 // Observer may not be registered yet if remove is called during init
             }
@@ -2841,8 +2851,17 @@ runOpenPanelWithParameters:(WKOpenPanelParameters *)parameters
                             change:(NSDictionary<NSKeyValueChangeKey, id> *)change
                            context:(void *)context {        
         
-        if (object == self.webView) {            
-            if ([keyPath isEqualToString:@"fullscreenState"]) {                
+        if (object == self.webView) {
+            if ([keyPath isEqualToString:@"title"]) {
+                NSString *title = self.webView.title;
+                if (title && title.length > 0) {
+                    dispatch_async(dispatch_get_main_queue(), ^{
+                        if (self.webView.window) {
+                            [self.webView.window setTitle:title];
+                        }
+                    });
+                }
+            } else if ([keyPath isEqualToString:@"fullscreenState"]) {                
                 id newValue = change[NSKeyValueChangeNewKey];                                                
                 NSInteger stateValue = 0;
                 if (newValue) {
@@ -2876,6 +2895,7 @@ runOpenPanelWithParameters:(WKOpenPanelParameters *)parameters
     - (void)dealloc {
         @try {
             [self.webView removeObserver:self forKeyPath:@"fullscreenState"];
+            [self.webView removeObserver:self forKeyPath:@"title"];
         } @catch (NSException *exception) {
             // Observer already removed in -remove
         }
@@ -6413,6 +6433,86 @@ CefRefPtr<CefRequestContext> CreateRequestContextForPartition(const char* partit
     }
 @end
 
+// ----------------------- NavigationToolbarDelegate -----------------------
+
+@implementation NavigationToolbarDelegate
+
+- (AbstractView *)activeWebviewForWindow:(NSWindow *)window {
+    if (![window.contentView isKindOfClass:[ContainerView class]]) return nil;
+    ContainerView *container = (ContainerView *)window.contentView;
+    return container.abstractViews.lastObject;
+}
+
+- (NSArray<NSToolbarItemIdentifier> *)toolbarDefaultItemIdentifiers:(NSToolbar *)toolbar {
+    return @[NavigationBackItemIdentifier, NavigationForwardItemIdentifier, NSToolbarFlexibleSpaceItemIdentifier];
+}
+
+- (NSArray<NSToolbarItemIdentifier> *)toolbarAllowedItemIdentifiers:(NSToolbar *)toolbar {
+    return @[NavigationBackItemIdentifier, NavigationForwardItemIdentifier, NSToolbarFlexibleSpaceItemIdentifier];
+}
+
+- (NSToolbarItem *)toolbar:(NSToolbar *)toolbar itemForItemIdentifier:(NSToolbarItemIdentifier)itemIdentifier willBeInsertedIntoToolbar:(BOOL)flag {
+    NSToolbarItem *item = [[NSToolbarItem alloc] initWithItemIdentifier:itemIdentifier];
+
+    if ([itemIdentifier isEqualToString:NavigationBackItemIdentifier]) {
+        item.image = [NSImage imageWithSystemSymbolName:@"chevron.left" accessibilityDescription:@"Back"];
+        item.label = @"Back";
+        item.action = @selector(navigateBack:);
+        item.target = self;
+    } else if ([itemIdentifier isEqualToString:NavigationForwardItemIdentifier]) {
+        item.image = [NSImage imageWithSystemSymbolName:@"chevron.right" accessibilityDescription:@"Forward"];
+        item.label = @"Forward";
+        item.action = @selector(navigateForward:);
+        item.target = self;
+    }
+
+    return item;
+}
+
+- (BOOL)validateToolbarItem:(NSToolbarItem *)item {
+    NSWindow *window = [item.toolbar valueForKey:@"_window"];
+    if (!window) {
+        for (NSWindow *w in [NSApp windows]) {
+            if (w.toolbar == item.toolbar) { window = w; break; }
+        }
+    }
+    if (!window) return NO;
+
+    AbstractView *view = [self activeWebviewForWindow:window];
+    if (!view) return NO;
+
+    if ([item.itemIdentifier isEqualToString:NavigationBackItemIdentifier]) {
+        return [view canGoBack];
+    }
+    if ([item.itemIdentifier isEqualToString:NavigationForwardItemIdentifier]) {
+        return [view canGoForward];
+    }
+    return YES;
+}
+
+- (void)navigateBack:(NSToolbarItem *)sender {
+    NSWindow *window = sender.toolbar ? [self windowForToolbar:sender.toolbar] : nil;
+    if (!window) return;
+    AbstractView *view = [self activeWebviewForWindow:window];
+    if (view) [view goBack];
+}
+
+- (void)navigateForward:(NSToolbarItem *)sender {
+    NSWindow *window = sender.toolbar ? [self windowForToolbar:sender.toolbar] : nil;
+    if (!window) return;
+    AbstractView *view = [self activeWebviewForWindow:window];
+    if (view) [view goForward];
+}
+
+- (NSWindow *)windowForToolbar:(NSToolbar *)toolbar {
+    for (NSWindow *w in [NSApp windows]) {
+        if (w.toolbar == toolbar) return w;
+    }
+    return nil;
+}
+
+@end
+
 /*
  * =============================================================================
  * 6. EXTERN "C" BRIDGING FUNCTIONS
@@ -7119,6 +7219,16 @@ NSWindow *createNSWindowWithFrameAndStyle(uint32_t windowId,
         window.titlebarAppearsTransparent = YES;
         window.titleVisibility = NSWindowTitleVisible;
         objc_setAssociatedObject(window, "adaptiveTheme", @YES, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+
+        NSToolbar *toolbar = [[NSToolbar alloc] initWithIdentifier:@"NavigationToolbar"];
+        NavigationToolbarDelegate *toolbarDelegate = [[NavigationToolbarDelegate alloc] init];
+        objc_setAssociatedObject(window, "toolbarDelegate", toolbarDelegate, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+        toolbar.delegate = toolbarDelegate;
+        toolbar.displayMode = NSToolbarDisplayModeIconOnly;
+        [window setToolbar:toolbar];
+        if (@available(macOS 11.0, *)) {
+            window.toolbarStyle = NSWindowToolbarStyleUnifiedCompact;
+        }
     }
 
     return window;

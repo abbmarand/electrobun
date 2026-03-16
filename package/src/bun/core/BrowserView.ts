@@ -338,6 +338,26 @@ export class BrowserView<T extends RPCWithTransport = RPCWithTransport> {
 		};
 	};
 
+	goBack() {
+		native.symbols.webviewGoBack(this.ptr);
+	}
+
+	goForward() {
+		native.symbols.webviewGoForward(this.ptr);
+	}
+
+	reload() {
+		native.symbols.webviewReload(this.ptr);
+	}
+
+	canGoBack(): boolean {
+		return native.symbols.webviewCanGoBack(this.ptr) as boolean;
+	}
+
+	canGoForward(): boolean {
+		return native.symbols.webviewCanGoForward(this.ptr) as boolean;
+	}
+
 	remove() {
 		native.symbols.webviewRemove(this.ptr);
 		delete BrowserViewMap[this.id];
