@@ -35,9 +35,9 @@ export type WindowOptionsType<T = undefined> = {
 	hidden?: boolean;
 	navigationRules: string | null;
 	// Sandbox mode: when true, disables RPC and only allows event emission
-	// Use for untrusted content (remote URLs) to prevent malicious sites from
-	// accessing internal APIs, creating OOPIFs, or communicating with Bun
 	sandbox: boolean;
+	// toolbar: when true, adds a native NSToolbar with unified style (vibrancy/blur)
+	toolbar?: boolean;
 };
 
 const defaultOptions: WindowOptionsType = {
@@ -155,6 +155,7 @@ export class BrowserWindow<T extends RPCWithTransport = RPCWithTransport> {
 		styleMask,
 		titleBarStyle,
 		transparent,
+		toolbar,
 		hidden,
 	}: Partial<WindowOptionsType<T>>) {
 		this.ptr = ffi.request.createWindow({
@@ -181,14 +182,12 @@ export class BrowserWindow<T extends RPCWithTransport = RPCWithTransport> {
 				NonactivatingPanel: false,
 				HUDWindow: false,
 				...(styleMask || {}),
-				// hiddenInset: transparent titlebar with inset native controls
 				...(titleBarStyle === "hiddenInset"
 					? {
 							Titled: true,
 							FullSizeContentView: true,
 						}
 					: {}),
-				// hidden: transparent titlebar, no native controls (for fully custom chrome)
 				...(titleBarStyle === "hidden"
 					? {
 							Titled: true,
@@ -198,6 +197,7 @@ export class BrowserWindow<T extends RPCWithTransport = RPCWithTransport> {
 			},
 			titleBarStyle: titleBarStyle || "default",
 			transparent: transparent ?? false,
+			toolbar: toolbar ?? false,
 			hidden: hidden ?? false,
 		}) as Pointer;
 

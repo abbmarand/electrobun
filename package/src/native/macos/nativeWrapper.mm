@@ -499,6 +499,7 @@ typedef struct {
     NSRect frame;
     uint32_t styleMask;
     const char *titleBarStyle;
+    bool toolbar;
 } createNSWindowWithFrameAndStyleParams;
 
 // Window, tray, menu, and snapshot callbacks are defined in shared/callbacks.h
@@ -800,6 +801,7 @@ static NSMutableDictionary<NSNumber *, AbstractView *> *globalAbstractViews = ni
     @property (nonatomic, assign) uint32_t webviewId;
     @property (nonatomic, strong) NSMutableDictionary<NSValue *, NSString *> *downloadPaths;
     @property (nonatomic, strong) NSMutableSet<WKDownload *> *observedDownloads;
+    - (void)detectAndApplyThemeColor:(WKWebView *)webView;
 @end
 
 @interface MyWebViewUIDelegate : NSObject <WKUIDelegate>
@@ -2028,17 +2030,81 @@ static void schedulePendingResizeDrain() {
         }
     }
 
+    - (void)detectAndApplyThemeColor:(WKWebView *)webView {
+        NSWindow *window = webView.window;
+        NSNumber *adaptiveTheme = objc_getAssociatedObject(window, "adaptiveTheme");
+        if (!adaptiveTheme || !adaptiveTheme.boolValue) return;
+
+        WKSnapshotConfiguration *config = [[WKSnapshotConfiguration alloc] init];
+        config.rect = CGRectMake(0, 0, webView.bounds.size.width, 5);
+        config.snapshotWidth = @(200);
+
+        [webView takeSnapshotWithConfiguration:config completionHandler:^(NSImage *image, NSError *error) {
+            if (error || !image) return;
+
+            NSBitmapImageRep *bitmap = [[NSBitmapImageRep alloc] initWithData:[image TIFFRepresentation]];
+            if (!bitmap) return;
+
+            NSCountedSet *colorCounts = [[NSCountedSet alloc] init];
+            NSInteger width = bitmap.pixelsWide;
+            NSInteger height = bitmap.pixelsHigh;
+
+            for (NSInteger y = 0; y < height; y++) {
+                for (NSInteger x = 0; x < width; x++) {
+                    NSColor *pixel = [bitmap colorAtX:x y:y];
+                    NSColor *rgb = [pixel colorUsingColorSpace:[NSColorSpace sRGBColorSpace]];
+                    if (!rgb) continue;
+                    NSInteger qr = ((NSInteger)(rgb.redComponent * 255)) / 16 * 16;
+                    NSInteger qg = ((NSInteger)(rgb.greenComponent * 255)) / 16 * 16;
+                    NSInteger qb = ((NSInteger)(rgb.blueComponent * 255)) / 16 * 16;
+                    NSString *key = [NSString stringWithFormat:@"%ld,%ld,%ld", (long)qr, (long)qg, (long)qb];
+                    [colorCounts addObject:key];
+                }
+            }
+
+            NSString *mostFrequent = nil;
+            NSUInteger maxCount = 0;
+            for (NSString *key in colorCounts) {
+                NSUInteger count = [colorCounts countForObject:key];
+                if (count > maxCount) {
+                    maxCount = count;
+                    mostFrequent = key;
+                }
+            }
+
+            if (!mostFrequent) return;
+            NSArray *parts = [mostFrequent componentsSeparatedByString:@","];
+            CGFloat r = [parts[0] floatValue] / 255.0;
+            CGFloat g = [parts[1] floatValue] / 255.0;
+            CGFloat b = [parts[2] floatValue] / 255.0;
+            NSColor *color = [NSColor colorWithRed:r green:g blue:b alpha:1.0];
+
+            dispatch_async(dispatch_get_main_queue(), ^{
+                window.backgroundColor = color;
+                CGFloat luminance = 0.299 * r + 0.587 * g + 0.114 * b;
+                window.appearance = [NSAppearance appearanceNamed:
+                    (luminance > 0.5) ? NSAppearanceNameAqua : NSAppearanceNameDarkAqua];
+            });
+        }];
+    }
+
     - (void)webView:(WKWebView *)webView didFinishNavigation:(WKNavigation *)navigation {
         NSString *urlString = webView.URL.absoluteString ?: @"";
         if (urlString.length > 0) {
             self.zigEventHandler(self.webviewId, strdup("did-navigate"), strdup(urlString.UTF8String));
         }
+        [self detectAndApplyThemeColor:webView];
     }
+
     - (void)webView:(WKWebView *)webView didCommitNavigation:(WKNavigation *)navigation {
         NSString *urlString = webView.URL.absoluteString ?: @"";
         if (urlString.length > 0) {
             self.zigEventHandler(self.webviewId, strdup("did-commit-navigation"), strdup(urlString.UTF8String));
         }
+        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(200 * NSEC_PER_MSEC)),
+            dispatch_get_main_queue(), ^{
+                [self detectAndApplyThemeColor:webView];
+            });
     }
 
     // Called when navigationAction policy returns .download
@@ -7031,6 +7097,7 @@ NSWindow *createNSWindowWithFrameAndStyle(uint32_t windowId,
         window.titlebarAppearsTransparent = YES;
         window.titleVisibility = NSWindowTitleHidden;
     }
+
     WindowDelegate *delegate = [[WindowDelegate alloc] init];
     delegate.closeHandler = zigCloseHandler;
     delegate.resizeHandler = zigResizeHandler;
@@ -7047,6 +7114,13 @@ NSWindow *createNSWindowWithFrameAndStyle(uint32_t windowId,
     ContainerView *contentView = [[ContainerView alloc] initWithFrame:[window frame]];
     contentView.autoresizingMask = NSViewWidthSizable | NSViewHeightSizable;
     [window setContentView:contentView];
+
+    if (config.toolbar) {
+        window.titlebarAppearsTransparent = YES;
+        window.titleVisibility = NSWindowTitleVisible;
+        objc_setAssociatedObject(window, "adaptiveTheme", @YES, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+    }
+
     return window;
 
     // return (void*)window;
@@ -7066,6 +7140,7 @@ extern "C" NSWindow *createWindowWithFrameAndStyleFromWorker(
   uint32_t styleMask,
   const char* titleBarStyle,
   bool transparent,
+  bool toolbar,
   WindowCloseHandler zigCloseHandler,
   WindowMoveHandler zigMoveHandler,
   WindowResizeHandler zigResizeHandler,
@@ -7082,11 +7157,11 @@ extern "C" NSWindow *createWindowWithFrameAndStyleFromWorker(
 
     NSRect frame = NSMakeRect(x, y, width, height);
 
-    // Create the params struct
     createNSWindowWithFrameAndStyleParams config = {
         .frame = frame,
         .styleMask = styleMask,
-        .titleBarStyle = titleBarStyle
+        .titleBarStyle = titleBarStyle,
+        .toolbar = toolbar,
     };
 
     // Use a dispatch semaphore to wait for the window creation to complete

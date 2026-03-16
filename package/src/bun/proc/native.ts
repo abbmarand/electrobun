@@ -87,7 +87,6 @@ export const native = (() => {
 		return dlopen(nativeWrapperPath, {
 			// window
 			createWindowWithFrameAndStyleFromWorker: {
-				// Pass each parameter individually
 				args: [
 					FFIType.u32, // windowId
 					FFIType.f64,
@@ -97,6 +96,7 @@ export const native = (() => {
 					FFIType.u32, // styleMask
 					FFIType.cstring, // titleBarStyle
 					FFIType.bool, // transparent
+					FFIType.bool, // toolbar
 					FFIType.function, // closeHandler
 					FFIType.function, // moveHandler
 					FFIType.function, // resizeHandler
@@ -759,6 +759,7 @@ export const ffi = {
 			};
 			titleBarStyle: string;
 			transparent: boolean;
+			toolbar: boolean;
 			hidden?: boolean;
 		}): FFIType.ptr => {
 			const {
@@ -782,6 +783,7 @@ export const ffi = {
 				},
 				titleBarStyle,
 				transparent,
+				toolbar,
 				hidden = false,
 			} = params;
 
@@ -802,16 +804,14 @@ export const ffi = {
 
 			const windowPtr = native.symbols.createWindowWithFrameAndStyleFromWorker(
 				id,
-				// frame
 				x,
 				y,
 				width,
 				height,
 				styleMask,
-				// style
 				toCString(titleBarStyle),
 				transparent,
-				// callbacks
+				toolbar,
 				windowCloseCallback,
 				windowMoveCallback,
 				windowResizeCallback,
