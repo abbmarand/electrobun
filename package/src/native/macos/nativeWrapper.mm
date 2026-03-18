@@ -7962,6 +7962,27 @@ extern "C" const char* clipboardAvailableFormats() {
     return result;
 }
 
+// getFrontmostAppInfo - Get info about the currently frontmost application
+// Returns: JSON string with bundleId, name, path (caller must free), or NULL
+extern "C" const char* getFrontmostAppInfo() {
+    __block const char* result = NULL;
+
+    dispatch_sync(dispatch_get_main_queue(), ^{
+        NSRunningApplication *app = [[NSWorkspace sharedWorkspace] frontmostApplication];
+        if (!app) return;
+
+        NSString *bundleId = app.bundleIdentifier ?: @"";
+        NSString *name = app.localizedName ?: @"";
+        NSString *path = app.bundleURL.path ?: @"";
+
+        NSString *json = [NSString stringWithFormat:@"{\"bundleId\":\"%@\",\"name\":\"%@\",\"path\":\"%@\"}",
+            bundleId, name, path];
+        result = strdup([json UTF8String]);
+    });
+
+    return result;
+}
+
 // ============================================================================
 // URL Scheme / Deep Linking API
 // ============================================================================

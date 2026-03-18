@@ -608,6 +608,10 @@ export const native = (() => {
 				args: [],
 				returns: FFIType.cstring,
 			},
+			getFrontmostAppInfo: {
+				args: [],
+				returns: FFIType.cstring,
+			},
 
 			// Session/Cookie API
 			sessionGetCookies: {
@@ -1614,6 +1618,11 @@ window.__electrobunBunBridge = window.__electrobunBunBridge || window.webkit?.me
 			const formatsStr = result.toString();
 			if (!formatsStr) return [];
 			return formatsStr.split(",").filter((f) => f.length > 0);
+		},
+		getFrontmostAppInfo: (): string | null => {
+			const result = native.symbols.getFrontmostAppInfo();
+			if (!result) return null;
+			return result.toString();
 		},
 
 		// ffifunc: (params: {}): void => {

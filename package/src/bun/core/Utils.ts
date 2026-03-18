@@ -319,6 +319,26 @@ export const clipboardAvailableFormats = (): string[] => {
 	return ffi.request.clipboardAvailableFormats();
 };
 
+export type FrontmostAppInfo = {
+	bundleId: string;
+	name: string;
+	path: string;
+};
+
+/**
+ * Get info about the currently frontmost (active) application.
+ * @returns Object with bundleId, name, and path, or null if unavailable
+ */
+export const getFrontmostAppInfo = (): FrontmostAppInfo | null => {
+	const json = ffi.request.getFrontmostAppInfo();
+	if (!json) return null;
+	try {
+		return JSON.parse(json);
+	} catch {
+		return null;
+	}
+};
+
 // ============================================================================
 // Paths API — cross-platform OS directories and app-scoped directories
 // ============================================================================
