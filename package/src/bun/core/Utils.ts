@@ -339,6 +339,21 @@ export const getFrontmostAppInfo = (): FrontmostAppInfo | null => {
 	}
 };
 
+/**
+ * Extract an app/file icon and save it as a PNG file.
+ * @param appPath - Path to the .app bundle, file, or folder
+ * @param outputPath - Where to write the PNG file
+ * @param size - Desired icon size in pixels (width and height)
+ * @returns true if the icon was successfully extracted and saved
+ */
+export const getAppIconToPath = (
+	appPath: string,
+	outputPath: string,
+	size: number,
+): boolean => {
+	return ffi.request.getAppIconToPath({ appPath, outputPath, size });
+};
+
 // ============================================================================
 // Paths API — cross-platform OS directories and app-scoped directories
 // ============================================================================

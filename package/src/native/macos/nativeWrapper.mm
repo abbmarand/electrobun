@@ -7983,6 +7983,54 @@ extern "C" const char* getFrontmostAppInfo() {
     return result;
 }
 
+// getAppIconToPath - Extract an app/file icon and save as PNG
+// appPath: path to the .app bundle (or any file/folder)
+// outputPath: where to write the PNG
+// size: desired width/height in pixels
+// Returns: true on success
+extern "C" bool getAppIconToPath(const char* appPath, const char* outputPath, int size) {
+    if (!appPath || !outputPath || size <= 0) return false;
+
+    __block bool success = false;
+
+    dispatch_sync(dispatch_get_main_queue(), ^{
+        NSString *path = [NSString stringWithUTF8String:appPath];
+        NSImage *icon = [[NSWorkspace sharedWorkspace] iconForFile:path];
+        if (!icon) return;
+
+        [icon setSize:NSMakeSize(size, size)];
+
+        NSBitmapImageRep *bitmapRep = [[NSBitmapImageRep alloc]
+            initWithBitmapDataPlanes:NULL
+            pixelsWide:size
+            pixelsHigh:size
+            bitsPerSample:8
+            samplesPerPixel:4
+            hasAlpha:YES
+            isPlanar:NO
+            colorSpaceName:NSCalibratedRGBColorSpace
+            bytesPerRow:0
+            bitsPerPixel:0];
+
+        [NSGraphicsContext saveGraphicsState];
+        NSGraphicsContext *ctx = [NSGraphicsContext graphicsContextWithBitmapImageRep:bitmapRep];
+        [NSGraphicsContext setCurrentContext:ctx];
+        [icon drawInRect:NSMakeRect(0, 0, size, size)
+            fromRect:NSZeroRect
+            operation:NSCompositingOperationSourceOver
+            fraction:1.0];
+        [NSGraphicsContext restoreGraphicsState];
+
+        NSData *pngData = [bitmapRep representationUsingType:NSBitmapImageFileTypePNG properties:@{}];
+        if (pngData) {
+            NSString *outPath = [NSString stringWithUTF8String:outputPath];
+            success = [pngData writeToFile:outPath atomically:YES];
+        }
+    });
+
+    return success;
+}
+
 // ============================================================================
 // URL Scheme / Deep Linking API
 // ============================================================================

@@ -612,6 +612,10 @@ export const native = (() => {
 				args: [],
 				returns: FFIType.cstring,
 			},
+			getAppIconToPath: {
+				args: [FFIType.cstring, FFIType.cstring, FFIType.i32],
+				returns: FFIType.bool,
+			},
 
 			// Session/Cookie API
 			sessionGetCookies: {
@@ -1623,6 +1627,17 @@ window.__electrobunBunBridge = window.__electrobunBunBridge || window.webkit?.me
 			const result = native.symbols.getFrontmostAppInfo();
 			if (!result) return null;
 			return result.toString();
+		},
+		getAppIconToPath: (params: {
+			appPath: string;
+			outputPath: string;
+			size: number;
+		}): boolean => {
+			return !!native.symbols.getAppIconToPath(
+				toCString(params.appPath),
+				toCString(params.outputPath),
+				params.size,
+			);
 		},
 
 		// ffifunc: (params: {}): void => {
