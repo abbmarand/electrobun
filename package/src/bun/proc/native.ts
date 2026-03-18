@@ -588,6 +588,10 @@ export const native = (() => {
 				args: [FFIType.cstring],
 				returns: FFIType.void,
 			},
+			clipboardGetChangeCount: {
+				args: [],
+				returns: FFIType.i64,
+			},
 			clipboardReadImage: {
 				args: [FFIType.ptr], // pointer to size_t for output size
 				returns: FFIType.ptr, // pointer to PNG data
@@ -1572,6 +1576,9 @@ window.__electrobunBunBridge = window.__electrobunBunBridge || window.webkit?.me
 		},
 		clipboardWriteText: (params: { text: string }): void => {
 			native.symbols.clipboardWriteText(toCString(params.text));
+		},
+		clipboardGetChangeCount: (): number => {
+			return Number(native.symbols.clipboardGetChangeCount());
 		},
 		clipboardReadImage: (): Uint8Array | null => {
 			// Allocate a buffer for the size output

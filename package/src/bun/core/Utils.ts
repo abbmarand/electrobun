@@ -281,7 +281,15 @@ export const clipboardWriteText = (text: string): void => {
 };
 
 /**
- * Read image from the system clipboard as PNG data.
+ * Get the global clipboard change count.
+ * Useful for detecting clipboard changes without polling content.
+ * @returns The change count
+ */
+export const clipboardGetChangeCount = (): number => {
+	return ffi.request.clipboardGetChangeCount();
+};
+/**
+ * Read PNG image data from the system clipboard.
  * @returns PNG image data as Uint8Array, or null if no image is available
  */
 export const clipboardReadImage = (): Uint8Array | null => {

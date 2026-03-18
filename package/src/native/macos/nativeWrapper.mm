@@ -7850,6 +7850,16 @@ extern "C" void clipboardWriteText(const char *text) {
     });
 }
 
+// clipboardGetChangeCount - Get the global change count
+extern "C" long clipboardGetChangeCount() {
+    __block long count = 0;
+    dispatch_sync(dispatch_get_main_queue(), ^{
+        NSPasteboard *pasteboard = [NSPasteboard generalPasteboard];
+        count = [pasteboard changeCount];
+    });
+    return count;
+}
+
 // clipboardReadImage - Read image from clipboard as PNG data
 // Returns: PNG data (caller must free) and sets outSize, or NULL if no image
 extern "C" const uint8_t* clipboardReadImage(size_t *outSize) {
