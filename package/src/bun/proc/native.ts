@@ -803,20 +803,18 @@ export const ffi = {
 				hidden = false,
 			} = params;
 
-			const styleMask = native.symbols.getWindowStyle(
-				Borderless,
-				Titled,
-				Closable,
-				Miniaturizable,
-				Resizable,
-				UnifiedTitleAndToolbar,
-				FullScreen,
-				FullSizeContentView,
-				UtilityWindow,
-				DocModalWindow,
-				NonactivatingPanel,
-				HUDWindow,
-			);
+			let styleMask = 0;
+			if (Titled) styleMask |= 1 << 0;
+			if (Closable) styleMask |= 1 << 1;
+			if (Miniaturizable) styleMask |= 1 << 2;
+			if (Resizable) styleMask |= 1 << 3;
+			if (UtilityWindow) styleMask |= 1 << 4;
+			if (DocModalWindow) styleMask |= 1 << 6;
+			if (NonactivatingPanel) styleMask |= 1 << 7;
+			if (UnifiedTitleAndToolbar) styleMask |= 1 << 12;
+			if (HUDWindow) styleMask |= 1 << 13;
+			if (FullScreen) styleMask |= 1 << 14;
+			if (FullSizeContentView) styleMask |= 1 << 15;
 
 			const windowPtr = native.symbols.createWindowWithFrameAndStyleFromWorker(
 				id,

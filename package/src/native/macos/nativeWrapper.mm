@@ -7172,6 +7172,13 @@ extern "C" NSRect createNSRectWrapper(double x, double y, double width, double h
 - (BOOL)canBecomeMainWindow { return YES; }
 @end
 
+@interface ElectrobunPanel : NSPanel
+@end
+
+@implementation ElectrobunPanel
+- (BOOL)canBecomeKeyWindow { return YES; }
+@end
+
 NSWindow *createNSWindowWithFrameAndStyle(uint32_t windowId,
                                                      createNSWindowWithFrameAndStyleParams config,
                                                      WindowCloseHandler zigCloseHandler,
@@ -7185,11 +7192,24 @@ NSWindow *createNSWindowWithFrameAndStyle(uint32_t windowId,
     NSRect screenFrame = [primaryScreen frame];
     config.frame.origin.y = screenFrame.size.height - config.frame.origin.y;
     
-    NSWindow *window = [[ElectrobunWindow alloc] initWithContentRect:config.frame
-                                                          styleMask:config.styleMask
-                                                            backing:NSBackingStoreBuffered
-                                                              defer:YES
-                                                             screen:primaryScreen];
+    BOOL isPanel = (config.styleMask & NSWindowStyleMaskNonactivatingPanel) != 0;
+    
+    NSWindow *window;
+    if (isPanel) {
+        window = [[ElectrobunPanel alloc] initWithContentRect:config.frame
+                                                   styleMask:config.styleMask
+                                                     backing:NSBackingStoreBuffered
+                                                       defer:YES
+                                                      screen:primaryScreen];
+        [(NSPanel *)window setFloatingPanel:YES];
+        [(NSPanel *)window setBecomesKeyOnlyIfNeeded:NO];
+    } else {
+        window = [[ElectrobunWindow alloc] initWithContentRect:config.frame
+                                                    styleMask:config.styleMask
+                                                      backing:NSBackingStoreBuffered
+                                                        defer:YES
+                                                       screen:primaryScreen];
+    }
     
     [window setFrameTopLeftPoint:config.frame.origin];
     if (strcmp(config.titleBarStyle, "hiddenInset") == 0 ||
@@ -7314,14 +7334,14 @@ extern "C" NSWindow *createWindowWithFrameAndStyleFromWorker(
 
 extern "C" void showWindow(NSWindow *window) {
     dispatch_sync(dispatch_get_main_queue(), ^{
-        // First ensure the window is visible
-        [window orderFront:nil];
-        
-        // Make the window key and bring to front
-        [window makeKeyAndOrderFront:nil];
-        
-        // Activate the application to ensure it can receive focus
-        [[NSApplication sharedApplication] activateIgnoringOtherApps:YES];    
+        if ([window isKindOfClass:[NSPanel class]]) {
+            [window orderFrontRegardless];
+            [window makeKeyWindow];
+        } else {
+            [window orderFront:nil];
+            [window makeKeyAndOrderFront:nil];
+            [[NSApplication sharedApplication] activateIgnoringOtherApps:YES];
+        }
     });
 }
 
