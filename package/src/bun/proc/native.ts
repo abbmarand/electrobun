@@ -213,6 +213,7 @@ export const native = (() => {
 					FFIType.function, // internalBridgeHandler: *const fn (u32, [*:0]const u8) callconv(.C) void (internal RPC, disabled in sandbox)
 					FFIType.cstring, // electrobunPreloadScript
 					FFIType.cstring, // customPreloadScript
+					FFIType.cstring, // viewsRoot
 					FFIType.bool, // transparent
 					FFIType.bool, // sandbox - when true, bunBridge and internalBridge are not set up
 				],
@@ -1178,6 +1179,7 @@ export const ffi = {
 			html: string | null;
 			partition: string | null;
 			preload: string | null;
+			viewsRoot: string | null;
 			frame: {
 				x: number;
 				y: number;
@@ -1203,6 +1205,7 @@ export const ffi = {
 				// html: string | null;
 				partition,
 				preload,
+				viewsRoot,
 				frame: { x, y, width, height },
 				autoResize,
 				navigationRules,
@@ -1282,6 +1285,7 @@ window.__electrobunBunBridge = window.__electrobunBunBridge || window.webkit?.me
 				internalBridgeHandler, // Internal RPC bridge (disabled in sandbox mode)
 				toCString(electrobunPreload),
 				toCString(customPreload || ""),
+				toCString(viewsRoot || ""),
 				transparent,
 				sandbox, // When true, bunBridge and internalBridge are not set up in native code
 			);
@@ -2571,7 +2575,11 @@ const bunBridgePostmessageHandler = new JSCallback(
 			if (!msgStr.length) {
 				return;
 			}
-			const msgJson = JSON.parse(msgStr.toString());
+			const rawMessage = msgStr.toString().trim();
+			if (!rawMessage || (rawMessage[0] !== "{" && rawMessage[0] !== "[")) {
+				return;
+			}
+			const msgJson = JSON.parse(rawMessage);
 
 			const webview = BrowserView.getById(id);
 			if (!webview) return;
@@ -2579,7 +2587,6 @@ const bunBridgePostmessageHandler = new JSCallback(
 			webview.rpcHandler?.(msgJson);
 		} catch (err) {
 			console.error("error sending message to bun: ", err);
-			console.error("msgString: ", new CString(msg));
 		}
 	},
 	{
@@ -2600,7 +2607,11 @@ const eventBridgeHandler = new JSCallback(
 	(_id: number, msg: number) => {
 		try {
 			const message = new CString(msg as unknown as Pointer);
-			const jsonMessage = JSON.parse(message.toString());
+			const rawMessage = message.toString().trim();
+			if (!rawMessage || (rawMessage[0] !== "{" && rawMessage[0] !== "[")) {
+				return;
+			}
+			const jsonMessage = JSON.parse(rawMessage);
 
 			// Only handle webviewEvent messages - no RPC
 			if (jsonMessage.id === "webviewEvent") {

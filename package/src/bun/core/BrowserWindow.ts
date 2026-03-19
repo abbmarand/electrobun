@@ -22,6 +22,7 @@ export type WindowOptionsType<T = undefined> = {
 	url: string | null;
 	html: string | null;
 	preload: string | null;
+	viewsRoot: string | null;
 	renderer: "native" | "cef";
 	rpc?: T;
 	styleMask?: {};
@@ -32,6 +33,8 @@ export type WindowOptionsType<T = undefined> = {
 	titleBarStyle: "hidden" | "hiddenInset" | "default";
 	// transparent: when true, window background is transparent (see-through)
 	transparent: boolean;
+	// passthrough: when true, mouse events pass through transparent regions
+	passthrough: boolean;
 	hidden?: boolean;
 	navigationRules: string | null;
 	// Sandbox mode: when true, disables RPC and only allows event emission
@@ -53,9 +56,11 @@ const defaultOptions: WindowOptionsType = {
 	url: "https://electrobun.dev",
 	html: null,
 	preload: null,
+	viewsRoot: null,
 	renderer: buildConfig.defaultRenderer,
 	titleBarStyle: "default",
 	transparent: false,
+	passthrough: false,
 	hidden: false,
 	navigationRules: null,
 	sandbox: false,
@@ -115,8 +120,10 @@ export class BrowserWindow<T extends RPCWithTransport = RPCWithTransport> {
 	url: string | null = null;
 	html: string | null = null;
 	preload: string | null = null;
+	viewsRoot: string | null = null;
 	renderer: "native" | "cef" = "native";
 	transparent: boolean = false;
+	passthrough: boolean = false;
 	hidden: boolean = false;
 	navigationRules: string | null = null;
 	// Sandbox mode disables RPC and only allows event emission (for untrusted content)
@@ -143,8 +150,10 @@ export class BrowserWindow<T extends RPCWithTransport = RPCWithTransport> {
 		this.url = options.url || null;
 		this.html = options.html || null;
 		this.preload = options.preload || null;
+		this.viewsRoot = options.viewsRoot || null;
 		this.renderer = options.renderer || defaultOptions.renderer;
 		this.transparent = options.transparent ?? false;
+		this.passthrough = options.passthrough ?? false;
 		this.hidden = options.hidden ?? false;
 		this.navigationRules = options.navigationRules || null;
 		this.sandbox = options.sandbox ?? false;
@@ -215,6 +224,7 @@ export class BrowserWindow<T extends RPCWithTransport = RPCWithTransport> {
 			url: this.url,
 			html: this.html,
 			preload: this.preload,
+			viewsRoot: this.viewsRoot,
 			// frame: this.frame,
 			renderer: this.renderer,
 			frame: {
@@ -232,9 +242,8 @@ export class BrowserWindow<T extends RPCWithTransport = RPCWithTransport> {
 			navigationRules: this.navigationRules,
 			sandbox: this.sandbox,
 			contentBlocker: contentBlocker ?? false,
+			startPassthrough: this.passthrough,
 		});
-
-		console.log("setting webviewId: ", webview.id);
 
 		this.webviewId = webview.id;
 	}

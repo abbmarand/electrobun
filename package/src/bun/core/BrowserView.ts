@@ -22,6 +22,7 @@ export type BrowserViewOptions<T = undefined> = {
 	url: string | null;
 	html: string | null;
 	preload: string | null;
+	viewsRoot: string | null;
 	renderer: "native" | "cef";
 	partition: string | null;
 	frame: {
@@ -56,6 +57,7 @@ const defaultOptions: Partial<BrowserViewOptions> = {
 	url: null,
 	html: null,
 	preload: null,
+	viewsRoot: null,
 	renderer: buildConfig.defaultRenderer,
 	frame: {
 		x: 0,
@@ -77,6 +79,7 @@ export class BrowserView<T extends RPCWithTransport = RPCWithTransport> {
 	url: string | null = null;
 	html: string | null = null;
 	preload: string | null = null;
+	viewsRoot: string | null = null;
 	partition: string | null = null;
 	autoResize: boolean = true;
 	frame: {
@@ -109,6 +112,7 @@ export class BrowserView<T extends RPCWithTransport = RPCWithTransport> {
 		this.url = options.url || defaultOptions.url || null;
 		this.html = options.html || defaultOptions.html || null;
 		this.preload = options.preload || defaultOptions.preload || null;
+		this.viewsRoot = options.viewsRoot || defaultOptions.viewsRoot || null;
 		this.frame = {
 			x: options.frame?.x ?? defaultOptions.frame!.x,
 			y: options.frame?.y ?? defaultOptions.frame!.y,
@@ -134,22 +138,11 @@ export class BrowserView<T extends RPCWithTransport = RPCWithTransport> {
 		BrowserViewMap[this.id] = this;
 		this.ptr = this.init() as Pointer;
 
-		// If HTML content was provided, load it after webview creation
+		// If HTML content was provided, load it after webview creation.
 		if (this.html) {
-			console.log(
-				`DEBUG: BrowserView constructor triggering loadHTML for webview ${this.id}`,
-			);
-			// Small delay to ensure webview is ready
 			setTimeout(() => {
-				console.log(
-					`DEBUG: BrowserView delayed loadHTML for webview ${this.id}`,
-				);
 				this.loadHTML(this.html!);
-			}, 100); // Back to 100ms since we fixed the race condition
-		} else {
-			console.log(
-				`DEBUG: BrowserView constructor - no HTML provided for webview ${this.id}`,
-			);
+			}, 100);
 		}
 	}
 
@@ -170,6 +163,7 @@ export class BrowserView<T extends RPCWithTransport = RPCWithTransport> {
 			url: this.html ? null : this.url,
 			html: this.html,
 			preload: this.preload,
+			viewsRoot: this.viewsRoot,
 			frame: {
 				width: this.frame.width,
 				height: this.frame.height,
