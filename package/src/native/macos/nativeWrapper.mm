@@ -589,18 +589,23 @@ NSUUID *UUIDFromString(NSString *string) {
     return [[NSUUID alloc] initWithUUIDBytes:uuid];
 }
 
+static NSMutableDictionary<NSUUID*, WKWebsiteDataStore*> *dataStoreCache = nil;
+
 WKWebsiteDataStore* createDataStoreForPartition(const char* partitionIdentifier) {
     NSString *identifier = [NSString stringWithUTF8String:partitionIdentifier];
     if ([identifier hasPrefix:@"persist:"]) {
-        // persistent
         identifier = [identifier substringFromIndex:8];
         NSUUID *uuid = UUIDFromString(identifier);
         if (uuid) {
-            // dataStoreForIdentifier is only available on macOS 14.0+
             if (@available(macOS 14.0, *)) {
-                return [WKWebsiteDataStore dataStoreForIdentifier:uuid];
+                if (!dataStoreCache) dataStoreCache = [NSMutableDictionary dictionary];
+                WKWebsiteDataStore *store = dataStoreCache[uuid];
+                if (!store) {
+                    store = [WKWebsiteDataStore dataStoreForIdentifier:uuid];
+                    dataStoreCache[uuid] = store;
+                }
+                return store;
             } else {
-                // Fallback to default data store on older macOS versions
                 NSLog(@"[Session] Partition-specific data stores require macOS 14.0+, using default store");
                 return [WKWebsiteDataStore defaultDataStore];
             }
@@ -609,7 +614,6 @@ WKWebsiteDataStore* createDataStoreForPartition(const char* partitionIdentifier)
             return [WKWebsiteDataStore defaultDataStore];
         }
     } else {
-        // ephemeral
         return [WKWebsiteDataStore nonPersistentDataStore];
     }
 }
@@ -2040,14 +2044,65 @@ static NSMutableURLRequest *addChromeClientHints(NSURLRequest *original) {
             return;
         }
 
-        // Inject Sec-CH-UA headers for Google domains so the server
-        // recognises WKWebView as a Chromium browser and serves the modern UI.
-        if (isGoogleDomain(newURL.host)
-            && ![navigationAction.request valueForHTTPHeaderField:@"Sec-CH-UA"]
-            && navigationAction.targetFrame.isMainFrame) {
-            webView.customUserAgent = @"Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/134.0.0.0 Safari/537.36";
+        // For main-frame navigations that haven't been processed yet,
+        // cancel, inject stored cookies (+ Chrome client hints for Google),
+        // and re-issue the request. The custom header prevents re-entry.
+        if (navigationAction.targetFrame.isMainFrame
+            && ![navigationAction.request valueForHTTPHeaderField:@"X-EB-CI"]) {
+
+            BOOL isGoogle = isGoogleDomain(newURL.host);
+            if (isGoogle) {
+                webView.customUserAgent = @"Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/134.0.0.0 Safari/537.36";
+            }
+
             decisionHandler(WKNavigationActionPolicyCancel);
-            [webView loadRequest:addChromeClientHints(navigationAction.request)];
+
+            WKHTTPCookieStore *cookieStore = webView.configuration.websiteDataStore.httpCookieStore;
+            NSURLRequest *origRequest = navigationAction.request;
+
+            [cookieStore getAllCookies:^(NSArray<NSHTTPCookie *> *cookies) {
+                NSMutableURLRequest *req = [origRequest mutableCopy];
+
+                // Inject matching cookies
+                NSURL *url = req.URL;
+                NSMutableArray *matchingCookies = [NSMutableArray array];
+                for (NSHTTPCookie *cookie in cookies) {
+                    NSString *domain = cookie.domain;
+                    NSString *host = url.host;
+                    BOOL domainMatch = NO;
+                    if ([domain hasPrefix:@"."]) {
+                        domainMatch = [host hasSuffix:domain] || [host isEqualToString:[domain substringFromIndex:1]];
+                    } else {
+                        domainMatch = [host isEqualToString:domain];
+                    }
+                    if (domainMatch) {
+                        NSString *cookiePath = cookie.path ?: @"/";
+                        NSString *urlPath = url.path.length > 0 ? url.path : @"/";
+                        if ([urlPath hasPrefix:cookiePath]) {
+                            [matchingCookies addObject:cookie];
+                        }
+                    }
+                }
+                if (matchingCookies.count > 0) {
+                    NSDictionary *headers = [NSHTTPCookie requestHeaderFieldsWithCookies:matchingCookies];
+                    for (NSString *key in headers) {
+                        [req setValue:headers[key] forHTTPHeaderField:key];
+                    }
+                }
+
+                if (isGoogle) {
+                    NSMutableURLRequest *withHints = [addChromeClientHints(req) mutableCopy];
+                    [withHints setValue:@"1" forHTTPHeaderField:@"X-EB-CI"];
+                    dispatch_async(dispatch_get_main_queue(), ^{
+                        [webView loadRequest:withHints];
+                    });
+                } else {
+                    [req setValue:@"1" forHTTPHeaderField:@"X-EB-CI"];
+                    dispatch_async(dispatch_get_main_queue(), ^{
+                        [webView loadRequest:req];
+                    });
+                }
+            }];
             return;
         }
 
@@ -2780,7 +2835,39 @@ runOpenPanelWithParameters:(WKOpenPanelParameters *)parameters
                 }
                 NSURLRequest *base = [NSURLRequest requestWithURL:url];
                 NSURLRequest *request = isGoogle ? addChromeClientHints(base) : base;
-                [self.webView loadRequest:request];
+
+                WKHTTPCookieStore *cookieStore = self.webView.configuration.websiteDataStore.httpCookieStore;
+                [cookieStore getAllCookies:^(NSArray<NSHTTPCookie *> *cookies) {
+                    NSMutableArray *matchingCookies = [NSMutableArray array];
+                    for (NSHTTPCookie *cookie in cookies) {
+                        NSString *domain = cookie.domain;
+                        NSString *host = url.host;
+                        BOOL domainMatch = NO;
+                        if ([domain hasPrefix:@"."]) {
+                            domainMatch = [host hasSuffix:domain] || [host isEqualToString:[domain substringFromIndex:1]];
+                        } else {
+                            domainMatch = [host isEqualToString:domain];
+                        }
+                        if (domainMatch) {
+                            NSString *cookiePath = cookie.path ?: @"/";
+                            NSString *urlPath = url.path.length > 0 ? url.path : @"/";
+                            if ([urlPath hasPrefix:cookiePath]) {
+                                [matchingCookies addObject:cookie];
+                            }
+                        }
+                    }
+                    if (matchingCookies.count > 0) {
+                        NSDictionary *headers = [NSHTTPCookie requestHeaderFieldsWithCookies:matchingCookies];
+                        NSMutableURLRequest *mutableRequest = [request mutableCopy];
+                        for (NSString *key in headers) {
+                            [mutableRequest setValue:headers[key] forHTTPHeaderField:key];
+                        }
+                        NSLog(@"[cookies] Injected %lu cookies into request for %@", (unsigned long)matchingCookies.count, url.host);
+                        [self.webView loadRequest:mutableRequest];
+                    } else {
+                        [self.webView loadRequest:request];
+                    }
+                }];
             }
         });
     }
@@ -9026,6 +9113,11 @@ extern "C" bool sessionSetCookie(const char* partitionIdentifier, const char* co
     // Secure
     if ([cookieDict[@"secure"] boolValue]) {
         properties[NSHTTPCookieSecure] = @"TRUE";
+    }
+
+    // HttpOnly
+    if ([cookieDict[@"httpOnly"] boolValue]) {
+        properties[@"HttpOnly"] = @"TRUE";
     }
 
     // Expiration date

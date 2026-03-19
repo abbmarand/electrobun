@@ -2277,11 +2277,23 @@ Categories=Utility;Application;
 
 		// copy native wrapper dynamic library
 		if (targetOS === "macos") {
-			const nativeWrapperMacosSource = targetPaths.NATIVE_WRAPPER_MACOS;
+			const localBuild = join(ELECTROBUN_DEP_PATH, "src", "native", "build", "libNativeWrapper.dylib");
+			const distSource = targetPaths.NATIVE_WRAPPER_MACOS;
+			let nativeWrapperMacosSource = distSource;
+			if (existsSync(localBuild)) {
+				const localMtime = statSync(localBuild).mtimeMs;
+				const distMtime = existsSync(distSource) ? statSync(distSource).mtimeMs : 0;
+				if (localMtime > distMtime) {
+					nativeWrapperMacosSource = localBuild;
+					console.log(`[native-wrapper] Using local build (newer than dist): ${localBuild}`);
+				}
+			}
 			const nativeWrapperMacosDestination = join(
 				appBundleMacOSPath,
 				"libNativeWrapper.dylib",
 			);
+			const srcStat = statSync(nativeWrapperMacosSource);
+			console.log(`[native-wrapper] Copying ${nativeWrapperMacosSource} (${srcStat.size} bytes, mtime ${new Date(srcStat.mtimeMs).toISOString()})`);
 			cpSync(nativeWrapperMacosSource, nativeWrapperMacosDestination, {
 				dereference: true,
 			});
@@ -3797,6 +3809,30 @@ Categories=Utility;Application;
 		}
 
 		if (OS === "macos" || OS === "linux") {
+			if (OS === "macos") {
+				const currentLibPath = join(bundleExecPath, "libNativeWrapper.dylib");
+				const localBuild = join(ELECTROBUN_DEP_PATH, "src", "native", "build", "libNativeWrapper.dylib");
+				const distSource = getPlatformPaths("macos", ARCH).NATIVE_WRAPPER_MACOS;
+				let freshSource: string | null = null;
+				if (existsSync(localBuild)) {
+					const localMtime = statSync(localBuild).mtimeMs;
+					const currentMtime = existsSync(currentLibPath) ? statSync(currentLibPath).mtimeMs : 0;
+					if (localMtime > currentMtime) {
+						freshSource = localBuild;
+					}
+				}
+				if (!freshSource && existsSync(distSource)) {
+					const distMtime = statSync(distSource).mtimeMs;
+					const currentMtime = existsSync(currentLibPath) ? statSync(currentLibPath).mtimeMs : 0;
+					if (distMtime > currentMtime) {
+						freshSource = distSource;
+					}
+				}
+				if (freshSource) {
+					cpSync(freshSource, currentLibPath, { dereference: true });
+					console.log(`[native-wrapper] Dev: refreshed from ${freshSource}`);
+				}
+			}
 			// For Linux dev mode, update libNativeWrapper.so based on bundleCEF setting
 			if (OS === "linux") {
 				const currentLibPath = join(bundleExecPath, "libNativeWrapper.so");

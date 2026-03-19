@@ -43,6 +43,9 @@ export type WindowOptionsType<T = undefined> = {
 	toolbar?: boolean;
 	// Enable native content blocker (ad blocking) for the webview
 	contentBlocker?: boolean;
+	// Partition for the webview's data store. Use "persist:<name>" for a named persistent
+	// store, or any other string for an ephemeral (in-memory) store.
+	partition?: string;
 };
 
 const defaultOptions: WindowOptionsType = {
@@ -169,6 +172,7 @@ export class BrowserWindow<T extends RPCWithTransport = RPCWithTransport> {
 		toolbar,
 		hidden,
 		contentBlocker,
+		partition,
 	}: Partial<WindowOptionsType<T>>) {
 		this.ptr = ffi.request.createWindow({
 			id: this.id,
@@ -243,6 +247,7 @@ export class BrowserWindow<T extends RPCWithTransport = RPCWithTransport> {
 			sandbox: this.sandbox,
 			contentBlocker: contentBlocker ?? false,
 			startPassthrough: this.passthrough,
+			partition: partition || null,
 		});
 
 		this.webviewId = webview.id;

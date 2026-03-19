@@ -631,6 +631,11 @@ async function copyToDist() {
 	// Native code and frameworks
 	if (OS === "macos") {
 		await $`cp -R src/native/build/libNativeWrapper.dylib dist/libNativeWrapper.dylib`;
+		// Also copy to platform-specific dist so `electrobun dev` picks up local builds
+		const platformDist = `dist-${OS}-${ARCH}`;
+		if (existsSync(platformDist)) {
+			await $`cp -R src/native/build/libNativeWrapper.dylib ${platformDist}/libNativeWrapper.dylib`;
+		}
 		// Copy CEF to cef/ subdirectory for consistent organization
 		await $`mkdir -p dist/cef`;
 		await $`cp -R vendors/cef/Release/Chromium\ Embedded\ Framework.framework dist/cef/Chromium\ Embedded\ Framework.framework`;
