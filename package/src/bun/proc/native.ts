@@ -2484,6 +2484,8 @@ const webviewEventHandler = (id: number, eventName: string, detail: string) => {
 		"load-started": "loadStarted",
 		"load-committed": "loadCommitted",
 		"load-finished": "loadFinished",
+		"page-title-updated": "pageTitleUpdated",
+		"favicon-updated": "faviconUpdated",
 	};
 
 	const mappedName = eventMap[eventName];

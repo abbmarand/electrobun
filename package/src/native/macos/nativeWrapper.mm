@@ -825,6 +825,7 @@ static NSMutableDictionary<NSNumber *, AbstractView *> *globalAbstractViews = ni
 // ----------------------- Webview Implementations -----------------------
 @interface WKWebViewImpl : AbstractView
     @property (nonatomic, strong) WKWebView *webView;
+    @property (nonatomic, assign) WebviewEventHandler zigEventHandler;
 
     - (instancetype)initWithWebviewId:(uint32_t)webviewId
                             window:(NSWindow *)window
@@ -2134,6 +2135,21 @@ static NSMutableURLRequest *addChromeClientHints(NSURLRequest *original) {
             self.zigEventHandler(self.webviewId, strdup("did-navigate"), strdup(urlString.UTF8String));
         }
         [self detectAndApplyThemeColor:webView];
+
+        if (self.zigEventHandler) {
+            uint32_t wid = self.webviewId;
+            WebviewEventHandler handler = self.zigEventHandler;
+            [webView evaluateJavaScript:
+                @"(function(){"
+                 "var l=document.querySelectorAll('link[rel~=\"icon\"],link[rel=\"shortcut icon\"]');"
+                 "return l.length?l[l.length-1].href:'';"
+                 "})()"
+                completionHandler:^(id result, NSError *error) {
+                    if (!error && result && [result isKindOfClass:[NSString class]] && [result length] > 0) {
+                        handler(wid, strdup("favicon-updated"), strdup([result UTF8String]));
+                    }
+                }];
+        }
     }
 
     - (void)webView:(WKWebView *)webView didCommitNavigation:(WKNavigation *)navigation {
@@ -2537,6 +2553,7 @@ runOpenPanelWithParameters:(WKOpenPanelParameters *)parameters
         if (self) {
             self.webviewId = webviewId;
             self.isSandboxed = sandbox;
+            self.zigEventHandler = webviewEventHandler;
 
             // TODO: rewrite this so we can return a reference to the AbstractRenderer and then call
             // init from zig after the handle is added to the webviewMap then we don't need this async stuff
@@ -2934,6 +2951,9 @@ runOpenPanelWithParameters:(WKOpenPanelParameters *)parameters
                             [self.webView.window setTitle:title];
                         }
                     });
+                    if (self.zigEventHandler) {
+                        self.zigEventHandler(self.webviewId, strdup("page-title-updated"), strdup(title.UTF8String));
+                    }
                 }
             } else if ([keyPath isEqualToString:@"fullscreenState"]) {                
                 id newValue = change[NSKeyValueChangeNewKey];                                                
@@ -4730,6 +4750,18 @@ public:
     void OnTitleChange(CefRefPtr<CefBrowser> browser, const CefString& title) override {
         if (browser && browser->GetMainFrame()) {
             last_title_ = title.ToString();
+            if (webview_event_handler_ && !last_title_.empty()) {
+                webview_event_handler_(webview_id_, strdup("page-title-updated"), strdup(last_title_.c_str()));
+            }
+        }
+    }
+
+    void OnFaviconURLChange(CefRefPtr<CefBrowser> browser, const std::vector<CefString>& icon_urls) override {
+        if (webview_event_handler_ && !icon_urls.empty()) {
+            std::string url = icon_urls[0].ToString();
+            if (!url.empty()) {
+                webview_event_handler_(webview_id_, strdup("favicon-updated"), strdup(url.c_str()));
+            }
         }
     }
 

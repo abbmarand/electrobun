@@ -857,7 +857,8 @@ class ElectrobunClient : public CefClient,
                         public CefPermissionHandler,
                         public CefDialogHandler,
                         public CefDownloadHandler,
-                        public CefRenderHandler {
+                        public CefRenderHandler,
+                        public CefDisplayHandler {
 private:
     uint32_t webview_id_;
     HandlePostMessage event_bridge_handler_;
@@ -988,6 +989,28 @@ public:
 
     virtual CefRefPtr<CefRequestHandler> GetRequestHandler() override {
         return this;
+    }
+
+    virtual CefRefPtr<CefDisplayHandler> GetDisplayHandler() override {
+        return this;
+    }
+
+    void OnTitleChange(CefRefPtr<CefBrowser> browser, const CefString& title) override {
+        if (browser && browser->GetMainFrame() && webview_event_handler_) {
+            std::string titleStr = title.ToString();
+            if (!titleStr.empty()) {
+                webview_event_handler_(webview_id_, strdup("page-title-updated"), strdup(titleStr.c_str()));
+            }
+        }
+    }
+
+    void OnFaviconURLChange(CefRefPtr<CefBrowser> browser, const std::vector<CefString>& icon_urls) override {
+        if (webview_event_handler_ && !icon_urls.empty()) {
+            std::string url = icon_urls[0].ToString();
+            if (!url.empty()) {
+                webview_event_handler_(webview_id_, strdup("favicon-updated"), strdup(url.c_str()));
+            }
+        }
     }
 
     virtual CefRefPtr<CefContextMenuHandler> GetContextMenuHandler() override {
@@ -2427,6 +2450,8 @@ public:
         if (eventHandler) {
             g_signal_connect(webview, "load-changed", G_CALLBACK(onLoadChanged), this);
             g_signal_connect(webview, "load-failed", G_CALLBACK(onLoadFailed), this);
+            g_signal_connect(webview, "notify::title", G_CALLBACK(onTitleChanged), this);
+            g_signal_connect(webview, "notify::favicon", G_CALLBACK(onFaviconChanged), this);
         }
         
         // Enable context menu (right-click menu)
@@ -2974,7 +2999,43 @@ public:
         }
         return FALSE;
     }
-    
+
+    static void onTitleChanged(WebKitWebView* webview, GParamSpec* pspec, gpointer user_data) {
+        WebKitWebViewImpl* impl = static_cast<WebKitWebViewImpl*>(user_data);
+        if (impl->eventHandler) {
+            const char* title = webkit_web_view_get_title(WEBKIT_WEB_VIEW(webview));
+            if (title && strlen(title) > 0) {
+                impl->eventHandler(impl->webviewId, strdup("page-title-updated"), strdup(title));
+            }
+        }
+    }
+
+    static void onFaviconJsFinished(GObject* object, GAsyncResult* result, gpointer user_data) {
+        WebKitWebViewImpl* impl = static_cast<WebKitWebViewImpl*>(user_data);
+        WebKitJavascriptResult* jsResult = webkit_web_view_run_javascript_finish(
+            WEBKIT_WEB_VIEW(object), result, nullptr);
+        if (jsResult) {
+            JSCValue* value = webkit_javascript_result_get_js_value(jsResult);
+            if (jsc_value_is_string(value)) {
+                char* str = jsc_value_to_string(value);
+                if (str && strlen(str) > 0 && impl->eventHandler) {
+                    impl->eventHandler(impl->webviewId, strdup("favicon-updated"), strdup(str));
+                }
+                g_free(str);
+            }
+            webkit_javascript_result_unref(jsResult);
+        }
+    }
+
+    static void onFaviconChanged(WebKitWebView* webview, GParamSpec* pspec, gpointer user_data) {
+        webkit_web_view_run_javascript(webview,
+            "(function(){"
+            "var l=document.querySelectorAll('link[rel~=\"icon\"],link[rel=\"shortcut icon\"]');"
+            "return l.length?l[l.length-1].href:'';"
+            "})()",
+            nullptr, onFaviconJsFinished, user_data);
+    }
+
     static gboolean onContextMenu(WebKitWebView* webview, WebKitContextMenu* context_menu, GdkEvent* event, WebKitHitTestResult* hit_test_result, gpointer user_data) {
         // Allow the default context menu to be shown
         return FALSE;

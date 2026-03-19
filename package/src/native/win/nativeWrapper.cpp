@@ -1899,10 +1899,21 @@ public:
         }
     }
 
-    // Track page title for DevTools target matching
     void OnTitleChange(CefRefPtr<CefBrowser> browser, const CefString& title) override {
         if (browser && browser->GetMainFrame()) {
             last_title_ = title.ToString();
+            if (webview_event_handler_ && !last_title_.empty()) {
+                webview_event_handler_(webview_id_, _strdup("page-title-updated"), _strdup(last_title_.c_str()));
+            }
+        }
+    }
+
+    void OnFaviconURLChange(CefRefPtr<CefBrowser> browser, const std::vector<CefString>& icon_urls) override {
+        if (webview_event_handler_ && !icon_urls.empty()) {
+            std::string url = icon_urls[0].ToString();
+            if (!url.empty()) {
+                webview_event_handler_(webview_id_, _strdup("favicon-updated"), _strdup(url.c_str()));
+            }
         }
     }
 
@@ -6226,6 +6237,57 @@ static std::shared_ptr<WebView2View> createWebView2View(uint32_t webviewId,
                                             capturedHandler(capturedWebviewId, _strdup("did-navigate"), _strdup(eventData.c_str()));
                                         }
 
+                                        return S_OK;
+                                    }).Get(),
+                                nullptr);
+
+                            webview->add_DocumentTitleChanged(
+                                Callback<ICoreWebView2DocumentTitleChangedEventHandler>(
+                                    [capturedWebviewId, capturedHandler](ICoreWebView2* sender, IUnknown* args) -> HRESULT {
+                                        if (!capturedHandler) return S_OK;
+                                        wchar_t* titleWStr = nullptr;
+                                        sender->get_DocumentTitle(&titleWStr);
+                                        if (titleWStr) {
+                                            int size = WideCharToMultiByte(CP_UTF8, 0, titleWStr, -1, nullptr, 0, nullptr, nullptr);
+                                            if (size > 0) {
+                                                std::string title(size - 1, '\0');
+                                                WideCharToMultiByte(CP_UTF8, 0, titleWStr, -1, &title[0], size, nullptr, nullptr);
+                                                if (!title.empty()) {
+                                                    capturedHandler(capturedWebviewId, _strdup("page-title-updated"), _strdup(title.c_str()));
+                                                }
+                                            }
+                                            CoTaskMemFree(titleWStr);
+                                        }
+                                        return S_OK;
+                                    }).Get(),
+                                nullptr);
+
+                            webview->add_NavigationCompleted(
+                                Callback<ICoreWebView2NavigationCompletedEventHandler>(
+                                    [capturedWebviewId, capturedHandler](ICoreWebView2* sender, ICoreWebView2NavigationCompletedEventArgs* args) -> HRESULT {
+                                        if (!capturedHandler) return S_OK;
+                                        std::wstring js = L"(function(){"
+                                            L"var l=document.querySelectorAll('link[rel~=\"icon\"],link[rel=\"shortcut icon\"]');"
+                                            L"return l.length?l[l.length-1].href:'';"
+                                            L"})()";
+                                        sender->ExecuteScript(js.c_str(),
+                                            Callback<ICoreWebView2ExecuteScriptCompletedHandler>(
+                                                [capturedWebviewId, capturedHandler](HRESULT hr, LPCWSTR resultJson) -> HRESULT {
+                                                    if (SUCCEEDED(hr) && resultJson) {
+                                                        int size = WideCharToMultiByte(CP_UTF8, 0, resultJson, -1, nullptr, 0, nullptr, nullptr);
+                                                        if (size > 2) {
+                                                            std::string result(size - 1, '\0');
+                                                            WideCharToMultiByte(CP_UTF8, 0, resultJson, -1, &result[0], size, nullptr, nullptr);
+                                                            if (result.size() > 2 && result.front() == '"' && result.back() == '"') {
+                                                                result = result.substr(1, result.size() - 2);
+                                                            }
+                                                            if (!result.empty() && result != "null") {
+                                                                capturedHandler(capturedWebviewId, _strdup("favicon-updated"), _strdup(result.c_str()));
+                                                            }
+                                                        }
+                                                    }
+                                                    return S_OK;
+                                                }).Get());
                                         return S_OK;
                                     }).Get(),
                                 nullptr);

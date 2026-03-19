@@ -36,4 +36,8 @@ export default {
 		new ElectrobunEvent<DetailData, {}>("download-completed", data),
 	downloadFailed: (data: DetailData) =>
 		new ElectrobunEvent<DetailData, {}>("download-failed", data),
+	pageTitleUpdated: (data: DetailData) =>
+		new ElectrobunEvent<DetailData, {}>("page-title-updated", data),
+	faviconUpdated: (data: DetailData) =>
+		new ElectrobunEvent<DetailData, {}>("favicon-updated", data),
 };
