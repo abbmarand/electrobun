@@ -38,6 +38,8 @@ export type WindowOptionsType<T = undefined> = {
 	sandbox: boolean;
 	// toolbar: when true, adds a native NSToolbar with unified style (vibrancy/blur)
 	toolbar?: boolean;
+	// Enable native content blocker (ad blocking) for the webview
+	contentBlocker?: boolean;
 };
 
 const defaultOptions: WindowOptionsType = {
@@ -157,6 +159,7 @@ export class BrowserWindow<T extends RPCWithTransport = RPCWithTransport> {
 		transparent,
 		toolbar,
 		hidden,
+		contentBlocker,
 	}: Partial<WindowOptionsType<T>>) {
 		this.ptr = ffi.request.createWindow({
 			id: this.id,
@@ -228,6 +231,7 @@ export class BrowserWindow<T extends RPCWithTransport = RPCWithTransport> {
 			windowId: this.id,
 			navigationRules: this.navigationRules,
 			sandbox: this.sandbox,
+			contentBlocker: contentBlocker ?? false,
 		});
 
 		console.log("setting webviewId: ", webview.id);

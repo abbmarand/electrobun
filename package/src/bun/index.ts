@@ -32,7 +32,7 @@ import webgpu from "./webgpuAdapter";
 import * as three from "three";
 import * as babylon from "@babylonjs/core";
 import type { ElectrobunConfig } from "./ElectrobunConfig";
-import { GlobalShortcut, Screen, Session, WGPUBridge } from "./proc/native";
+import { GlobalShortcut, Screen, Session, WGPUBridge, ffi } from "./proc/native";
 import type {
 	Display,
 	Rectangle,
@@ -44,6 +44,15 @@ import type {
 	ApplicationMenuItemConfig,
 } from "./proc/native";
 import { BuildConfig, type BuildConfigType } from "./core/BuildConfig";
+
+const ContentBlocker = {
+	loadRules(jsonData: string) {
+		ffi.request.loadContentBlockerRules({ jsonData });
+	},
+	getCompiledCount(): number {
+		return ffi.request.getContentBlockerCompiledCount();
+	},
+};
 
 // Named Exports
 export {
@@ -93,6 +102,7 @@ export {
 	Session,
 	WGPUBridge,
 	BuildConfig,
+	ContentBlocker,
 };
 
 // Default Export
@@ -111,6 +121,7 @@ const Electrobun = {
 	Session,
 	WGPUBridge,
 	BuildConfig,
+	ContentBlocker,
 	events: electobunEventEmmitter,
 	PATHS,
 	Socket,

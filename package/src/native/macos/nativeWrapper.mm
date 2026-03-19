@@ -70,6 +70,7 @@ static bool wgpuDebugEnabled() {
 #include "../shared/preload_script.h"
 #include "../shared/webview_storage.h"
 #include "../shared/navigation_rules.h"
+#include "../shared/content_blocker.h"
 #include "../shared/thread_safe_map.h"
 #include "../shared/shutdown_guard.h"
 #include "../shared/ffi_helpers.h"
@@ -708,6 +709,7 @@ void releaseObjCObject(id objcObject) {
     @property (nonatomic, strong) CALayer *storedLayerMask;
     @property (nonatomic, strong) NSArray<NSString *> *navigationRules;
     @property (atomic, assign) uint32_t resizeGeneration;
+    @property (nonatomic, assign) BOOL contentBlockerEnabled;
 
     - (void)loadURL:(const char *)urlString;
     - (void)loadHTML:(const char *)htmlString;
@@ -2098,6 +2100,7 @@ static void schedulePendingResizeDrain() {
 
     - (void)webView:(WKWebView *)webView didFinishNavigation:(WKNavigation *)navigation {
         NSString *urlString = webView.URL.absoluteString ?: @"";
+        NSLog(@"[Nav] webview %u didFinishNavigation: %@", self.webviewId, urlString);
         if (urlString.length > 0) {
             self.zigEventHandler(self.webviewId, strdup("did-navigate"), strdup(urlString.UTF8String));
         }
@@ -2106,6 +2109,7 @@ static void schedulePendingResizeDrain() {
 
     - (void)webView:(WKWebView *)webView didCommitNavigation:(WKNavigation *)navigation {
         NSString *urlString = webView.URL.absoluteString ?: @"";
+        NSLog(@"[Nav] webview %u didCommitNavigation: %@", self.webviewId, urlString);
         if (urlString.length > 0) {
             self.zigEventHandler(self.webviewId, strdup("did-commit-navigation"), strdup(urlString.UTF8String));
         }
@@ -2113,6 +2117,22 @@ static void schedulePendingResizeDrain() {
             dispatch_get_main_queue(), ^{
                 [self detectAndApplyThemeColor:webView];
             });
+    }
+
+    - (void)webView:(WKWebView *)webView didFailNavigation:(WKNavigation *)navigation withError:(NSError *)error {
+        NSLog(@"[Nav] webview %u didFailNavigation: %@ (code %ld)", self.webviewId, error.localizedDescription, (long)error.code);
+    }
+
+    - (void)webView:(WKWebView *)webView didFailProvisionalNavigation:(WKNavigation *)navigation withError:(NSError *)error {
+        NSLog(@"[Nav] webview %u didFailProvisionalNavigation: %@ (code %ld)", self.webviewId, error.localizedDescription, (long)error.code);
+    }
+
+    - (void)webViewWebContentProcessDidTerminate:(WKWebView *)webView {
+        NSLog(@"[Nav] webview %u WEB CONTENT PROCESS TERMINATED", self.webviewId);
+    }
+
+    - (void)webView:(WKWebView *)webView didStartProvisionalNavigation:(WKNavigation *)navigation {
+        NSLog(@"[Nav] webview %u didStartProvisionalNavigation: %@", self.webviewId, webView.URL.absoluteString);
     }
 
     // Called when navigationAction policy returns .download
@@ -9076,4 +9096,146 @@ extern "C" bool isWindowVisibleOnAllWorkspaces(NSWindow *window) {
         result = ([window collectionBehavior] & NSWindowCollectionBehaviorCanJoinAllSpaces) != 0;
     });
     return result;
+}
+
+// ----------------------- Content Blocker -----------------------
+
+static NSMutableArray<WKContentRuleList *> *g_compiledContentRuleLists = nil;
+static dispatch_queue_t g_contentBlockerQueue = dispatch_queue_create("electrobun.contentblocker", DISPATCH_QUEUE_SERIAL);
+
+static void addCompiledRuleList(WKContentRuleList *list) {
+    dispatch_sync(g_contentBlockerQueue, ^{
+        if (!g_compiledContentRuleLists) {
+            g_compiledContentRuleLists = [NSMutableArray new];
+        }
+        [g_compiledContentRuleLists addObject:list];
+        electrobun::ContentBlockerRuleStore::instance().setReady(true);
+    });
+}
+
+static void pushRuleListToActiveWebviews(WKContentRuleList *list) {
+    if (!globalAbstractViews) return;
+    for (NSNumber *key in globalAbstractViews) {
+        AbstractView *view = globalAbstractViews[key];
+        if (!view.contentBlockerEnabled) continue;
+        if (![view respondsToSelector:@selector(webView)]) continue;
+        WKWebView *webView = [(id)view webView];
+        if (!webView) continue;
+        [webView.configuration.userContentController addContentRuleList:list];
+        NSLog(@"[ContentBlocker] Pushed rule list to webview %u", view.webviewId);
+    }
+}
+
+extern "C" uint32_t getContentBlockerCompiledCount() {
+    __block uint32_t count = 0;
+    dispatch_sync(g_contentBlockerQueue, ^{
+        count = g_compiledContentRuleLists ? (uint32_t)g_compiledContentRuleLists.count : 0;
+    });
+    return count;
+}
+
+extern "C" void loadContentBlockerRules(const char* jsonData, uint32_t jsonLen) {
+    if (!jsonData || jsonLen == 0) {
+        NSLog(@"[ContentBlocker] loadRules called with empty data, skipping");
+        return;
+    }
+
+    NSString *json = [[NSString alloc] initWithBytes:jsonData length:jsonLen encoding:NSUTF8StringEncoding];
+    if (!json) {
+        NSLog(@"[ContentBlocker] Failed to create NSString from JSON data (%u bytes)", jsonLen);
+        return;
+    }
+
+    // Append ignore-previous-rules for document type to prevent blocking main page navigation
+    NSString *trimmed = [json stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceAndNewlineCharacterSet]];
+    if ([trimmed hasSuffix:@"]"]) {
+        json = [NSString stringWithFormat:@"%@,{\"trigger\":{\"url-filter\":\".*\",\"resource-type\":[\"document\"]},\"action\":{\"type\":\"ignore-previous-rules\"}}]",
+                [trimmed substringToIndex:trimmed.length - 1]];
+    }
+
+    static NSUInteger chunkIndex = 0;
+    NSUInteger thisChunk = chunkIndex++;
+    NSString *identifier = [NSString stringWithFormat:@"electrobun_cb_v2_%lu", (unsigned long)thisChunk];
+
+    NSLog(@"[ContentBlocker] Loading chunk %lu (%u bytes)...", (unsigned long)thisChunk, jsonLen);
+
+    dispatch_async(dispatch_get_main_queue(), ^{
+        // Try cache first — lookUp returns a previously compiled list instantly
+        [WKContentRuleListStore.defaultStore
+            lookUpContentRuleListForIdentifier:identifier
+                            completionHandler:^(WKContentRuleList *cachedList, NSError *lookupError) {
+            if (cachedList) {
+                NSLog(@"[ContentBlocker] Cache HIT for chunk %lu", (unsigned long)thisChunk);
+                addCompiledRuleList(cachedList);
+                __block uint32_t total = 0;
+                dispatch_sync(g_contentBlockerQueue, ^{
+                    total = (uint32_t)g_compiledContentRuleLists.count;
+                });
+                NSLog(@"[ContentBlocker] Loaded chunk %lu from cache (%u total)", (unsigned long)thisChunk, total);
+                pushRuleListToActiveWebviews(cachedList);
+                return;
+            }
+
+            // Cache miss — compile from JSON
+            NSLog(@"[ContentBlocker] Cache miss for chunk %lu, compiling...", (unsigned long)thisChunk);
+            [WKContentRuleListStore.defaultStore
+                compileContentRuleListForIdentifier:identifier
+                             encodedContentRuleList:json
+                                  completionHandler:^(WKContentRuleList *list, NSError *error) {
+                if (error) {
+                    NSLog(@"[ContentBlocker] FAILED chunk %lu '%@': %@ (code %ld)",
+                          (unsigned long)thisChunk, identifier, error.localizedDescription, (long)error.code);
+                    return;
+                }
+                addCompiledRuleList(list);
+                __block uint32_t total = 0;
+                dispatch_sync(g_contentBlockerQueue, ^{
+                    total = (uint32_t)g_compiledContentRuleLists.count;
+                });
+                NSLog(@"[ContentBlocker] Compiled chunk %lu (%u total)", (unsigned long)thisChunk, total);
+                pushRuleListToActiveWebviews(list);
+            }];
+        }];
+    });
+}
+
+extern "C" void setContentBlockerEnabled(AbstractView *abstractView, bool enabled) {
+    if (!abstractView) {
+        NSLog(@"[ContentBlocker] setEnabled called with null abstractView");
+        return;
+    }
+
+    uint32_t webviewId = abstractView.webviewId;
+    NSLog(@"[ContentBlocker] setEnabled(%s) for webview %u", enabled ? "true" : "false", webviewId);
+
+    dispatch_async(dispatch_get_main_queue(), ^{
+        abstractView.contentBlockerEnabled = enabled;
+
+        if (![abstractView respondsToSelector:@selector(webView)]) {
+            NSLog(@"[ContentBlocker] webview %u has no WKWebView (CEF?), skipping", webviewId);
+            return;
+        }
+        WKWebView *webView = [(id)abstractView webView];
+        if (!webView) {
+            NSLog(@"[ContentBlocker] webview %u WKWebView is nil, skipping", webviewId);
+            return;
+        }
+
+        WKUserContentController *ucc = webView.configuration.userContentController;
+
+        if (enabled) {
+            __block NSArray<WKContentRuleList *> *lists = nil;
+            dispatch_sync(g_contentBlockerQueue, ^{
+                lists = [g_compiledContentRuleLists copy];
+            });
+            for (WKContentRuleList *list in lists) {
+                [ucc addContentRuleList:list];
+            }
+            NSLog(@"[ContentBlocker] Enabled for webview %u with %lu rule lists",
+                  webviewId, (unsigned long)lists.count);
+        } else {
+            [ucc removeAllContentRuleLists];
+            NSLog(@"[ContentBlocker] Disabled for webview %u", webviewId);
+        }
+    });
 }

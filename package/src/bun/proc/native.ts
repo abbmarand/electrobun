@@ -741,6 +741,57 @@ export const native = (() => {
 	}
 })();
 
+// Probe whether the native library exports content blocker symbols before
+// creating FFI wrappers. Bun's dlopen uses lazy binding on macOS — it succeeds
+// even for missing symbols, but calling them triggers SIGTRAP. We use the C
+// library's dlopen(RTLD_NOW) + dlsym to verify symbols exist first.
+const contentBlockerNative = (() => {
+	if (process.platform === "win32") return null;
+	try {
+		const libcName = process.platform === "darwin" ? "libSystem.B.dylib" : "libc.so.6";
+		const libc = dlopen(libcName, {
+			dlopen: { args: [FFIType.cstring, FFIType.i32], returns: FFIType.ptr },
+			dlsym: { args: [FFIType.ptr, FFIType.cstring], returns: FFIType.ptr },
+		});
+
+		const nativeWrapperPath = join(process.cwd(), `libNativeWrapper.${suffix}`);
+		const handle = libc.symbols.dlopen(toCString(nativeWrapperPath), 0x2); // RTLD_NOW
+		if (!handle) {
+			console.log("[ContentBlocker] Could not open native library for symbol probe");
+			libc.close();
+			return null;
+		}
+
+		const sym = libc.symbols.dlsym(handle, toCString("loadContentBlockerRules"));
+		libc.close();
+
+		if (!sym) {
+			console.log("[ContentBlocker] Native content blocker symbols not found — disabled until native rebuild");
+			return null;
+		}
+
+		const lib = dlopen(nativeWrapperPath, {
+			loadContentBlockerRules: {
+				args: [FFIType.cstring, FFIType.u32],
+				returns: FFIType.void,
+			},
+			setContentBlockerEnabled: {
+				args: [FFIType.ptr, FFIType.bool],
+				returns: FFIType.void,
+			},
+			getContentBlockerCompiledCount: {
+				args: [],
+				returns: FFIType.u32,
+			},
+		});
+		console.log("[ContentBlocker] Native content blocker symbols available");
+		return lib;
+	} catch (e) {
+		console.log("[ContentBlocker] Native symbols not available:", e);
+		return null;
+	}
+})();
+
 // const _callbacks: unknown[] = [];
 
 // NOTE: Bun seems to hit limits on args or arg types. eg: trying to send 12 bools results
@@ -1126,6 +1177,7 @@ export const ffi = {
 			sandbox: boolean;
 			startTransparent: boolean;
 			startPassthrough: boolean;
+			contentBlocker: boolean;
 		}): FFIType.ptr => {
 			const {
 				id,
@@ -1145,6 +1197,7 @@ export const ffi = {
 				sandbox,
 				startTransparent,
 				startPassthrough,
+				contentBlocker,
 			} = params;
 
 			const parentWindow = BrowserWindow.getById(windowId);
@@ -1227,6 +1280,10 @@ window.__electrobunBunBridge = window.__electrobunBunBridge || window.webkit?.me
 
 			if (navigationRules) {
 				native.symbols.setWebviewNavigationRules(webviewPtr, toCString(navigationRules));
+			}
+
+			if (contentBlocker && contentBlockerNative) {
+				contentBlockerNative.symbols.setContentBlockerEnabled(webviewPtr, true);
 			}
 
 			return webviewPtr;
@@ -1637,16 +1694,25 @@ window.__electrobunBunBridge = window.__electrobunBunBridge || window.webkit?.me
 				params.size,
 			);
 		},
-
-		// ffifunc: (params: {}): void => {
-		//   const {
-
-		//   } = params;
-
-		//   native.symbols.ffifunc(
-
-		//   );
-		// },
+		loadContentBlockerRules: (params: { jsonData: string }) => {
+			if (!contentBlockerNative) return;
+			const { jsonData } = params;
+			if (!jsonData) return;
+			contentBlockerNative.symbols.loadContentBlockerRules(
+				toCString(jsonData),
+				jsonData.length,
+			);
+		},
+		setContentBlockerEnabled: (params: { id: number; enabled: boolean }) => {
+			if (!contentBlockerNative) return;
+			const webview = BrowserView.getById(params.id);
+			if (!webview?.ptr) return;
+			contentBlockerNative.symbols.setContentBlockerEnabled(webview.ptr, params.enabled);
+		},
+		getContentBlockerCompiledCount: (): number => {
+			if (!contentBlockerNative) return 0;
+			return contentBlockerNative.symbols.getContentBlockerCompiledCount();
+		},
 	},
 	// Internal functions for menu data management
 	internal: {

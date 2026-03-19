@@ -51,6 +51,7 @@
 #include "../shared/preload_script.h"
 #include "../shared/webview_storage.h"
 #include "../shared/navigation_rules.h"
+#include "../shared/content_blocker.h"
 #include "../shared/thread_safe_map.h"
 #include "../shared/shutdown_guard.h"
 #include "../shared/ffi_helpers.h"
@@ -2133,6 +2134,8 @@ public:
 
     // Navigation rules for URL filtering
     std::vector<std::string> navigationRules;
+
+    bool contentBlockerEnabled = false;
 
     AbstractView(uint32_t webviewId) : webviewId(webviewId) {}
     virtual ~AbstractView() {}
@@ -6103,7 +6106,7 @@ void* createX11Window(uint32_t windowId, double x, double y, double width, doubl
 
 ELECTROBUN_EXPORT void* createGTKWindow(uint32_t windowId, double x, double y, double width, double height, const char* title,
                    WindowCloseCallback closeCallback, WindowMoveCallback moveCallback, WindowResizeCallback resizeCallback, WindowFocusCallback focusCallback, WindowBlurCallback blurCallback, WindowKeyHandler keyCallback,
-                   const char* titleBarStyle = nullptr, bool transparent = false) {
+                   const char* titleBarStyle = nullptr, bool transparent = false, uint32_t styleMask = 0) {
     
    
     
@@ -6125,13 +6128,17 @@ ELECTROBUN_EXPORT void* createGTKWindow(uint32_t windowId, double x, double y, d
             gtk_window_move(GTK_WINDOW(window), (int)x, (int)y);
         }
         
-        // Handle titleBarStyle for custom titlebars
         if (titleBarStyle && strcmp(titleBarStyle, "hidden") == 0) {
-            // Remove window decorations for borderless windows
             gtk_window_set_decorated(GTK_WINDOW(window), FALSE);
-            printf("GTK: Created window without decorations (custom titlebar)\n");
         }
-        
+
+        if (styleMask & (1 << 7)) {
+            gtk_window_set_type_hint(GTK_WINDOW(window), GDK_WINDOW_TYPE_HINT_UTILITY);
+            gtk_window_set_skip_taskbar_hint(GTK_WINDOW(window), TRUE);
+            gtk_window_set_skip_pager_hint(GTK_WINDOW(window), TRUE);
+            gtk_window_set_keep_above(GTK_WINDOW(window), TRUE);
+        }
+
         // Handle transparency
         if (transparent) {
             // Enable RGBA visual for transparency
@@ -6160,7 +6167,8 @@ ELECTROBUN_EXPORT void* createGTKWindow(uint32_t windowId, double x, double y, d
             }
         }
         
-        // Create container with callbacks
+        g_object_set_data(G_OBJECT(window), "electrobun-style-mask", GUINT_TO_POINTER(styleMask));
+
         auto container = std::make_shared<ContainerView>(window, windowId, closeCallback, moveCallback, resizeCallback, focusCallback, blurCallback, keyCallback);
       
         {
@@ -6263,12 +6271,10 @@ ELECTROBUN_EXPORT void* createGTKWindow(uint32_t windowId, double x, double y, d
 ELECTROBUN_EXPORT void* createWindowWithFrameAndStyleFromWorker(uint32_t windowId, double x, double y, double width, double height,
                                              uint32_t styleMask, const char* titleBarStyle, bool transparent,
                                              WindowCloseCallback closeCallback, WindowMoveCallback moveCallback, WindowResizeCallback resizeCallback, WindowFocusCallback focusCallback, WindowBlurCallback blurCallback, WindowKeyHandler keyCallback) {
-    // CEF supports custom frames and transparency, GTK doesn't
     if (isCEFAvailable()) {
         return createX11Window(windowId, x, y, width, height, "Window", closeCallback, moveCallback, resizeCallback, focusCallback, blurCallback, keyCallback, titleBarStyle, transparent);
     } else {
-        // Pass titleBarStyle and transparent to GTK window creation
-        return createGTKWindow(windowId, x, y, width, height, "Window", closeCallback, moveCallback, resizeCallback, focusCallback, blurCallback, keyCallback, titleBarStyle, transparent);
+        return createGTKWindow(windowId, x, y, width, height, "Window", closeCallback, moveCallback, resizeCallback, focusCallback, blurCallback, keyCallback, titleBarStyle, transparent, styleMask);
     }
 
 }
@@ -6323,12 +6329,19 @@ void showX11Window(void* window) {
 
 void showGTKWindow(void* window) {
     dispatch_sync_main_void([&]() {
-        // Automatically set icon from standard location
         autoSetWindowIcon(window);
+
+        uint32_t styleMask = GPOINTER_TO_UINT(g_object_get_data(G_OBJECT(window), "electrobun-style-mask"));
+        bool isNonActivating = (styleMask & (1 << 7)) != 0;
+
         gtk_widget_show_all(GTK_WIDGET(window));
-        
-        // Bring the window to the front and give it focus
-        gtk_window_present(GTK_WINDOW(window));
+
+        if (isNonActivating) {
+            gtk_window_set_accept_focus(GTK_WINDOW(window), TRUE);
+            gtk_window_set_focus_on_map(GTK_WINDOW(window), FALSE);
+        } else {
+            gtk_window_present(GTK_WINDOW(window));
+        }
     });
 }
 
@@ -8723,6 +8736,144 @@ ELECTROBUN_EXPORT const char* clipboardAvailableFormats() {
     });
 }
 
+static int64_t g_clipboardChangeCounter = 0;
+static bool g_clipboardOwnerChangeConnected = false;
+
+static void onClipboardOwnerChange(GtkClipboard* clipboard, GdkEvent* event, gpointer data) {
+    g_clipboardChangeCounter++;
+}
+
+ELECTROBUN_EXPORT int64_t clipboardGetChangeCount() {
+    if (!g_clipboardOwnerChangeConnected) {
+        dispatch_sync_main_void([&]() {
+            GtkClipboard* clipboard = gtk_clipboard_get(GDK_SELECTION_CLIPBOARD);
+            g_signal_connect(clipboard, "owner-change", G_CALLBACK(onClipboardOwnerChange), nullptr);
+            g_clipboardOwnerChangeConnected = true;
+        });
+    }
+    return g_clipboardChangeCounter;
+}
+
+ELECTROBUN_EXPORT const char* getFrontmostAppInfo() {
+    return dispatch_sync_main([&]() -> const char* {
+        Display* display = gdk_x11_get_default_xdisplay();
+        if (!display) return strdup("{}");
+
+        Window root = DefaultRootWindow(display);
+        Atom netActiveWindow = XInternAtom(display, "_NET_ACTIVE_WINDOW", False);
+
+        Atom actualType;
+        int actualFormat;
+        unsigned long nItems, bytesAfter;
+        unsigned char* propData = nullptr;
+
+        int status = XGetWindowProperty(display, root, netActiveWindow,
+            0, 1, False, XA_WINDOW,
+            &actualType, &actualFormat, &nItems, &bytesAfter, &propData);
+
+        if (status != Success || !propData || nItems == 0) {
+            if (propData) XFree(propData);
+            return strdup("{}");
+        }
+
+        Window activeWin = *(Window*)propData;
+        XFree(propData);
+
+        Atom netWmPid = XInternAtom(display, "_NET_WM_PID", False);
+        propData = nullptr;
+        status = XGetWindowProperty(display, activeWin, netWmPid,
+            0, 1, False, XA_CARDINAL,
+            &actualType, &actualFormat, &nItems, &bytesAfter, &propData);
+
+        pid_t pid = 0;
+        if (status == Success && propData && nItems > 0) {
+            pid = (pid_t)(*(unsigned long*)propData);
+        }
+        if (propData) XFree(propData);
+
+        char exePath[1024] = {0};
+        if (pid > 0) {
+            char procLink[64];
+            snprintf(procLink, sizeof(procLink), "/proc/%d/exe", pid);
+            ssize_t len = readlink(procLink, exePath, sizeof(exePath) - 1);
+            if (len > 0) exePath[len] = '\0';
+        }
+
+        char windowName[512] = {0};
+        Atom netWmName = XInternAtom(display, "_NET_WM_NAME", False);
+        Atom utf8String = XInternAtom(display, "UTF8_STRING", False);
+        propData = nullptr;
+        status = XGetWindowProperty(display, activeWin, netWmName,
+            0, 128, False, utf8String,
+            &actualType, &actualFormat, &nItems, &bytesAfter, &propData);
+        if (status == Success && propData && nItems > 0) {
+            size_t copyLen = nItems < sizeof(windowName) - 1 ? nItems : sizeof(windowName) - 1;
+            memcpy(windowName, propData, copyLen);
+            windowName[copyLen] = '\0';
+        }
+        if (propData) XFree(propData);
+
+        std::string json = "{\"bundleId\":\"\",\"name\":\"";
+        for (const char* p = windowName; *p; ++p) {
+            if (*p == '"') json += "\\\"";
+            else if (*p == '\\') json += "\\\\";
+            else json += *p;
+        }
+        json += "\",\"path\":\"";
+        for (const char* p = exePath; *p; ++p) {
+            if (*p == '"') json += "\\\"";
+            else if (*p == '\\') json += "\\\\";
+            else json += *p;
+        }
+        json += "\"}";
+        return strdup(json.c_str());
+    });
+}
+
+ELECTROBUN_EXPORT bool getAppIconToPath(const char* appPath, const char* destPath, int size) {
+    return dispatch_sync_main([&]() -> bool {
+        GFile* file = g_file_new_for_path(appPath);
+        if (!file) return false;
+
+        GFileInfo* info = g_file_query_info(file, G_FILE_ATTRIBUTE_STANDARD_ICON, G_FILE_QUERY_INFO_NONE, nullptr, nullptr);
+        if (!info) {
+            g_object_unref(file);
+            return false;
+        }
+
+        GIcon* icon = g_file_info_get_icon(info);
+        if (!icon) {
+            g_object_unref(info);
+            g_object_unref(file);
+            return false;
+        }
+
+        GtkIconTheme* theme = gtk_icon_theme_get_default();
+        GtkIconInfo* iconInfo = gtk_icon_theme_lookup_by_gicon(theme, icon, size, GTK_ICON_LOOKUP_USE_BUILTIN);
+
+        if (!iconInfo) {
+            iconInfo = gtk_icon_theme_lookup_icon(theme, "application-x-executable", size, GTK_ICON_LOOKUP_USE_BUILTIN);
+        }
+
+        bool success = false;
+        if (iconInfo) {
+            GdkPixbuf* pixbuf = gtk_icon_info_load_icon(iconInfo, nullptr);
+            if (pixbuf) {
+                GdkPixbuf* scaled = gdk_pixbuf_scale_simple(pixbuf, size, size, GDK_INTERP_BILINEAR);
+                GdkPixbuf* target = scaled ? scaled : pixbuf;
+                success = gdk_pixbuf_save(target, destPath, "png", nullptr, NULL) == TRUE;
+                if (scaled) g_object_unref(scaled);
+                g_object_unref(pixbuf);
+            }
+            g_object_unref(iconInfo);
+        }
+
+        g_object_unref(info);
+        g_object_unref(file);
+        return success;
+    });
+}
+
 // NOTE: Removed deferred tray creation code - now creating TrayItem synchronously
 // The TrayItem constructor handles deferred AppIndicator creation internally
 
@@ -10904,6 +11055,82 @@ ELECTROBUN_EXPORT void shutdownNativeWrapper() {
     }
     
     printf("Native wrapper shutdown complete.\n");
+}
+
+// ----------------------- Content Blocker -----------------------
+
+static WebKitUserContentFilterStore* g_filterStore = nullptr;
+static std::vector<WebKitUserContentFilter*> g_compiledFilters;
+static std::mutex g_filterMutex;
+static uint32_t g_filterChunkIndex = 0;
+
+static void onFilterSaved(GObject* source, GAsyncResult* result, gpointer user_data) {
+    GError* error = nullptr;
+    WebKitUserContentFilter* filter = webkit_user_content_filter_store_save_finish(
+        WEBKIT_USER_CONTENT_FILTER_STORE(source), result, &error);
+
+    if (error) {
+        fprintf(stderr, "[ContentBlocker] Failed to save filter: %s\n", error->message);
+        g_error_free(error);
+        return;
+    }
+
+    {
+        std::lock_guard<std::mutex> lock(g_filterMutex);
+        g_compiledFilters.push_back(filter);
+        electrobun::ContentBlockerRuleStore::instance().setReady(true);
+        fprintf(stderr, "[ContentBlocker] Compiled filter (%zu total)\n", g_compiledFilters.size());
+    }
+}
+
+ELECTROBUN_EXPORT uint32_t getContentBlockerCompiledCount() {
+    std::lock_guard<std::mutex> lock(g_filterMutex);
+    return static_cast<uint32_t>(g_compiledFilters.size());
+}
+
+ELECTROBUN_EXPORT void loadContentBlockerRules(const char* jsonData, uint32_t jsonLen) {
+    if (!jsonData || jsonLen == 0) return;
+
+    std::string jsonCopy(jsonData, jsonLen);
+
+    dispatch_sync_main_void([jsonCopy]() {
+        if (!g_filterStore) {
+            std::string cachePath = electrobun::AppPaths::getAppDataPath() + "/content-blocker-cache";
+            g_filterStore = webkit_user_content_filter_store_new(cachePath.c_str());
+        }
+
+        std::string identifier = "electrobun_cb_" + std::to_string(g_filterChunkIndex++);
+        GBytes* bytes = g_bytes_new(jsonCopy.data(), jsonCopy.size());
+
+        webkit_user_content_filter_store_save(
+            g_filterStore, identifier.c_str(), bytes,
+            nullptr, onFilterSaved, nullptr);
+
+        g_bytes_unref(bytes);
+    });
+}
+
+ELECTROBUN_EXPORT void setContentBlockerEnabled(AbstractView* abstractView, bool enabled) {
+    if (!abstractView) return;
+
+    dispatch_sync_main_void([abstractView, enabled]() {
+        abstractView->contentBlockerEnabled = enabled;
+
+        auto* webkitImpl = dynamic_cast<WebKitWebViewImpl*>(abstractView);
+        if (!webkitImpl || !webkitImpl->manager) return;
+
+        if (enabled) {
+            std::lock_guard<std::mutex> lock(g_filterMutex);
+            for (auto* filter : g_compiledFilters) {
+                webkit_user_content_manager_add_filter(webkitImpl->manager, filter);
+            }
+            fprintf(stderr, "[ContentBlocker] Enabled for webview %u (%zu filters)\n",
+                    abstractView->webviewId, g_compiledFilters.size());
+        } else {
+            webkit_user_content_manager_remove_all_filters(webkitImpl->manager);
+            fprintf(stderr, "[ContentBlocker] Disabled for webview %u\n", abstractView->webviewId);
+        }
+    });
 }
 
 }

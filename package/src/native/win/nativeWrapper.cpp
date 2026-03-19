@@ -52,6 +52,7 @@
 #include "../shared/preload_script.h"
 #include "../shared/webview_storage.h"
 #include "../shared/navigation_rules.h"
+#include "../shared/content_blocker.h"
 #include "../shared/thread_safe_map.h"
 #include "../shared/shutdown_guard.h"
 #include "../shared/ffi_helpers.h"
@@ -2760,6 +2761,10 @@ public:
     // Navigation rules for URL filtering
     std::vector<std::string> navigationRules;
 
+    bool contentBlockerEnabled = false;
+    EventRegistrationToken contentBlockerToken = {};
+    LPWSTR contentBlockerScriptId = nullptr;
+
     // Bridge handlers
     ComPtr<BridgeHandler> eventBridgeHandler;  // Event-only bridge (always available)
     ComPtr<BridgeHandler> bunBridgeHandler;
@@ -4723,6 +4728,14 @@ LRESULT CALLBACK WindowProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
     WindowData* data = (WindowData*)GetWindowLongPtr(hwnd, GWLP_USERDATA);
     
     switch (msg) {
+
+        case WM_MOUSEACTIVATE: {
+            LONG_PTR exStyle = GetWindowLongPtr(hwnd, GWL_EXSTYLE);
+            if (exStyle & WS_EX_NOACTIVATE) {
+                return MA_NOACTIVATE;
+            }
+            break;
+        }
         
         case WM_INPUT: {
             if (g_isMovingWindow && g_targetWindow) {
@@ -8544,14 +8557,17 @@ ELECTROBUN_EXPORT HWND createWindowWithFrameAndStyleFromWorker(
         }
         // else: default titleBarStyle = WS_OVERLAPPEDWINDOW (standard window)
 
-        // Handle transparent windows
+        if (styleMask & (1 << 7)) {
+            windowExStyle |= WS_EX_NOACTIVATE | WS_EX_TOOLWINDOW;
+            windowExStyle &= ~WS_EX_APPWINDOW;
+        }
+
         if (transparent) {
-            // For transparent windows, we need WS_EX_LAYERED to support per-pixel alpha
             windowExStyle |= WS_EX_LAYERED;
         }
 
         // Create the window
-        HWND hwnd = CreateWindowExA(  // Use CreateWindowExA to support extended styles
+        HWND hwnd = CreateWindowExA(
             windowExStyle,
             "BasicWindowClass",  // Use ANSI string
             "",
@@ -8613,51 +8629,44 @@ ELECTROBUN_EXPORT void showWindow(void *window) {
         return;
     }
     
-    // Dispatch to main thread to ensure thread safety
-    MainThreadDispatcher::dispatch_sync([=]() {      
-        // Show the window if it's hidden
+    MainThreadDispatcher::dispatch_sync([=]() {
+        LONG_PTR exStyle = GetWindowLongPtr(hwnd, GWL_EXSTYLE);
+        bool isNonActivating = (exStyle & WS_EX_NOACTIVATE) != 0;
+
         if (!IsWindowVisible(hwnd)) {
-            ShowWindow(hwnd, SW_SHOW);
+            ShowWindow(hwnd, isNonActivating ? SW_SHOWNOACTIVATE : SW_SHOW);
         }
-        
-        // Bring window to foreground - this is more complex on Windows
-        // due to foreground window restrictions
-        
-        // First, try the simple approach
-        if (SetForegroundWindow(hwnd)) {
+
+        if (isNonActivating) {
+            SetWindowPos(hwnd, HWND_TOPMOST, 0, 0, 0, 0,
+                        SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE | SWP_SHOWWINDOW);
         } else {
-            // If that fails, we need to work around Windows' foreground restrictions
-            DWORD currentThreadId = GetCurrentThreadId();
-            DWORD foregroundThreadId = GetWindowThreadProcessId(GetForegroundWindow(), NULL);
-            
-            if (currentThreadId != foregroundThreadId) {
-                // Attach to the foreground thread's input queue temporarily
-                if (AttachThreadInput(currentThreadId, foregroundThreadId, TRUE)) {
-                    SetForegroundWindow(hwnd);
-                    SetFocus(hwnd);
-                    AttachThreadInput(currentThreadId, foregroundThreadId, FALSE);
-                } else {
-                    // Last resort - flash the window to get user attention
-                    FLASHWINFO fwi = {0};
-                    fwi.cbSize = sizeof(FLASHWINFO);
-                    fwi.hwnd = hwnd;
-                    fwi.dwFlags = FLASHW_ALL | FLASHW_TIMERNOFG;
-                    fwi.uCount = 3;
-                    fwi.dwTimeout = 0;
-                    FlashWindowEx(&fwi);
-                    
+            if (SetForegroundWindow(hwnd)) {
+            } else {
+                DWORD currentThreadId = GetCurrentThreadId();
+                DWORD foregroundThreadId = GetWindowThreadProcessId(GetForegroundWindow(), NULL);
+                
+                if (currentThreadId != foregroundThreadId) {
+                    if (AttachThreadInput(currentThreadId, foregroundThreadId, TRUE)) {
+                        SetForegroundWindow(hwnd);
+                        SetFocus(hwnd);
+                        AttachThreadInput(currentThreadId, foregroundThreadId, FALSE);
+                    } else {
+                        FLASHWINFO fwi = {0};
+                        fwi.cbSize = sizeof(FLASHWINFO);
+                        fwi.hwnd = hwnd;
+                        fwi.dwFlags = FLASHW_ALL | FLASHW_TIMERNOFG;
+                        fwi.uCount = 3;
+                        fwi.dwTimeout = 0;
+                        FlashWindowEx(&fwi);
+                    }
                 }
             }
+            SetActiveWindow(hwnd);
+            SetFocus(hwnd);
+            SetWindowPos(hwnd, HWND_TOP, 0, 0, 0, 0,
+                        SWP_NOMOVE | SWP_NOSIZE | SWP_SHOWWINDOW);
         }
-        
-        // Ensure the window is active and focused
-        SetActiveWindow(hwnd);
-        SetFocus(hwnd);
-        
-        // Bring to top of Z-order
-        SetWindowPos(hwnd, HWND_TOP, 0, 0, 0, 0, 
-                    SWP_NOMOVE | SWP_NOSIZE | SWP_SHOWWINDOW);
-        
     });
 }
 
@@ -9697,6 +9706,52 @@ ELECTROBUN_EXPORT const char* clipboardAvailableFormats() {
 
         return strdup(result.c_str());
     });
+}
+
+ELECTROBUN_EXPORT int64_t clipboardGetChangeCount() {
+    return (int64_t)GetClipboardSequenceNumber();
+}
+
+ELECTROBUN_EXPORT const char* getFrontmostAppInfo() {
+    return MainThreadDispatcher::dispatch_sync([=]() -> const char* {
+        HWND hwnd = GetForegroundWindow();
+        if (!hwnd) return strdup("{}");
+
+        DWORD pid = 0;
+        GetWindowThreadProcessId(hwnd, &pid);
+        if (!pid) return strdup("{}");
+
+        HANDLE hProcess = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, FALSE, pid);
+        if (!hProcess) return strdup("{}");
+
+        char pathBuf[MAX_PATH] = {0};
+        DWORD pathLen = MAX_PATH;
+        QueryFullProcessImageNameA(hProcess, 0, pathBuf, &pathLen);
+        CloseHandle(hProcess);
+
+        char titleBuf[512] = {0};
+        GetWindowTextA(hwnd, titleBuf, sizeof(titleBuf));
+
+        std::string json = "{\"bundleId\":\"\",\"name\":\"";
+        for (const char* p = titleBuf; *p; ++p) {
+            if (*p == '"') json += "\\\"";
+            else if (*p == '\\') json += "\\\\";
+            else json += *p;
+        }
+        json += "\",\"path\":\"";
+        for (const char* p = pathBuf; *p; ++p) {
+            if (*p == '"') json += "\\\"";
+            else if (*p == '\\') json += "\\\\";
+            else json += *p;
+        }
+        json += "\"}";
+        return strdup(json.c_str());
+    });
+}
+
+ELECTROBUN_EXPORT bool getAppIconToPath(const char* appPath, const char* destPath, int size) {
+    // TODO: full implementation requires GDI+ for PNG output
+    return false;
 }
 
 // Window procedure for handling tray messages
@@ -11540,4 +11595,272 @@ extern "C" ELECTROBUN_EXPORT bool isDockIconVisible() {
 extern "C" ELECTROBUN_EXPORT void setWindowIcon(void* window, const char* iconPath) {
     // Not yet implemented on Windows
     // TODO: Implement using SetWindowIcon/LoadImage APIs
+}
+
+// ----------------------- Content Blocker -----------------------
+
+static void parseContentBlockerJSON(const std::string& json, electrobun::WebView2BlockData& data) {
+    // Minimal JSON array parser: extracts domain patterns from "block" rules
+    // and CSS selectors from "css-display-none" rules.
+    // Full JSON parsing would be ideal but we avoid adding a dependency.
+
+    // Pre-reserve CSS capacity: rough estimate of ~40 bytes per cosmetic rule,
+    // ~10% of rules are cosmetic -> json.size()/100 is a reasonable starting point.
+    data.cosmeticCSS.reserve(data.cosmeticCSS.size() + json.size() / 100);
+
+    size_t pos = 0;
+    while (pos < json.size()) {
+        // Find action type
+        size_t actionPos = json.find("\"type\"", pos);
+        if (actionPos == std::string::npos) break;
+
+        // Determine action type
+        size_t typeValStart = json.find('"', actionPos + 6);
+        if (typeValStart == std::string::npos) break;
+        typeValStart++;
+        size_t typeValEnd = json.find('"', typeValStart);
+        if (typeValEnd == std::string::npos) break;
+        std::string actionType = json.substr(typeValStart, typeValEnd - typeValStart);
+
+        // Find the enclosing rule object boundaries
+        // Look backwards for the trigger's url-filter
+        size_t ruleStart = json.rfind('{', actionPos);
+        // Look forward for the rule end
+        size_t ruleEnd = json.find('}', typeValEnd);
+        if (ruleEnd != std::string::npos) ruleEnd = json.find('}', ruleEnd + 1);
+
+        if (actionType == "block" || actionType == "ignore-previous-rules") {
+            // Extract url-filter to derive domain
+            size_t filterPos = json.rfind("\"url-filter\"", actionPos);
+            if (filterPos != std::string::npos && filterPos > (ruleStart != std::string::npos ? ruleStart : 0)) {
+                size_t fValStart = json.find('"', filterPos + 12);
+                if (fValStart != std::string::npos) {
+                    fValStart++;
+                    size_t fValEnd = json.find('"', fValStart);
+                    if (fValEnd != std::string::npos) {
+                        std::string urlFilter = json.substr(fValStart, fValEnd - fValStart);
+
+                        // Extract domain from common ABP-converted patterns like:
+                        // ^[^:]+://+([^:/]+\\.)?ads\\.example\\.com
+                        // or simpler patterns containing a domain literal
+                        std::string domain;
+
+                        // Look for domain-like segments (sequences of alnum and dots, escaped dots)
+                        // Replace \\. with . to get the raw domain
+                        std::string cleaned;
+                        for (size_t i = 0; i < urlFilter.size(); i++) {
+                            if (urlFilter[i] == '\\' && i + 1 < urlFilter.size() && urlFilter[i + 1] == '.') {
+                                cleaned += '.';
+                                i++;
+                            } else if (isalnum(urlFilter[i]) || urlFilter[i] == '.' || urlFilter[i] == '-') {
+                                cleaned += urlFilter[i];
+                            } else if (!cleaned.empty() && cleaned.find('.') != std::string::npos) {
+                                break;
+                            } else {
+                                cleaned.clear();
+                            }
+                        }
+
+                        if (!cleaned.empty() && cleaned.find('.') != std::string::npos) {
+                            // Remove leading/trailing dots
+                            while (!cleaned.empty() && cleaned.front() == '.') cleaned.erase(0, 1);
+                            while (!cleaned.empty() && cleaned.back() == '.') cleaned.pop_back();
+
+                            if (!cleaned.empty() && cleaned.find('.') != std::string::npos) {
+                                if (actionType == "block") {
+                                    data.blockedDomains.insert(cleaned);
+                                } else {
+                                    data.exceptionDomains.insert(cleaned);
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        } else if (actionType == "css-display-none") {
+            // Extract selector
+            size_t selPos = json.find("\"selector\"", actionPos);
+            if (selPos == std::string::npos) selPos = json.rfind("\"selector\"", actionPos);
+            if (selPos != std::string::npos) {
+                size_t sValStart = json.find('"', selPos + 10);
+                if (sValStart != std::string::npos) {
+                    sValStart++;
+                    size_t sValEnd = sValStart;
+                    while (sValEnd < json.size()) {
+                        if (json[sValEnd] == '"' && json[sValEnd - 1] != '\\') break;
+                        sValEnd++;
+                    }
+                    if (sValEnd < json.size()) {
+                        std::string selector = json.substr(sValStart, sValEnd - sValStart);
+                        if (!selector.empty()) {
+                            if (!data.cosmeticCSS.empty()) {
+                                data.cosmeticCSS += ",\n";
+                            }
+                            data.cosmeticCSS += selector;
+                        }
+                    }
+                }
+            }
+        }
+
+        pos = (ruleEnd != std::string::npos) ? ruleEnd + 1 : typeValEnd + 1;
+    }
+
+    // Wrap selectors in a rule
+    if (!data.cosmeticCSS.empty()) {
+        data.cosmeticCSS = data.cosmeticCSS + " { display: none !important; }";
+    }
+}
+
+static std::atomic<uint32_t> g_contentBlockerChunkCount{0};
+
+extern "C" ELECTROBUN_EXPORT uint32_t getContentBlockerCompiledCount() {
+    return g_contentBlockerChunkCount.load();
+}
+
+extern "C" ELECTROBUN_EXPORT void loadContentBlockerRules(const char* jsonData, uint32_t jsonLen) {
+    if (!jsonData || jsonLen == 0) return;
+
+    std::string json(jsonData, jsonLen);
+    auto& store = electrobun::ContentBlockerRuleStore::instance();
+
+    parseContentBlockerJSON(json, store.webView2Data());
+    store.setReady(true);
+    g_contentBlockerChunkCount.fetch_add(1);
+
+    char msg[256];
+    sprintf_s(msg, "[ContentBlocker] Loaded rules: %zu blocked domains, %zu exception domains, CSS length %zu",
+              store.webView2Data().blockedDomains.size(),
+              store.webView2Data().exceptionDomains.size(),
+              store.webView2Data().cosmeticCSS.size());
+    ::log(msg);
+}
+
+extern "C" ELECTROBUN_EXPORT void setContentBlockerEnabled(AbstractView* abstractView, bool enabled) {
+    if (!abstractView) return;
+
+    MainThreadDispatcher::dispatch_sync([abstractView, enabled]() {
+        abstractView->contentBlockerEnabled = enabled;
+
+        auto* wv2 = dynamic_cast<WebView2View*>(abstractView);
+        if (!wv2) return;
+
+        auto webview = wv2->getWebView();
+        if (!webview) return;
+
+        auto& store = electrobun::ContentBlockerRuleStore::instance();
+        if (!store.isReady()) return;
+
+        ComPtr<ICoreWebView2Environment> env;
+        // Get environment from webview
+        ComPtr<ICoreWebView2_2> webview2;
+        webview->QueryInterface(IID_PPV_ARGS(&webview2));
+
+        if (enabled) {
+            // Network blocking: intercept all requests
+            webview->AddWebResourceRequestedFilter(L"http://*", COREWEBVIEW2_WEB_RESOURCE_CONTEXT_ALL);
+            webview->AddWebResourceRequestedFilter(L"https://*", COREWEBVIEW2_WEB_RESOURCE_CONTEXT_ALL);
+
+            const auto& blockData = store.webView2Data();
+            webview->add_WebResourceRequested(
+                Callback<ICoreWebView2WebResourceRequestedEventHandler>(
+                    [&blockData, abstractView](ICoreWebView2* sender, ICoreWebView2WebResourceRequestedEventArgs* args) -> HRESULT {
+                        ComPtr<ICoreWebView2WebResourceRequest> request;
+                        args->get_Request(&request);
+
+                        LPWSTR uriWStr = nullptr;
+                        request->get_Uri(&uriWStr);
+                        if (!uriWStr) return S_OK;
+
+                        // Convert wide URL to UTF-8, using stack buffer for typical URLs
+                        int len = WideCharToMultiByte(CP_UTF8, 0, uriWStr, -1, nullptr, 0, nullptr, nullptr);
+                        std::string url;
+                        if (len > 0 && len <= 2048) {
+                            char stackBuf[2048];
+                            WideCharToMultiByte(CP_UTF8, 0, uriWStr, -1, stackBuf, len, nullptr, nullptr);
+                            url.assign(stackBuf, len - 1);
+                        } else if (len > 0) {
+                            url.resize(len - 1);
+                            WideCharToMultiByte(CP_UTF8, 0, uriWStr, -1, &url[0], len, nullptr, nullptr);
+                        }
+                        CoTaskMemFree(uriWStr);
+
+                        if (url.rfind("views://", 0) == 0) return S_OK;
+
+                        if (electrobun::shouldBlockUrl(blockData, url)) {
+                            // Create empty 403 response to block
+                            ComPtr<ICoreWebView2Environment> env;
+                            ComPtr<ICoreWebView2_2> wv2;
+                            sender->QueryInterface(IID_PPV_ARGS(&wv2));
+                            if (wv2) {
+                                wv2->get_Environment(&env);
+                                if (env) {
+                                    ComPtr<ICoreWebView2WebResourceResponse> response;
+                                    env->CreateWebResourceResponse(nullptr, 403, L"Blocked", L"", &response);
+                                    args->put_Response(response.Get());
+                                }
+                            }
+                        }
+                        return S_OK;
+                    }).Get(),
+                &abstractView->contentBlockerToken);
+
+            // Cosmetic filtering: inject CSS
+            if (!blockData.cosmeticCSS.empty()) {
+                // Build JS that creates a style element
+                std::string escapedCSS = blockData.cosmeticCSS;
+                // Escape single quotes and backslashes for JS string
+                std::string safeCSS;
+                for (char c : escapedCSS) {
+                    if (c == '\'') safeCSS += "\\'";
+                    else if (c == '\\') safeCSS += "\\\\";
+                    else if (c == '\n') safeCSS += "\\n";
+                    else if (c == '\r') continue;
+                    else safeCSS += c;
+                }
+
+                std::string script = "(function(){var s=document.createElement('style');"
+                    "s.id='electrobun-content-blocker';"
+                    "s.textContent='" + safeCSS + "';"
+                    "document.documentElement.appendChild(s);})()";
+
+                int wLen = MultiByteToWideChar(CP_UTF8, 0, script.c_str(), -1, nullptr, 0);
+                std::wstring wScript(wLen - 1, 0);
+                MultiByteToWideChar(CP_UTF8, 0, script.c_str(), -1, &wScript[0], wLen);
+
+                webview->AddScriptToExecuteOnDocumentCreated(
+                    wScript.c_str(),
+                    Callback<ICoreWebView2AddScriptToExecuteOnDocumentCreatedCompletedHandler>(
+                        [abstractView](HRESULT hr, LPCWSTR id) -> HRESULT {
+                            if (SUCCEEDED(hr) && id) {
+                                abstractView->contentBlockerScriptId = _wcsdup(id);
+                            }
+                            return S_OK;
+                        }).Get());
+            }
+
+            char msg[128];
+            sprintf_s(msg, "[ContentBlocker] Enabled for webview %u", abstractView->webviewId);
+            ::log(msg);
+        } else {
+            // Remove network blocking handler
+            webview->remove_WebResourceRequested(abstractView->contentBlockerToken);
+            abstractView->contentBlockerToken = {};
+
+            // Remove cosmetic CSS script
+            if (abstractView->contentBlockerScriptId) {
+                webview->RemoveScriptToExecuteOnDocumentCreated(abstractView->contentBlockerScriptId);
+                free(abstractView->contentBlockerScriptId);
+                abstractView->contentBlockerScriptId = nullptr;
+            }
+
+            // Remove request filters
+            webview->RemoveWebResourceRequestedFilter(L"http://*", COREWEBVIEW2_WEB_RESOURCE_CONTEXT_ALL);
+            webview->RemoveWebResourceRequestedFilter(L"https://*", COREWEBVIEW2_WEB_RESOURCE_CONTEXT_ALL);
+
+            char msg[128];
+            sprintf_s(msg, "[ContentBlocker] Disabled for webview %u", abstractView->webviewId);
+            ::log(msg);
+        }
+    });
 }

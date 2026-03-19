@@ -44,6 +44,8 @@ export type BrowserViewOptions<T = undefined> = {
 	startTransparent: boolean;
 	// Set passthrough on the AbstractView at creation (before first paint)
 	startPassthrough: boolean;
+	// Enable native content blocker (ad blocking) for this webview
+	contentBlocker: boolean;
 	// renderer:
 };
 
@@ -99,6 +101,7 @@ export class BrowserView<T extends RPCWithTransport = RPCWithTransport> {
 	sandbox: boolean = false;
 	startTransparent: boolean = false;
 	startPassthrough: boolean = false;
+	contentBlocker: boolean = false;
 
 	constructor(options: Partial<BrowserViewOptions<T>> = defaultOptions) {
 		// const rpc = options.rpc;
@@ -126,6 +129,7 @@ export class BrowserView<T extends RPCWithTransport = RPCWithTransport> {
 		this.sandbox = options.sandbox ?? false;
 		this.startTransparent = options.startTransparent ?? false;
 		this.startPassthrough = options.startPassthrough ?? false;
+		this.contentBlocker = options.contentBlocker ?? false;
 
 		BrowserViewMap[this.id] = this;
 		this.ptr = this.init() as Pointer;
@@ -177,6 +181,7 @@ export class BrowserView<T extends RPCWithTransport = RPCWithTransport> {
 			sandbox: this.sandbox,
 			startTransparent: this.startTransparent,
 			startPassthrough: this.startPassthrough,
+			contentBlocker: this.contentBlocker,
 			// transparent is looked up from parent window in native.ts
 		});
 	}
@@ -247,6 +252,11 @@ export class BrowserView<T extends RPCWithTransport = RPCWithTransport> {
 		this.navigationRules = JSON.stringify(rules);
 		const rulesJson = JSON.stringify(rules);
 		native.symbols.setWebviewNavigationRules(this.ptr, toCString(rulesJson));
+	}
+
+	setContentBlockerEnabled(enabled: boolean) {
+		this.contentBlocker = enabled;
+		native.symbols.setContentBlockerEnabled(this.ptr, enabled);
 	}
 
 	findInPage(
