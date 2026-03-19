@@ -478,6 +478,10 @@ async function build() {
 	// await buildAsar(); // Now using vendored binaries from zig-asar releases
 	await buildNative(); // zig depends on this for linking symbols
 
+	// Convert ad-block filter lists to WebKit Content Blocker JSON
+	console.log("Converting content blocker filter lists...");
+	await buildContentBlockerRules();
+
 	// Generate template embeddings before building CLI
 	console.log("Generating template embeddings...");
 	await generateTemplateEmbeddings();
@@ -2080,6 +2084,20 @@ async function buildCli() {
 
 	// Use vendored Bun for building CLI to ensure consistency with CI and proper code signing
 	await $`BUN_INSTALL_CACHE_DIR=/tmp/bun-cache ${PATH.bun.RUNTIME} build src/cli/index.ts --compile ${compileTarget} --outfile src/cli/build/electrobun`;
+}
+
+async function buildContentBlockerRules() {
+	const outputDir = join(process.cwd(), "dist", "content-blockers");
+	if (existsSync(outputDir) && readdirSync(outputDir).some(f => f.endsWith(".json"))) {
+		console.log("Content blocker rules already exist, skipping conversion");
+		return;
+	}
+	try {
+		await $`bun run scripts/convert-filters.ts --output ${outputDir}`;
+	} catch (e) {
+		console.warn("Content blocker filter conversion failed (non-fatal):", e);
+		console.warn("Ad blocking will not be available in this build");
+	}
 }
 
 async function buildPreload() {

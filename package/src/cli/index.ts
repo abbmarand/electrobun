@@ -2873,6 +2873,15 @@ Categories=Utility;Application;
 			cpSync(source, destination, { recursive: true, dereference: true });
 		}
 
+		// Copy content blocker rules if they exist
+		const contentBlockerSource = join(ELECTROBUN_DEP_PATH, "dist", "content-blockers");
+		if (existsSync(contentBlockerSource)) {
+			const contentBlockerDest = join(appBundleAppCodePath, "content-blockers");
+			mkdirSync(contentBlockerDest, { recursive: true });
+			cpSync(contentBlockerSource, contentBlockerDest, { recursive: true, dereference: true });
+			console.log("Copied content blocker rules to app bundle");
+		}
+
 		buildIcons(appBundleFolderResourcesPath, appBundleFolderPath);
 
 		// Run postBuild script
