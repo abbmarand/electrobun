@@ -410,6 +410,7 @@ static GetHTMLForWebviewSync g_getHTMLForWebviewSync = nullptr;
 static std::string g_electrobunChannel = "";
 static std::string g_electrobunIdentifier = "";
 static std::string g_electrobunName = "";
+static std::string g_acceptLanguage = "";
 
 // Webview content storage (replaces JSCallback approach)
 static std::map<uint32_t, std::string> webviewHTMLContent;
@@ -5806,8 +5807,7 @@ ELECTROBUN_EXPORT bool initCEF() {
     CefString(&settings.locales_dir_path) = cefResourceDir + "\\Resources\\locales";
     CefString(&settings.cache_path) = userDataDir;
     
-    // Add language settings like macOS
-    CefString(&settings.accept_language_list) = "en-US,en";
+    CefString(&settings.accept_language_list) = g_acceptLanguage.empty() ? "en-US,en" : g_acceptLanguage;
     
     // Set minimal logging
     settings.log_severity = LOGSEVERITY_ERROR;
@@ -8405,6 +8405,43 @@ ELECTROBUN_EXPORT void setWebviewNavigationRules(AbstractView *abstractView, con
             abstractView->setNavigationRulesFromJSON(rulesJson);
         });
     }
+}
+
+ELECTROBUN_EXPORT void setWebviewUserAgent(AbstractView *abstractView, const char *userAgent) {
+    if (!abstractView) return;
+    auto* wv2View = dynamic_cast<WebView2View*>(abstractView);
+    if (!wv2View) return;
+
+    std::string uaStr(userAgent ? userAgent : "");
+    MainThreadDispatcher::dispatch_sync([wv2View, uaStr]() {
+        auto webview = wv2View->getWebView();
+        if (!webview) return;
+
+        ComPtr<ICoreWebView2Settings> settings;
+        if (FAILED(webview->get_Settings(&settings))) return;
+
+        ComPtr<ICoreWebView2Settings2> settings2;
+        if (FAILED(settings.As(&settings2))) return;
+
+        if (uaStr.empty()) {
+            settings2->put_UserAgent(nullptr);
+        } else {
+            std::wstring wua(uaStr.begin(), uaStr.end());
+            settings2->put_UserAgent(wua.c_str());
+        }
+    });
+}
+
+ELECTROBUN_EXPORT void setAcceptLanguage(const char *lang) {
+    if (lang && lang[0]) {
+        g_acceptLanguage = std::string(lang);
+    } else {
+        g_acceptLanguage = "";
+    }
+}
+
+ELECTROBUN_EXPORT void setAppAppearance(const char *mode) {
+    (void)mode;
 }
 
 ELECTROBUN_EXPORT void webviewFindInPage(AbstractView *abstractView, const char *searchText, bool forward, bool matchCase) {

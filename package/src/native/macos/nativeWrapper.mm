@@ -96,6 +96,7 @@ CGFloat OFFSCREEN_OFFSET = -20000;
 BOOL useCEF = false;
 std::string g_electrobunChannel = "";
 std::string g_electrobunIdentifier = "";
+std::string g_acceptLanguage = "";
 
 static BOOL isMovingWindow = NO;
 static NSWindow *targetWindow = nil;
@@ -1991,6 +1992,23 @@ static void schedulePendingResizeDrain() {
     }
 @end
 
+static BOOL isGoogleDomain(NSString *host) {
+    if (!host) return NO;
+    return [host hasSuffix:@".google.com"] || [host isEqualToString:@"google.com"]
+        || [host hasSuffix:@".google.se"]  || [host isEqualToString:@"google.se"]
+        || [host hasSuffix:@".googleapis.com"]
+        || [host hasSuffix:@".gstatic.com"]
+        || [host containsString:@".google."];
+}
+
+static NSMutableURLRequest *addChromeClientHints(NSURLRequest *original) {
+    NSMutableURLRequest *req = [original mutableCopy];
+    [req setValue:@"\"Chromium\";v=\"134\", \"Not:A-Brand\";v=\"24\", \"Google Chrome\";v=\"134\"" forHTTPHeaderField:@"Sec-CH-UA"];
+    [req setValue:@"?0" forHTTPHeaderField:@"Sec-CH-UA-Mobile"];
+    [req setValue:@"\"macOS\"" forHTTPHeaderField:@"Sec-CH-UA-Platform"];
+    return req;
+}
+
 @implementation MyNavigationDelegate
     - (void)webView:(WKWebView *)webView
     decidePolicyForNavigationAction:(WKNavigationAction *)navigationAction
@@ -2007,6 +2025,17 @@ static void schedulePendingResizeDrain() {
                                  (unsigned long)navigationAction.modifierFlags];
             self.zigEventHandler(self.webviewId, strdup("new-window-open"), strdup([eventData UTF8String]));
             decisionHandler(WKNavigationActionPolicyCancel);
+            return;
+        }
+
+        // Inject Sec-CH-UA headers for Google domains so the server
+        // recognises WKWebView as a Chromium browser and serves the modern UI.
+        if (isGoogleDomain(newURL.host)
+            && ![navigationAction.request valueForHTTPHeaderField:@"Sec-CH-UA"]
+            && navigationAction.targetFrame.isMainFrame) {
+            webView.customUserAgent = @"Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/134.0.0.0 Safari/537.36";
+            decisionHandler(WKNavigationActionPolicyCancel);
+            [webView loadRequest:addChromeClientHints(navigationAction.request)];
             return;
         }
 
@@ -2635,6 +2664,26 @@ runOpenPanelWithParameters:(WKOpenPanelParameters *)parameters
                     [self setPassthrough:YES];
                 }
 
+                // Polyfill navigator.userAgentData so sites like Google
+                // recognise WKWebView as a Chromium-based browser.
+                static NSString *uaDataPolyfill = @"(function(){"
+                    "if(navigator.userAgentData)return;"
+                    "var b=[{brand:'Chromium',version:'134'},{brand:'Not:A-Brand',version:'24'},{brand:'Google Chrome',version:'134'}];"
+                    "Object.defineProperty(navigator,'userAgentData',{get:function(){return{"
+                        "brands:b,mobile:false,platform:'macOS',"
+                        "getHighEntropyValues:function(){return Promise.resolve({"
+                            "brands:b,mobile:false,platform:'macOS',platformVersion:'15.3.0',"
+                            "architecture:'arm',model:'',uaFullVersion:'134.0.0.0',"
+                            "fullVersionList:[{brand:'Chromium',version:'134.0.0.0'},{brand:'Not:A-Brand',version:'24.0.0.0'},{brand:'Google Chrome',version:'134.0.0.0'}]"
+                        "})},"
+                        "toJSON:function(){return{brands:this.brands,mobile:this.mobile,platform:this.platform}}"
+                    "}},configurable:true,enumerable:true});"
+                "})();";
+                WKUserScript *uaDataScript = [[WKUserScript alloc] initWithSource:uaDataPolyfill
+                                                                    injectionTime:WKUserScriptInjectionTimeAtDocumentStart
+                                                                forMainFrameOnly:false];
+                [self.webView.configuration.userContentController addUserScript:uaDataScript];
+
                 [self addPreloadScriptToWebView:electrobunPreloadScript];
                 
                 // Note: For custom preload scripts we support either inline js or a views:// style
@@ -2688,7 +2737,12 @@ runOpenPanelWithParameters:(WKOpenPanelParameters *)parameters
                 NSLog(@"ERROR: WKWebView loadURL invalid URL for webview ID: %u", self.webviewId);
                 return;
             }
-            NSURLRequest *request = [NSURLRequest requestWithURL:url];
+            BOOL isGoogle = isGoogleDomain(url.host);
+            if (isGoogle) {
+                self.webView.customUserAgent = @"Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/134.0.0.0 Safari/537.36";
+            }
+            NSURLRequest *base = [NSURLRequest requestWithURL:url];
+            NSURLRequest *request = isGoogle ? addChromeClientHints(base) : base;
             [self.webView loadRequest:request];
         });
     }
@@ -5647,8 +5701,7 @@ bool initializeCEF() {
     // Enable network service
     // settings.packaged_services = cef_services_t::CEF_SERVICE_ALL;
     
-    // Set language
-    CefString(&settings.accept_language_list) = "en-US,en";
+    CefString(&settings.accept_language_list) = g_acceptLanguage.empty() ? "en-US,en" : g_acceptLanguage;
     
     // Register custom scheme
     // CefRegisterSchemeHandlerFactory("views", "", new ElectrobunSchemeHandlerFactory(assetFileLoader, 0));
@@ -7115,6 +7168,39 @@ extern "C" void webviewSetHidden(AbstractView *abstractView, BOOL hidden) {
 extern "C" void setWebviewNavigationRules(AbstractView *abstractView, const char *rulesJson) {
     dispatch_async(dispatch_get_main_queue(), ^{
         [abstractView setNavigationRulesFromJSON:rulesJson];
+    });
+}
+
+extern "C" void setWebviewUserAgent(AbstractView *abstractView, const char *userAgent) {
+    dispatch_async(dispatch_get_main_queue(), ^{
+        if (!abstractView || ![abstractView isKindOfClass:[WKWebViewImpl class]]) return;
+        WKWebViewImpl *wkImpl = (WKWebViewImpl *)abstractView;
+        if (!wkImpl.webView) return;
+        NSString *ua = userAgent ? [NSString stringWithUTF8String:userAgent] : nil;
+        wkImpl.webView.customUserAgent = (ua.length > 0) ? ua : nil;
+    });
+}
+
+extern "C" void setAcceptLanguage(const char *lang) {
+    if (lang && lang[0]) {
+        g_acceptLanguage = std::string(lang);
+    } else {
+        g_acceptLanguage = "";
+    }
+}
+
+extern "C" void setAppAppearance(const char *mode) {
+    NSAppearance *appearance = nil;
+    if (mode) {
+        NSString *m = [NSString stringWithUTF8String:mode];
+        if ([m isEqualToString:@"dark"]) {
+            appearance = [NSAppearance appearanceNamed:NSAppearanceNameDarkAqua];
+        } else if ([m isEqualToString:@"light"]) {
+            appearance = [NSAppearance appearanceNamed:NSAppearanceNameAqua];
+        }
+    }
+    dispatch_async(dispatch_get_main_queue(), ^{
+        [NSApp setAppearance:appearance];
     });
 }
 

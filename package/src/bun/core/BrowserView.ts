@@ -259,6 +259,18 @@ export class BrowserView<T extends RPCWithTransport = RPCWithTransport> {
 		native.symbols.setContentBlockerEnabled(this.ptr, enabled);
 	}
 
+	setUserAgent(userAgent: string) {
+		native.symbols.setWebviewUserAgent(this.ptr, toCString(userAgent));
+	}
+
+	static setAcceptLanguage(lang: string) {
+		native.symbols.setAcceptLanguage(toCString(lang));
+	}
+
+	static setAppAppearance(mode: string) {
+		native.symbols.setAppAppearance(toCString(mode));
+	}
+
 	findInPage(
 		searchText: string,
 		options?: { forward?: boolean; matchCase?: boolean },

@@ -327,6 +327,18 @@ export const native = (() => {
 				args: [FFIType.ptr, FFIType.cstring],
 				returns: FFIType.void,
 			},
+			setWebviewUserAgent: {
+				args: [FFIType.ptr, FFIType.cstring],
+				returns: FFIType.void,
+			},
+			setAcceptLanguage: {
+				args: [FFIType.cstring],
+				returns: FFIType.void,
+			},
+			setAppAppearance: {
+				args: [FFIType.cstring],
+				returns: FFIType.void,
+			},
 			webviewFindInPage: {
 				args: [FFIType.ptr, FFIType.cstring, FFIType.bool, FFIType.bool],
 				returns: FFIType.void,

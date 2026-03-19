@@ -177,6 +177,7 @@ static std::mutex webviewHTMLMutex;
 // Global variables for CEF cache path isolation
 static std::string g_electrobunChannel = "";
 static std::string g_electrobunIdentifier = "";
+static std::string g_acceptLanguage = "";
 
 // Forward declarations for HTML content management
 extern "C" ELECTROBUN_EXPORT const char* getWebviewHTMLContent(uint32_t webviewId);
@@ -2074,8 +2075,7 @@ bool initializeCEF() {
         CefString(&settings.root_cache_path) = cachePath;
     }
     
-    // Set language
-    CefString(&settings.accept_language_list) = "en-US,en";
+    CefString(&settings.accept_language_list) = g_acceptLanguage.empty() ? "en-US,en" : g_acceptLanguage;
     
     bool result = CefInitialize(main_args, settings, g_app.get(), nullptr);
 
@@ -7950,6 +7950,24 @@ ELECTROBUN_EXPORT void setWebviewNavigationRules(AbstractView* abstractView, con
             abstractView->setNavigationRulesFromJSON(rulesStr.c_str());
         });
     }
+}
+
+ELECTROBUN_EXPORT void setWebviewUserAgent(AbstractView* abstractView, const char* userAgent) {
+    (void)abstractView;
+    (void)userAgent;
+    // CEF user-agent is set at initialization via chromiumFlags, not per-webview at runtime.
+}
+
+ELECTROBUN_EXPORT void setAcceptLanguage(const char* lang) {
+    if (lang && lang[0]) {
+        g_acceptLanguage = std::string(lang);
+    } else {
+        g_acceptLanguage = "";
+    }
+}
+
+ELECTROBUN_EXPORT void setAppAppearance(const char* mode) {
+    (void)mode;
 }
 
 ELECTROBUN_EXPORT void webviewFindInPage(AbstractView* abstractView, const char* searchText, bool forward, bool matchCase) {
