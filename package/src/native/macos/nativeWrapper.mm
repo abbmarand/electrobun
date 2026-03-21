@@ -7425,17 +7425,6 @@ NSWindow *createNSWindowWithFrameAndStyle(uint32_t windowId,
     NSRect screenFrame = [primaryScreen frame];
     config.frame.origin.y = screenFrame.size.height - config.frame.origin.y;
     
-    // For "hidden" titlebar with no traffic-light buttons, strip Titled so
-    // macOS Sequoia never shows its tiling indicator on this window.
-    if (strcmp(config.titleBarStyle, "hidden") == 0) {
-        BOOL hasClose = (config.styleMask & NSWindowStyleMaskClosable) != 0;
-        BOOL hasMini  = (config.styleMask & NSWindowStyleMaskMiniaturizable) != 0;
-        BOOL hasZoom  = (config.styleMask & NSWindowStyleMaskResizable) != 0;
-        if (!hasClose && !hasMini && !hasZoom) {
-            config.styleMask &= ~NSWindowStyleMaskTitled;
-        }
-    }
-
     BOOL isPanel = (config.styleMask & NSWindowStyleMaskNonactivatingPanel) != 0;
     
     NSWindow *window;
@@ -7460,6 +7449,26 @@ NSWindow *createNSWindowWithFrameAndStyle(uint32_t windowId,
         strcmp(config.titleBarStyle, "hidden") == 0) {
         window.titlebarAppearsTransparent = YES;
         window.titleVisibility = NSWindowTitleHidden;
+
+        BOOL hasClose = (config.styleMask & NSWindowStyleMaskClosable) != 0;
+        BOOL hasMini  = (config.styleMask & NSWindowStyleMaskMiniaturizable) != 0;
+        BOOL hasZoom  = (config.styleMask & NSWindowStyleMaskResizable) != 0;
+        if (!hasClose) [[window standardWindowButton:NSWindowCloseButton] setHidden:YES];
+        if (!hasMini)  [[window standardWindowButton:NSWindowMiniaturizeButton] setHidden:YES];
+        if (!hasZoom)  [[window standardWindowButton:NSWindowZoomButton] setHidden:YES];
+
+        if (!hasClose && !hasMini && !hasZoom) {
+            NSWindowCollectionBehavior behavior = [window collectionBehavior];
+            behavior &= ~NSWindowCollectionBehaviorFullScreenPrimary;
+            behavior &= ~NSWindowCollectionBehaviorFullScreenAuxiliary;
+            behavior |= NSWindowCollectionBehaviorFullScreenNone;
+            behavior |= NSWindowCollectionBehaviorFullScreenDisallowsTiling;
+            [window setCollectionBehavior:behavior];
+
+            @try {
+                [window setValue:@1 forKey:@"tilingBehavior"];
+            } @catch (NSException *) {}
+        }
     }
 
     WindowDelegate *delegate = [[WindowDelegate alloc] init];
