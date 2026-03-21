@@ -621,6 +621,10 @@ export const native = (() => {
 				args: [],
 				returns: FFIType.cstring,
 			},
+			captureScreenExcludingWindow: {
+				args: [FFIType.ptr, FFIType.ptr], // window ptr, size_t* outSize
+				returns: FFIType.ptr, // pointer to PNG data
+			},
 			getFrontmostAppInfo: {
 				args: [],
 				returns: FFIType.cstring,
@@ -1694,6 +1698,20 @@ window.__electrobunBunBridge = window.__electrobunBunBridge || window.webkit?.me
 			if (!formatsStr) return [];
 			return formatsStr.split(",").filter((f) => f.length > 0);
 		},
+		captureScreenExcludingWindow: (params: { winId: number | null }): Uint8Array | null => {
+			const windowPtr = params.winId != null ? getWindowPtr(params.winId) : null;
+			const sizeBuffer = new BigUint64Array(1);
+			const dataPtr = native.symbols.captureScreenExcludingWindow(
+				windowPtr ?? ptr(new Uint8Array(0)),
+				ptr(sizeBuffer),
+			);
+			if (!dataPtr) return null;
+			const size = Number(sizeBuffer[0]);
+			if (size === 0) return null;
+			const result = new Uint8Array(size);
+			result.set(new Uint8Array(toArrayBuffer(dataPtr, 0, size)));
+			return result;
+		},
 		getFrontmostAppInfo: (): string | null => {
 			const result = native.symbols.getFrontmostAppInfo();
 			if (!result) return null;
@@ -2282,6 +2300,17 @@ export const Screen = {
 		} catch {
 			return 0n;
 		}
+	},
+
+	/**
+	 * Capture the screen as PNG, optionally excluding a window by its ID.
+	 * Uses CGWindowListCreateImageFromArray to composite all on-screen windows
+	 * minus the excluded one.
+	 * @param excludeWinId - Electrobun window ID to exclude, or null for full capture
+	 * @returns PNG data as Uint8Array, or null on failure
+	 */
+	captureScreen: (excludeWinId: number | null = null): Uint8Array | null => {
+		return ffi.request.captureScreenExcludingWindow({ winId: excludeWinId });
 	},
 };
 

@@ -25,6 +25,7 @@ static bool wgpuDebugEnabled() {
     return cached == 1;
 }
 #import <UserNotifications/UserNotifications.h>
+#import <ScreenCaptureKit/ScreenCaptureKit.h>
 #include <sys/socket.h>
 #include <netinet/in.h>
 #include <unistd.h>
@@ -7424,6 +7425,17 @@ NSWindow *createNSWindowWithFrameAndStyle(uint32_t windowId,
     NSRect screenFrame = [primaryScreen frame];
     config.frame.origin.y = screenFrame.size.height - config.frame.origin.y;
     
+    // For "hidden" titlebar with no traffic-light buttons, strip Titled so
+    // macOS Sequoia never shows its tiling indicator on this window.
+    if (strcmp(config.titleBarStyle, "hidden") == 0) {
+        BOOL hasClose = (config.styleMask & NSWindowStyleMaskClosable) != 0;
+        BOOL hasMini  = (config.styleMask & NSWindowStyleMaskMiniaturizable) != 0;
+        BOOL hasZoom  = (config.styleMask & NSWindowStyleMaskResizable) != 0;
+        if (!hasClose && !hasMini && !hasZoom) {
+            config.styleMask &= ~NSWindowStyleMaskTitled;
+        }
+    }
+
     BOOL isPanel = (config.styleMask & NSWindowStyleMaskNonactivatingPanel) != 0;
     
     NSWindow *window;
@@ -7558,6 +7570,13 @@ extern "C" NSWindow *createWindowWithFrameAndStyleFromWorker(
             [[window standardWindowButton:NSWindowCloseButton] setHidden:YES];
             [[window standardWindowButton:NSWindowMiniaturizeButton] setHidden:YES];
             [[window standardWindowButton:NSWindowZoomButton] setHidden:YES];
+
+            NSWindowCollectionBehavior behavior = [window collectionBehavior];
+            behavior &= ~NSWindowCollectionBehaviorFullScreenPrimary;
+            behavior &= ~NSWindowCollectionBehaviorFullScreenAuxiliary;
+            behavior |= NSWindowCollectionBehaviorFullScreenNone;
+            behavior |= NSWindowCollectionBehaviorFullScreenDisallowsTiling;
+            [window setCollectionBehavior:behavior];
         }
     });
 
@@ -8211,6 +8230,83 @@ extern "C" const char* clipboardAvailableFormats() {
         result = strdup([joined UTF8String]);
     });
 
+    return result;
+}
+
+// captureScreenExcludingWindow - Capture the screen as PNG, excluding a specific window.
+// Uses ScreenCaptureKit (macOS 12.3+) with SCScreenshotManager (macOS 14+).
+// window: NSWindow* to exclude (or NULL to capture the entire screen)
+// outSize: receives the byte length of the returned PNG buffer
+// Returns: malloc'd PNG data (caller must free), or NULL on failure
+extern "C" const uint8_t* captureScreenExcludingWindow(NSWindow *window, size_t *outSize) {
+    __block const uint8_t* result = NULL;
+    __block size_t size = 0;
+
+    __block CGWindowID excludeId = 0;
+    if (window) {
+        if ([NSThread isMainThread]) {
+            excludeId = (CGWindowID)[window windowNumber];
+        } else {
+            dispatch_sync(dispatch_get_main_queue(), ^{
+                excludeId = (CGWindowID)[window windowNumber];
+            });
+        }
+    }
+
+    dispatch_semaphore_t sem = dispatch_semaphore_create(0);
+
+    [SCShareableContent getShareableContentExcludingDesktopWindows:NO
+        onScreenWindowsOnly:YES
+        completionHandler:^(SCShareableContent *content, NSError *error) {
+            if (error || !content) {
+                dispatch_semaphore_signal(sem);
+                return;
+            }
+
+            SCDisplay *mainDisplay = content.displays.firstObject;
+            if (!mainDisplay) {
+                dispatch_semaphore_signal(sem);
+                return;
+            }
+
+            NSMutableArray<SCWindow *> *excludedWindows = [NSMutableArray array];
+            if (excludeId != 0) {
+                for (SCWindow *w in content.windows) {
+                    if (w.windowID == excludeId) {
+                        [excludedWindows addObject:w];
+                    }
+                }
+            }
+
+            SCContentFilter *filter = [[SCContentFilter alloc]
+                initWithDisplay:mainDisplay
+                excludingWindows:excludedWindows];
+
+            SCStreamConfiguration *config = [[SCStreamConfiguration alloc] init];
+            config.width = mainDisplay.width * 2;
+            config.height = mainDisplay.height * 2;
+
+            [SCScreenshotManager captureImageWithFilter:filter
+                configuration:config
+                completionHandler:^(CGImageRef img, NSError *captureError) {
+                    if (!captureError && img) {
+                        NSBitmapImageRep *rep = [[NSBitmapImageRep alloc] initWithCGImage:img];
+                        NSData *pngData = [rep representationUsingType:NSBitmapImageFileTypePNG
+                                                           properties:@{}];
+                        if (pngData && [pngData length] > 0) {
+                            size = [pngData length];
+                            uint8_t *buffer = (uint8_t*)malloc(size);
+                            memcpy(buffer, [pngData bytes], size);
+                            result = buffer;
+                        }
+                    }
+                    dispatch_semaphore_signal(sem);
+                }];
+        }];
+
+    dispatch_semaphore_wait(sem, DISPATCH_TIME_FOREVER);
+
+    if (outSize) *outSize = size;
     return result;
 }
 
