@@ -25,7 +25,6 @@ static bool wgpuDebugEnabled() {
     return cached == 1;
 }
 #import <UserNotifications/UserNotifications.h>
-#import <ScreenCaptureKit/ScreenCaptureKit.h>
 #include <sys/socket.h>
 #include <netinet/in.h>
 #include <unistd.h>
@@ -7425,6 +7424,17 @@ NSWindow *createNSWindowWithFrameAndStyle(uint32_t windowId,
     NSRect screenFrame = [primaryScreen frame];
     config.frame.origin.y = screenFrame.size.height - config.frame.origin.y;
     
+    // For hidden titlebar with no traffic-light buttons, strip Titled
+    // so macOS Sequoia never shows its tiling indicator on this window.
+    if (strcmp(config.titleBarStyle, "hidden") == 0) {
+        BOOL hasClose = (config.styleMask & NSWindowStyleMaskClosable) != 0;
+        BOOL hasMini  = (config.styleMask & NSWindowStyleMaskMiniaturizable) != 0;
+        BOOL hasZoom  = (config.styleMask & NSWindowStyleMaskResizable) != 0;
+        if (!hasClose && !hasMini && !hasZoom) {
+            config.styleMask &= ~NSWindowStyleMaskTitled;
+        }
+    }
+
     BOOL isPanel = (config.styleMask & NSWindowStyleMaskNonactivatingPanel) != 0;
     
     NSWindow *window;
@@ -7449,26 +7459,6 @@ NSWindow *createNSWindowWithFrameAndStyle(uint32_t windowId,
         strcmp(config.titleBarStyle, "hidden") == 0) {
         window.titlebarAppearsTransparent = YES;
         window.titleVisibility = NSWindowTitleHidden;
-
-        BOOL hasClose = (config.styleMask & NSWindowStyleMaskClosable) != 0;
-        BOOL hasMini  = (config.styleMask & NSWindowStyleMaskMiniaturizable) != 0;
-        BOOL hasZoom  = (config.styleMask & NSWindowStyleMaskResizable) != 0;
-        if (!hasClose) [[window standardWindowButton:NSWindowCloseButton] setHidden:YES];
-        if (!hasMini)  [[window standardWindowButton:NSWindowMiniaturizeButton] setHidden:YES];
-        if (!hasZoom)  [[window standardWindowButton:NSWindowZoomButton] setHidden:YES];
-
-        if (!hasClose && !hasMini && !hasZoom) {
-            NSWindowCollectionBehavior behavior = [window collectionBehavior];
-            behavior &= ~NSWindowCollectionBehaviorFullScreenPrimary;
-            behavior &= ~NSWindowCollectionBehaviorFullScreenAuxiliary;
-            behavior |= NSWindowCollectionBehaviorFullScreenNone;
-            behavior |= NSWindowCollectionBehaviorFullScreenDisallowsTiling;
-            [window setCollectionBehavior:behavior];
-
-            @try {
-                [window setValue:@1 forKey:@"tilingBehavior"];
-            } @catch (NSException *) {}
-        }
     }
 
     WindowDelegate *delegate = [[WindowDelegate alloc] init];
@@ -7574,19 +7564,6 @@ extern "C" NSWindow *createWindowWithFrameAndStyleFromWorker(
             contentView.layer.opaque = NO;
         }
 
-        // Handle hidden titleBarStyle - hide native window controls (traffic lights)
-        if (strcmp(titleBarStyle, "hidden") == 0) {
-            [[window standardWindowButton:NSWindowCloseButton] setHidden:YES];
-            [[window standardWindowButton:NSWindowMiniaturizeButton] setHidden:YES];
-            [[window standardWindowButton:NSWindowZoomButton] setHidden:YES];
-
-            NSWindowCollectionBehavior behavior = [window collectionBehavior];
-            behavior &= ~NSWindowCollectionBehaviorFullScreenPrimary;
-            behavior &= ~NSWindowCollectionBehaviorFullScreenAuxiliary;
-            behavior |= NSWindowCollectionBehaviorFullScreenNone;
-            behavior |= NSWindowCollectionBehaviorFullScreenDisallowsTiling;
-            [window setCollectionBehavior:behavior];
-        }
     });
 
     return window;
@@ -8243,77 +8220,63 @@ extern "C" const char* clipboardAvailableFormats() {
 }
 
 // captureScreenExcludingWindow - Capture the screen as PNG, excluding a specific window.
-// Uses ScreenCaptureKit (macOS 12.3+) with SCScreenshotManager (macOS 14+).
+// Uses the legacy CGWindowList API loaded via dlsym to avoid ScreenCaptureKit's
+// recording indicator. The functions still exist in CoreGraphics at runtime even
+// though the macOS 15 SDK marks them as obsoleted.
 // window: NSWindow* to exclude (or NULL to capture the entire screen)
 // outSize: receives the byte length of the returned PNG buffer
 // Returns: malloc'd PNG data (caller must free), or NULL on failure
+
+typedef CFArrayRef (*CGWindowListCreateFn)(uint32_t, uint32_t);
+typedef CGImageRef (*CGWindowListCreateImageFromArrayFn)(CGRect, CFArrayRef, uint32_t);
+
 extern "C" const uint8_t* captureScreenExcludingWindow(NSWindow *window, size_t *outSize) {
     __block const uint8_t* result = NULL;
     __block size_t size = 0;
 
-    __block CGWindowID excludeId = 0;
-    if (window) {
-        if ([NSThread isMainThread]) {
+    dispatch_sync(dispatch_get_main_queue(), ^{
+        CGWindowID excludeId = 0;
+        if (window) {
             excludeId = (CGWindowID)[window windowNumber];
-        } else {
-            dispatch_sync(dispatch_get_main_queue(), ^{
-                excludeId = (CGWindowID)[window windowNumber];
-            });
         }
-    }
 
-    dispatch_semaphore_t sem = dispatch_semaphore_create(0);
+        auto listCreate = (CGWindowListCreateFn)dlsym(RTLD_DEFAULT, "CGWindowListCreate");
+        auto imageCreate = (CGWindowListCreateImageFromArrayFn)dlsym(RTLD_DEFAULT, "CGWindowListCreateImageFromArray");
+        if (!listCreate || !imageCreate) return;
 
-    [SCShareableContent getShareableContentExcludingDesktopWindows:NO
-        onScreenWindowsOnly:YES
-        completionHandler:^(SCShareableContent *content, NSError *error) {
-            if (error || !content) {
-                dispatch_semaphore_signal(sem);
-                return;
-            }
+        CFArrayRef windowList = listCreate(
+            kCGWindowListOptionOnScreenOnly, kCGNullWindowID);
+        if (!windowList) return;
 
-            SCDisplay *mainDisplay = content.displays.firstObject;
-            if (!mainDisplay) {
-                dispatch_semaphore_signal(sem);
-                return;
-            }
+        CFMutableArrayRef filtered = CFArrayCreateMutableCopy(NULL, 0, windowList);
+        CFRelease(windowList);
 
-            NSMutableArray<SCWindow *> *excludedWindows = [NSMutableArray array];
-            if (excludeId != 0) {
-                for (SCWindow *w in content.windows) {
-                    if (w.windowID == excludeId) {
-                        [excludedWindows addObject:w];
-                    }
+        if (excludeId != 0) {
+            for (CFIndex i = CFArrayGetCount(filtered) - 1; i >= 0; i--) {
+                CGWindowID wid = (CGWindowID)(uintptr_t)
+                    CFArrayGetValueAtIndex(filtered, i);
+                if (wid == excludeId) {
+                    CFArrayRemoveValueAtIndex(filtered, i);
                 }
             }
+        }
 
-            SCContentFilter *filter = [[SCContentFilter alloc]
-                initWithDisplay:mainDisplay
-                excludingWindows:excludedWindows];
+        CGRect screenBounds = CGDisplayBounds(CGMainDisplayID());
+        CGImageRef image = imageCreate(screenBounds, filtered, kCGWindowImageDefault);
+        CFRelease(filtered);
+        if (!image) return;
 
-            SCStreamConfiguration *config = [[SCStreamConfiguration alloc] init];
-            config.width = mainDisplay.width * 2;
-            config.height = mainDisplay.height * 2;
+        NSBitmapImageRep *rep = [[NSBitmapImageRep alloc] initWithCGImage:image];
+        CGImageRelease(image);
+        NSData *pngData = [rep representationUsingType:NSBitmapImageFileTypePNG
+                                           properties:@{}];
+        if (!pngData || [pngData length] == 0) return;
 
-            [SCScreenshotManager captureImageWithFilter:filter
-                configuration:config
-                completionHandler:^(CGImageRef img, NSError *captureError) {
-                    if (!captureError && img) {
-                        NSBitmapImageRep *rep = [[NSBitmapImageRep alloc] initWithCGImage:img];
-                        NSData *pngData = [rep representationUsingType:NSBitmapImageFileTypePNG
-                                                           properties:@{}];
-                        if (pngData && [pngData length] > 0) {
-                            size = [pngData length];
-                            uint8_t *buffer = (uint8_t*)malloc(size);
-                            memcpy(buffer, [pngData bytes], size);
-                            result = buffer;
-                        }
-                    }
-                    dispatch_semaphore_signal(sem);
-                }];
-        }];
-
-    dispatch_semaphore_wait(sem, DISPATCH_TIME_FOREVER);
+        size = [pngData length];
+        uint8_t *buffer = (uint8_t*)malloc(size);
+        memcpy(buffer, [pngData bytes], size);
+        result = buffer;
+    });
 
     if (outSize) *outSize = size;
     return result;
