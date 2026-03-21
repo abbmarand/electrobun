@@ -20,6 +20,64 @@ interface ChatHistory {
   updatedAt: number;
 }
 
+
+// ─── Context-window helpers ───────────────────────────────────────────────────
+
+/** Rough token estimator: ~4 chars per token (industry standard heuristic). */
+function estimateTokens(text: string): number {
+  return Math.ceil(text.length / 4);
+}
+
+interface TrimmedContext {
+  messages: Message[];       // messages that fit in the budget
+  hadOverflow: boolean;      // true when older messages were cut
+  overflowSummary: string;   // pre-built summary to prepend (may be empty)
+}
+
+/**
+ * Fits as many recent messages as possible inside `tokenBudget`.
+ * Messages are added newest-first so the most recent exchange always
+ * survives. Returns the subset plus an overflow flag.
+ */
+function fitMessagesInBudget(
+  messages: Message[],
+  tokenBudget: number
+): TrimmedContext {
+  let used = 0;
+  const kept: Message[] = [];
+
+  // Walk backwards (newest first) and accumulate until we exceed budget
+  for (let i = messages.length - 1; i >= 0; i--) {
+    const msg = messages[i];
+    const label = msg.role === "user" ? "User: " : "Assistant: ";
+    const cost = estimateTokens(label + msg.content + "\n\n");
+    if (used + cost > tokenBudget && kept.length > 0) break; // always keep at least 1
+    used += cost;
+    kept.unshift(msg);
+  }
+
+  const hadOverflow = kept.length < messages.length;
+  return { messages: kept, hadOverflow, overflowSummary: "" };
+}
+
+/**
+ * Builds a one-sentence summary of the messages that were trimmed.
+ * We do this synchronously from the text so there's no extra LLM call —
+ * just a structured description that keeps the model oriented.
+ */
+function buildOverflowSummary(dropped: Message[]): string {
+  if (dropped.length === 0) return "";
+  const userTurns = dropped.filter(m => m.role === "user").length;
+  const firstSnippet = dropped[0].content.slice(0, 80).replace(/\n/g, " ");
+  return (
+    `[Earlier conversation summary: ${dropped.length} messages (${userTurns} from user) ` +
+    `starting with "${firstSnippet}${dropped[0].content.length > 80 ? "…" : ""}" have been ` +
+    `omitted to fit the context window. Respond naturally as if you remember them.]`
+  );
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+
 export const AgentSlate = ({
   node,
   tabId,
@@ -358,41 +416,56 @@ export const AgentSlate = ({
       // Reload context file before each message to ensure latest content
       await reloadContextFile();
       
-      // Convert conversation history to a proper prompt format
-      // Only include recent history to avoid token limits and repetition issues
-      const recentHistory = newHistory.slice(-6); // Keep last 6 messages (3 exchanges)
-      
-      let conversationPrompt = "";
-      
-      // Build system prompt with context if available
-      let systemPrompt = "You are a helpful AI assistant.";
+      // ── Token-budget-aware context management ──────────────────────────────
+      // MODEL_CONTEXT_TOKENS: conservative estimate of the model's total ctx window.
+      // We subtract max_tokens (reserved for the response) and the system prompt
+      // size to get the budget available for conversation history.
+      const MODEL_CONTEXT_TOKENS = 4096;
+      const responseReserve = maxTokens();
+
+      // Build system prompt first so we know its token cost
       const context = contextContent().trim();
-      console.log("AgentSlate: Building prompt with context length:", context.length);
-      console.log("AgentSlate: Context file path:", contextFilePath);
-      console.log("AgentSlate: Full context content:", JSON.stringify(context));
-      
+      let systemPrompt = "You are a helpful AI assistant.";
       if (context) {
-        systemPrompt += ` Here is your custom context and instructions:\n\n${context}\n\nPlease follow these instructions while being helpful and responsive.`;
-        console.log("AgentSlate: System prompt with context:", systemPrompt.substring(0, 200) + "...");
-      } else {
-        console.log("AgentSlate: No context content, using default prompt");
+        systemPrompt +=
+          `\n\nHere is your custom context and instructions:\n\n${context}` +
+          `\n\nPlease follow these instructions while being helpful and responsive.`;
       }
-      
-      // Build conversation prompt with clear boundaries
-      conversationPrompt = `${systemPrompt}\n\n`;
-      
-      // Add conversation history
-      recentHistory.slice(0, -1).forEach(msg => {
-        if (msg.role === "user") {
-          conversationPrompt += `User: ${msg.content}\n\n`;
-        } else {
-          conversationPrompt += `Assistant: ${msg.content}\n\n`;
-        }
+
+      const systemTokens = estimateTokens(systemPrompt + "\n\n");
+      const historyBudget = MODEL_CONTEXT_TOKENS - systemTokens - responseReserve - 50; // 50 token safety margin
+
+      // Separate the current (last) user message from the rest of the history
+      const historyWithoutCurrent = newHistory.slice(0, -1);
+      const currentMsg = newHistory[newHistory.length - 1];
+
+      // Fit as many prior messages as possible inside the remaining budget
+      const { messages: fittedHistory, hadOverflow } = fitMessagesInBudget(
+        historyWithoutCurrent,
+        Math.max(0, historyBudget - estimateTokens("User: " + currentMsg.content + "\n\nAssistant:"))
+      );
+
+      // If we had to drop messages, prepend a compact summary so the model stays oriented
+      const droppedMessages = historyWithoutCurrent.slice(0, historyWithoutCurrent.length - fittedHistory.length);
+      const overflowNote = hadOverflow ? buildOverflowSummary(droppedMessages) : "";
+
+      console.log(
+        `AgentSlate: context budget=${historyBudget} tokens | ` +
+        `history=${fittedHistory.length}/${historyWithoutCurrent.length} msgs fit | ` +
+        `overflow=${hadOverflow}`
+      );
+
+      // Assemble the final prompt
+      let conversationPrompt = systemPrompt + "\n\n";
+      if (overflowNote) conversationPrompt += `${overflowNote}\n\n`;
+
+      fittedHistory.forEach(msg => {
+        const label = msg.role === "user" ? "User" : "Assistant";
+        conversationPrompt += `${label}: ${msg.content}\n\n`;
       });
-      
-      // Add current user message and prompt for response
-      const currentMsg = recentHistory[recentHistory.length - 1];
+
       conversationPrompt += `User: ${currentMsg.content}\n\nAssistant:`;
+      // ────────────────────────────────────────────────────────────────────────
 
       // Send to llama.cpp runner
       const response = await electrobun.rpc?.request.llamaCompletion({
