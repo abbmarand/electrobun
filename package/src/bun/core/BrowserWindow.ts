@@ -382,6 +382,14 @@ export class BrowserWindow<T extends RPCWithTransport = RPCWithTransport> {
 		return this.webview?.getPageZoom() ?? 1.0;
 	}
 
+	showFindBar() {
+		ffi.request.showFindBar({ winId: this.id });
+	}
+
+	hideFindBar() {
+		ffi.request.hideFindBar({ winId: this.id });
+	}
+
 	// todo (yoav): move this to a class that also has off, append, prepend, etc.
 	// name should only allow browserWindow events
 	on(name: string, handler: (event: unknown) => void) {

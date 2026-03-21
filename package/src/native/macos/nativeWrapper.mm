@@ -823,6 +823,20 @@ static NSMutableDictionary<NSNumber *, AbstractView *> *globalAbstractViews = ni
     - (void)updateActiveWebviewForMousePosition:(NSPoint)mouseLocation;
 @end
 
+// ----------------------- Find Bar -----------------------
+
+@interface FindBarView : NSView <NSSearchFieldDelegate>
+    @property (nonatomic, strong) NSSearchField *searchField;
+    @property (nonatomic, strong) NSButton *prevButton;
+    @property (nonatomic, strong) NSButton *nextButton;
+    @property (nonatomic, strong) NSButton *closeButton;
+    @property (nonatomic, weak) NSWindow *parentWindow;
+    - (void)showInWindow:(NSWindow *)window;
+    - (void)dismiss;
+    - (void)findNext;
+    - (void)findPrevious;
+@end
+
 // ----------------------- URL Scheme & Navigation -----------------------
 
 @interface MyURLSchemeHandler : NSObject <WKURLSchemeHandler>    
@@ -1532,6 +1546,156 @@ static void schedulePendingResizeDrain() {
             g_pendingResizeQueue.remove((__bridge void *)view);
         }
     }
+@end
+
+// ----------------------- Find Bar Implementation -----------------------
+
+static NSString * const FindBarAssociatedKey = @"ElectrobunFindBar";
+
+@implementation FindBarView
+
+- (instancetype)initWithFrame:(NSRect)frameRect {
+    self = [super initWithFrame:frameRect];
+    if (self) {
+        self.wantsLayer = YES;
+
+        NSVisualEffectView *bgView = [[NSVisualEffectView alloc] initWithFrame:self.bounds];
+        bgView.autoresizingMask = NSViewWidthSizable | NSViewHeightSizable;
+        bgView.material = NSVisualEffectMaterialHeaderView;
+        bgView.blendingMode = NSVisualEffectBlendingModeWithinWindow;
+        bgView.state = NSVisualEffectStateActive;
+        [self addSubview:bgView];
+
+        NSView *bottomBorder = [[NSView alloc] initWithFrame:NSMakeRect(0, 0, frameRect.size.width, 1)];
+        bottomBorder.wantsLayer = YES;
+        bottomBorder.layer.backgroundColor = [[NSColor separatorColor] CGColor];
+        bottomBorder.autoresizingMask = NSViewWidthSizable;
+        [self addSubview:bottomBorder];
+
+        CGFloat h = frameRect.size.height;
+        CGFloat btnSize = 24;
+        CGFloat pad = 6;
+        CGFloat y = (h - btnSize) / 2;
+
+        self.closeButton = [NSButton buttonWithImage:[NSImage imageWithSystemSymbolName:@"xmark" accessibilityDescription:@"Close"]
+                                              target:self action:@selector(closeTapped:)];
+        self.closeButton.bezelStyle = NSBezelStyleAccessoryBarAction;
+        self.closeButton.bordered = NO;
+        self.closeButton.frame = NSMakeRect(pad, y, btnSize, btnSize);
+        [self addSubview:self.closeButton];
+
+        CGFloat fieldX = pad + btnSize + pad;
+        CGFloat fieldW = 220;
+        CGFloat fieldH = 22;
+        CGFloat fieldY = (h - fieldH) / 2;
+        self.searchField = [[NSSearchField alloc] initWithFrame:NSMakeRect(fieldX, fieldY, fieldW, fieldH)];
+        self.searchField.placeholderString = @"Find on page";
+        self.searchField.delegate = self;
+        self.searchField.controlSize = NSControlSizeSmall;
+        [self.searchField.cell setScrollable:YES];
+        [self addSubview:self.searchField];
+
+        CGFloat bx = fieldX + fieldW + pad;
+        self.prevButton = [NSButton buttonWithImage:[NSImage imageWithSystemSymbolName:@"chevron.up" accessibilityDescription:@"Previous"]
+                                             target:self action:@selector(prevTapped:)];
+        self.prevButton.bezelStyle = NSBezelStyleAccessoryBarAction;
+        self.prevButton.bordered = NO;
+        self.prevButton.frame = NSMakeRect(bx, y, btnSize, btnSize);
+        [self addSubview:self.prevButton];
+
+        bx += btnSize + 2;
+        self.nextButton = [NSButton buttonWithImage:[NSImage imageWithSystemSymbolName:@"chevron.down" accessibilityDescription:@"Next"]
+                                             target:self action:@selector(nextTapped:)];
+        self.nextButton.bezelStyle = NSBezelStyleAccessoryBarAction;
+        self.nextButton.bordered = NO;
+        self.nextButton.frame = NSMakeRect(bx, y, btnSize, btnSize);
+        [self addSubview:self.nextButton];
+
+        self.autoresizingMask = NSViewWidthSizable | NSViewMinYMargin;
+    }
+    return self;
+}
+
+- (AbstractView *)activeWebview {
+    if (!self.parentWindow) return nil;
+    if (![self.parentWindow.contentView isKindOfClass:[ContainerView class]]) return nil;
+    ContainerView *container = (ContainerView *)self.parentWindow.contentView;
+    return container.abstractViews.lastObject;
+}
+
+- (void)showInWindow:(NSWindow *)window {
+    self.parentWindow = window;
+    if (![window.contentView isKindOfClass:[ContainerView class]]) return;
+    ContainerView *container = (ContainerView *)window.contentView;
+
+    CGFloat barHeight = 32;
+    NSRect bounds = container.bounds;
+    self.frame = NSMakeRect(0, bounds.size.height - barHeight, bounds.size.width, barHeight);
+
+    if (self.superview != container) {
+        [container addSubview:self positioned:NSWindowAbove relativeTo:nil];
+    }
+    self.hidden = NO;
+    [window makeFirstResponder:self.searchField];
+    [self.searchField selectText:nil];
+}
+
+- (void)dismiss {
+    AbstractView *view = [self activeWebview];
+    if (view) [view stopFindInPage];
+    self.hidden = YES;
+    [self removeFromSuperview];
+    if (self.parentWindow) {
+        objc_setAssociatedObject(self.parentWindow, FindBarAssociatedKey.UTF8String, nil, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+    }
+}
+
+- (void)findNext {
+    NSString *query = self.searchField.stringValue;
+    if (query.length == 0) return;
+    AbstractView *view = [self activeWebview];
+    if (view) [view findInPage:query.UTF8String forward:YES matchCase:NO];
+}
+
+- (void)findPrevious {
+    NSString *query = self.searchField.stringValue;
+    if (query.length == 0) return;
+    AbstractView *view = [self activeWebview];
+    if (view) [view findInPage:query.UTF8String forward:NO matchCase:NO];
+}
+
+- (void)controlTextDidChange:(NSNotification *)notification {
+    NSString *query = self.searchField.stringValue;
+    AbstractView *view = [self activeWebview];
+    if (!view) return;
+    if (query.length == 0) {
+        [view stopFindInPage];
+    } else {
+        [view findInPage:query.UTF8String forward:YES matchCase:NO];
+    }
+}
+
+- (BOOL)control:(NSControl *)control textView:(NSTextView *)textView doCommandBySelector:(SEL)commandSelector {
+    if (commandSelector == @selector(insertNewline:)) {
+        NSEvent *event = [NSApp currentEvent];
+        if (event.modifierFlags & NSEventModifierFlagShift) {
+            [self findPrevious];
+        } else {
+            [self findNext];
+        }
+        return YES;
+    }
+    if (commandSelector == @selector(cancelOperation:)) {
+        [self dismiss];
+        return YES;
+    }
+    return NO;
+}
+
+- (void)closeTapped:(id)sender { [self dismiss]; }
+- (void)prevTapped:(id)sender { [self findPrevious]; }
+- (void)nextTapped:(id)sender { [self findNext]; }
+
 @end
 
 // ----------------------- CEF OSR View Implementation -----------------------
@@ -3106,26 +3270,35 @@ runOpenPanelWithParameters:(WKOpenPanelParameters *)parameters
         }
 
         NSString *text = [NSString stringWithUTF8String:searchText];
-        NSString *escapedText = [text stringByReplacingOccurrencesOfString:@"\\" withString:@"\\\\"];
-        escapedText = [escapedText stringByReplacingOccurrencesOfString:@"'" withString:@"\\'"];
-        escapedText = [escapedText stringByReplacingOccurrencesOfString:@"\n" withString:@"\\n"];
-        escapedText = [escapedText stringByReplacingOccurrencesOfString:@"\r" withString:@"\\r"];
-
-        // Use window.find() - parameters: string, caseSensitive, backwards, wrapAround
-        NSString *js = [NSString stringWithFormat:
-            @"window.find('%@', %@, %@, true, false, false, false)",
-            escapedText,
-            matchCase ? @"true" : @"false",
-            forward ? @"false" : @"true"];
-
-        dispatch_async(dispatch_get_main_queue(), ^{
-            [self.webView evaluateJavaScript:js completionHandler:nil];
-        });
+        if (@available(macOS 11.0, *)) {
+            WKFindConfiguration *config = [[WKFindConfiguration alloc] init];
+            config.backwards = !forward;
+            config.caseSensitive = matchCase;
+            config.wraps = YES;
+            dispatch_async(dispatch_get_main_queue(), ^{
+                [self.webView findString:text withConfiguration:config completionHandler:nil];
+            });
+        } else {
+            NSString *escapedText = [text stringByReplacingOccurrencesOfString:@"\\" withString:@"\\\\"];
+            escapedText = [escapedText stringByReplacingOccurrencesOfString:@"'" withString:@"\\'"];
+            escapedText = [escapedText stringByReplacingOccurrencesOfString:@"\n" withString:@"\\n"];
+            escapedText = [escapedText stringByReplacingOccurrencesOfString:@"\r" withString:@"\\r"];
+            NSString *js = [NSString stringWithFormat:
+                @"window.find('%@', %@, %@, true, false, false, false)",
+                escapedText,
+                matchCase ? @"true" : @"false",
+                forward ? @"false" : @"true"];
+            dispatch_async(dispatch_get_main_queue(), ^{
+                [self.webView evaluateJavaScript:js completionHandler:nil];
+            });
+        }
     }
 
     - (void)stopFindInPage {
         dispatch_async(dispatch_get_main_queue(), ^{
-            // Clear selection to remove find highlighting
+            if (@available(macOS 12.0, *)) {
+                [self.webView findString:@"" withConfiguration:nil completionHandler:nil];
+            }
             [self.webView evaluateJavaScript:@"window.getSelection().removeAllRanges();" completionHandler:nil];
         });
     }
@@ -7339,6 +7512,26 @@ extern "C" void webviewFindInPage(AbstractView *abstractView, const char *search
 extern "C" void webviewStopFind(AbstractView *abstractView) {
     dispatch_async(dispatch_get_main_queue(), ^{
         [abstractView stopFindInPage];
+    });
+}
+
+extern "C" void webviewShowFindBar(NSWindow *window) {
+    dispatch_async(dispatch_get_main_queue(), ^{
+        if (!window) return;
+        FindBarView *bar = objc_getAssociatedObject(window, FindBarAssociatedKey.UTF8String);
+        if (!bar) {
+            bar = [[FindBarView alloc] initWithFrame:NSMakeRect(0, 0, 400, 32)];
+            objc_setAssociatedObject(window, FindBarAssociatedKey.UTF8String, bar, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+        }
+        [bar showInWindow:window];
+    });
+}
+
+extern "C" void webviewHideFindBar(NSWindow *window) {
+    dispatch_async(dispatch_get_main_queue(), ^{
+        if (!window) return;
+        FindBarView *bar = objc_getAssociatedObject(window, FindBarAssociatedKey.UTF8String);
+        if (bar) [bar dismiss];
     });
 }
 

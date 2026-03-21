@@ -348,6 +348,14 @@ export const native = (() => {
 				args: [FFIType.ptr],
 				returns: FFIType.void,
 			},
+			webviewShowFindBar: {
+				args: [FFIType.ptr],
+				returns: FFIType.void,
+			},
+			webviewHideFindBar: {
+				args: [FFIType.ptr],
+				returns: FFIType.void,
+			},
 			evaluateJavaScriptWithNoCompletion: {
 				args: [FFIType.ptr, FFIType.cstring],
 				returns: FFIType.void,
@@ -1169,6 +1177,20 @@ export const ffi = {
 				width: widthBuf[0]!,
 				height: heightBuf[0]!,
 			};
+		},
+
+		showFindBar: (params: { winId: number }) => {
+			const { winId } = params;
+			const windowPtr = getWindowPtr(winId);
+			if (!windowPtr) return;
+			native.symbols.webviewShowFindBar(windowPtr);
+		},
+
+		hideFindBar: (params: { winId: number }) => {
+			const { winId } = params;
+			const windowPtr = getWindowPtr(winId);
+			if (!windowPtr) return;
+			native.symbols.webviewHideFindBar(windowPtr);
 		},
 
 		createWebview: (params: {
