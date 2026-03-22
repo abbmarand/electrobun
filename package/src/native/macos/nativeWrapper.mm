@@ -758,6 +758,7 @@ void releaseObjCObject(id objcObject) {
     - (BOOL)canGoForward;
 
     - (void)evaluateJavaScriptWithNoCompletion:(const char*)jsString;
+    - (const char*)evaluateJavaScriptSync:(const char*)jsString;
     - (void)callAsyncJavascript:(const char*)messageId 
                        jsString:(const char*)jsString 
                       webviewId:(uint32_t)webviewId 
@@ -1183,6 +1184,7 @@ NSArray<NSValue *> *addOverlapRects(NSArray<NSDictionary *> *rectsArray, CGFloat
     - (BOOL)canGoForward { [self doesNotRecognizeSelector:_cmd]; return NO; }
 
     - (void)evaluateJavaScriptWithNoCompletion:(const char*)jsString { [self doesNotRecognizeSelector:_cmd]; }
+    - (const char*)evaluateJavaScriptSync:(const char*)jsString { return NULL; }
     - (void)callAsyncJavascript:(const char*)messageId jsString:(const char*)jsString webviewId:(uint32_t)webviewId hostWebviewId:(uint32_t)hostWebviewId completionHandler:(callAsyncJavascriptCompletionHandler)completionHandler { [self doesNotRecognizeSelector:_cmd]; }
     // todo: we don't need this to be public since it's only used to set the internal electrobun preview script
     - (void)addPreloadScriptToWebView:(const char*)jsString { [self doesNotRecognizeSelector:_cmd]; }
@@ -2210,14 +2212,14 @@ static NSMutableURLRequest *addChromeClientHints(NSURLRequest *original) {
         }
 
         // For main-frame navigations that haven't been processed yet,
-        // cancel, inject stored cookies (+ Chrome client hints for Google),
-        // and re-issue the request. The custom header prevents re-entry.
+        // cancel, inject stored cookies, and re-issue the request.
+        // The custom header prevents re-entry.
         if (navigationAction.targetFrame.isMainFrame
             && ![navigationAction.request valueForHTTPHeaderField:@"X-EB-CI"]) {
 
             BOOL isGoogle = isGoogleDomain(newURL.host);
             if (isGoogle) {
-                webView.customUserAgent = @"Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/134.0.0.0 Safari/537.36";
+                webView.customUserAgent = @"Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/18.3 Safari/605.1.15";
             }
 
             decisionHandler(WKNavigationActionPolicyCancel);
@@ -2255,18 +2257,10 @@ static NSMutableURLRequest *addChromeClientHints(NSURLRequest *original) {
                     }
                 }
 
-                if (isGoogle) {
-                    NSMutableURLRequest *withHints = [addChromeClientHints(req) mutableCopy];
-                    [withHints setValue:@"1" forHTTPHeaderField:@"X-EB-CI"];
-                    dispatch_async(dispatch_get_main_queue(), ^{
-                        [webView loadRequest:withHints];
-                    });
-                } else {
-                    [req setValue:@"1" forHTTPHeaderField:@"X-EB-CI"];
-                    dispatch_async(dispatch_get_main_queue(), ^{
-                        [webView loadRequest:req];
-                    });
-                }
+                [req setValue:@"1" forHTTPHeaderField:@"X-EB-CI"];
+                dispatch_async(dispatch_get_main_queue(), ^{
+                    [webView loadRequest:req];
+                });
             }];
             return;
         }
@@ -2996,10 +2990,10 @@ runOpenPanelWithParameters:(WKOpenPanelParameters *)parameters
             } else {
                 BOOL isGoogle = isGoogleDomain(url.host);
                 if (isGoogle) {
-                    self.webView.customUserAgent = @"Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/134.0.0.0 Safari/537.36";
+                    self.webView.customUserAgent = @"Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/18.3 Safari/605.1.15";
                 }
                 NSURLRequest *base = [NSURLRequest requestWithURL:url];
-                NSURLRequest *request = isGoogle ? addChromeClientHints(base) : base;
+                NSURLRequest *request = base;
 
                 WKHTTPCookieStore *cookieStore = self.webView.configuration.websiteDataStore.httpCookieStore;
                 [cookieStore getAllCookies:^(NSArray<NSHTTPCookie *> *cookies) {
@@ -3134,6 +3128,29 @@ runOpenPanelWithParameters:(WKOpenPanelParameters *)parameters
                             inContentWorld:isolatedWorld
                         completionHandler:nil];
         });
+    }
+
+    - (const char*)evaluateJavaScriptSync:(const char*)jsString {
+        NSString *code = (jsString ? [NSString stringWithUTF8String:jsString] : @"");
+        __block const char* result = NULL;
+        dispatch_semaphore_t sema = dispatch_semaphore_create(0);
+        dispatch_async(dispatch_get_main_queue(), ^{
+            if (!self.webView) {
+                dispatch_semaphore_signal(sema);
+                return;
+            }
+            [self.webView evaluateJavaScript:code
+                                    inFrame:nil
+                            inContentWorld:[WKContentWorld pageWorld]
+                        completionHandler:^(id _result, NSError *error) {
+                if (!error && _result && [_result isKindOfClass:[NSString class]]) {
+                    result = strdup([_result UTF8String]);
+                }
+                dispatch_semaphore_signal(sema);
+            }];
+        });
+        dispatch_semaphore_wait(sema, dispatch_time(DISPATCH_TIME_NOW, (int64_t)(10 * NSEC_PER_SEC)));
+        return result;
     }
 
     - (void)callAsyncJavascript:(const char*)messageId jsString:(const char*)jsString webviewId:(uint32_t)webviewId hostWebviewId:(uint32_t)hostWebviewId completionHandler:(callAsyncJavascriptCompletionHandler)completionHandler {
@@ -3502,6 +3519,7 @@ runOpenPanelWithParameters:(WKOpenPanelParameters *)parameters
     - (void)goForward {}
     - (void)reload {}
     - (void)evaluateJavaScriptWithNoCompletion:(const char*)jsString {}
+    - (const char*)evaluateJavaScriptSync:(const char*)jsString { return NULL; }
     - (void)callAsyncJavascript:(const char*)messageId jsString:(const char*)jsString webviewId:(uint32_t)webviewId hostWebviewId:(uint32_t)hostWebviewId completionHandler:(callAsyncJavascriptCompletionHandler)completionHandler {}
     - (void)addPreloadScriptToWebView:(const char*)jsString {}
     - (void)updateCustomPreloadScript:(const char*)jsString {}
@@ -6626,6 +6644,10 @@ CefRefPtr<CefRequestContext> CreateRequestContextForPartition(const char* partit
         );
     }
 
+    - (const char*)evaluateJavaScriptSync:(const char*)jsString {
+        return NULL;
+    }
+
     - (void)callAsyncJavascript:(const char*)messageId 
                     jsString:(const char*)jsString 
                     webviewId:(uint32_t)webviewId 
@@ -7377,6 +7399,10 @@ extern "C" BOOL webviewCanGoForward(AbstractView *abstractView) {
 
 extern "C" void evaluateJavaScriptWithNoCompletion(AbstractView *abstractView, const char *script) {                    
     [abstractView evaluateJavaScriptWithNoCompletion:script];        
+}
+
+extern "C" const char* evaluateJavascriptSync(AbstractView *abstractView, const char *script) {
+    return [abstractView evaluateJavaScriptSync:script];
 }
 
 extern "C" void testFFI(void *ptr) {              
@@ -8457,6 +8483,94 @@ extern "C" const uint8_t* captureScreenExcludingWindow(NSWindow *window, size_t 
         CGRect screenBounds = CGDisplayBounds(CGMainDisplayID());
         CGImageRef image = imageCreate(screenBounds, filtered, kCGWindowImageDefault);
         CFRelease(filtered);
+        if (!image) return;
+
+        NSBitmapImageRep *rep = [[NSBitmapImageRep alloc] initWithCGImage:image];
+        CGImageRelease(image);
+        NSData *pngData = [rep representationUsingType:NSBitmapImageFileTypePNG
+                                           properties:@{}];
+        if (!pngData || [pngData length] == 0) return;
+
+        size = [pngData length];
+        uint8_t *buffer = (uint8_t*)malloc(size);
+        memcpy(buffer, [pngData bytes], size);
+        result = buffer;
+    });
+
+    if (outSize) *outSize = size;
+    return result;
+}
+
+// getOnScreenWindowList - Return JSON array of on-screen, normal-layer windows.
+// Each entry: {"owner":"<app>","name":"<title>","id":<CGWindowID>}
+// Returns: malloc'd JSON string (caller must free), or NULL on failure.
+typedef CFArrayRef (*CGWindowListCopyWindowInfoFn)(uint32_t, uint32_t);
+
+extern "C" const char* getOnScreenWindowList() {
+    __block const char* result = NULL;
+
+    dispatch_sync(dispatch_get_main_queue(), ^{
+        auto copyInfo = (CGWindowListCopyWindowInfoFn)dlsym(RTLD_DEFAULT, "CGWindowListCopyWindowInfo");
+        if (!copyInfo) return;
+
+        CFArrayRef list = copyInfo(kCGWindowListOptionOnScreenOnly | kCGWindowListExcludeDesktopElements, kCGNullWindowID);
+        if (!list) return;
+
+        NSMutableString *json = [NSMutableString stringWithString:@"["];
+        CFIndex count = CFArrayGetCount(list);
+        BOOL first = YES;
+
+        for (CFIndex i = 0; i < count; i++) {
+            NSDictionary *info = (__bridge NSDictionary *)CFArrayGetValueAtIndex(list, i);
+            NSNumber *layer = info[(__bridge NSString *)kCGWindowLayer];
+            if (!layer || [layer intValue] != 0) continue;
+
+            NSString *owner = info[(__bridge NSString *)kCGWindowOwnerName];
+            NSString *name  = info[(__bridge NSString *)kCGWindowName];
+            NSNumber *num   = info[(__bridge NSString *)kCGWindowNumber];
+            if (!owner || !num) continue;
+
+            // Escape embedded quotes/backslashes for JSON safety
+            NSString *safeOwner = [[owner stringByReplacingOccurrencesOfString:@"\\" withString:@"\\\\"]
+                                          stringByReplacingOccurrencesOfString:@"\"" withString:@"\\\""];
+            NSString *safeName  = name
+                ? [[name stringByReplacingOccurrencesOfString:@"\\" withString:@"\\\\"]
+                         stringByReplacingOccurrencesOfString:@"\"" withString:@"\\\""]
+                : @"";
+
+            if (!first) [json appendString:@","];
+            [json appendFormat:@"{\"owner\":\"%@\",\"name\":\"%@\",\"id\":%d}",
+                safeOwner, safeName, [num intValue]];
+            first = NO;
+        }
+
+        [json appendString:@"]"];
+        CFRelease(list);
+        result = strdup([json UTF8String]);
+    });
+
+    return result;
+}
+
+// captureWindowById - Capture a single window by its CGWindowID as PNG.
+// windowId: the CGWindowID to capture
+// outSize: receives the byte length of the returned PNG buffer
+// Returns: malloc'd PNG data (caller must free), or NULL on failure
+typedef CGImageRef (*CGWindowListCreateImageFn)(CGRect, uint32_t, uint32_t, uint32_t);
+
+extern "C" const uint8_t* captureWindowById(uint32_t windowId, size_t *outSize) {
+    __block const uint8_t* result = NULL;
+    __block size_t size = 0;
+
+    dispatch_sync(dispatch_get_main_queue(), ^{
+        auto imageCreate = (CGWindowListCreateImageFn)dlsym(RTLD_DEFAULT, "CGWindowListCreateImage");
+        if (!imageCreate) return;
+
+        CGImageRef image = imageCreate(
+            CGRectNull,
+            kCGWindowListOptionIncludingWindow,
+            windowId,
+            kCGWindowImageBoundsIgnoreFraming);
         if (!image) return;
 
         NSBitmapImageRep *rep = [[NSBitmapImageRep alloc] initWithCGImage:image];

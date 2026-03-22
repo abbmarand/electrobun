@@ -360,6 +360,10 @@ export const native = (() => {
 				args: [FFIType.ptr, FFIType.cstring],
 				returns: FFIType.void,
 			},
+			evaluateJavascriptSync: {
+				args: [FFIType.ptr, FFIType.cstring],
+				returns: FFIType.cstring,
+			},
 			webviewOpenDevTools: {
 				args: [FFIType.ptr],
 				returns: FFIType.void,
@@ -631,6 +635,14 @@ export const native = (() => {
 			},
 			captureScreenExcludingWindow: {
 				args: [FFIType.ptr, FFIType.ptr], // window ptr, size_t* outSize
+				returns: FFIType.ptr, // pointer to PNG data
+			},
+			getOnScreenWindowList: {
+				args: [],
+				returns: FFIType.cstring,
+			},
+			captureWindowById: {
+				args: [FFIType.u32, FFIType.ptr], // CGWindowID, size_t* outSize
 				returns: FFIType.ptr, // pointer to PNG data
 			},
 			getFrontmostAppInfo: {
@@ -1481,6 +1493,14 @@ window.__electrobunBunBridge = window.__electrobunBunBridge || window.webkit?.me
 			);
 		},
 
+		evaluateJavascriptSync: (params: { id: number; js: string }): string | null => {
+			const webview = BrowserView.getById(params.id);
+			if (!webview?.ptr) return null;
+			const result = native.symbols.evaluateJavascriptSync(webview.ptr, toCString(params.js));
+			if (!result) return null;
+			return result.toString();
+		},
+
 		createTray: (params: {
 			id: number;
 			title: string;
@@ -1725,6 +1745,24 @@ window.__electrobunBunBridge = window.__electrobunBunBridge || window.webkit?.me
 			const sizeBuffer = new BigUint64Array(1);
 			const dataPtr = native.symbols.captureScreenExcludingWindow(
 				windowPtr ?? ptr(new Uint8Array(0)),
+				ptr(sizeBuffer),
+			);
+			if (!dataPtr) return null;
+			const size = Number(sizeBuffer[0]);
+			if (size === 0) return null;
+			const result = new Uint8Array(size);
+			result.set(new Uint8Array(toArrayBuffer(dataPtr, 0, size)));
+			return result;
+		},
+		getOnScreenWindowList: (): string | null => {
+			const result = native.symbols.getOnScreenWindowList();
+			if (!result) return null;
+			return result.toString();
+		},
+		captureWindowById: (params: { windowId: number }): Uint8Array | null => {
+			const sizeBuffer = new BigUint64Array(1);
+			const dataPtr = native.symbols.captureWindowById(
+				params.windowId,
 				ptr(sizeBuffer),
 			);
 			if (!dataPtr) return null;
@@ -2333,6 +2371,43 @@ export const Screen = {
 	 */
 	captureScreen: (excludeWinId: number | null = null): Uint8Array | null => {
 		return ffi.request.captureScreenExcludingWindow({ winId: excludeWinId });
+	},
+
+	/**
+	 * List all on-screen windows (normal layer only).
+	 * @returns Array of { owner, name, id } where id is the CGWindowID
+	 */
+	getWindowList: (): Array<{ owner: string; name: string; id: number }> => {
+		const json = ffi.request.getOnScreenWindowList();
+		if (!json) return [];
+		try {
+			return JSON.parse(json);
+		} catch {
+			return [];
+		}
+	},
+
+	/**
+	 * Capture a specific window by its CGWindowID.
+	 * @param cgWindowId - The CGWindowID to capture
+	 * @returns PNG data as Uint8Array, or null on failure
+	 */
+	captureWindow: (cgWindowId: number): Uint8Array | null => {
+		return ffi.request.captureWindowById({ windowId: cgWindowId });
+	},
+
+	/**
+	 * List all connected displays.
+	 * @returns Array of Display objects with bounds, workArea, scaleFactor
+	 */
+	listScreens: (): Display[] => {
+		const jsonStr = native.symbols.getAllDisplays();
+		if (!jsonStr) return [];
+		try {
+			return JSON.parse(jsonStr.toString());
+		} catch {
+			return [];
+		}
 	},
 };
 

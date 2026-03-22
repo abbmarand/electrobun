@@ -219,6 +219,10 @@ export class BrowserView<T extends RPCWithTransport = RPCWithTransport> {
 		ffi.request.evaluateJavascriptWithNoCompletion({ id: this.id, js });
 	}
 
+	executeJavascriptSync(js: string): string | null {
+		return ffi.request.evaluateJavascriptSync({ id: this.id, js });
+	}
+
 	loadURL(url: string) {
 		console.log(`DEBUG: loadURL called for webview ${this.id}: ${url}`);
 		this.url = url;
