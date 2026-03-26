@@ -649,6 +649,14 @@ export const native = (() => {
 				args: [],
 				returns: FFIType.cstring,
 			},
+			getFrontmostWindowBounds: {
+				args: [],
+				returns: FFIType.cstring,
+			},
+			setFrontmostWindowBounds: {
+				args: [FFIType.i32, FFIType.i32, FFIType.i32, FFIType.i32],
+				returns: FFIType.cstring,
+			},
 			getAppIconToPath: {
 				args: [FFIType.cstring, FFIType.cstring, FFIType.i32],
 				returns: FFIType.bool,
@@ -1774,6 +1782,26 @@ window.__electrobunBunBridge = window.__electrobunBunBridge || window.webkit?.me
 		},
 		getFrontmostAppInfo: (): string | null => {
 			const result = native.symbols.getFrontmostAppInfo();
+			if (!result) return null;
+			return result.toString();
+		},
+		getFrontmostWindowBounds: (): string | null => {
+			const result = native.symbols.getFrontmostWindowBounds();
+			if (!result) return null;
+			return result.toString();
+		},
+		setFrontmostWindowBounds: (params: {
+			x: number;
+			y: number;
+			width: number;
+			height: number;
+		}): string | null => {
+			const result = native.symbols.setFrontmostWindowBounds(
+				params.x,
+				params.y,
+				params.width,
+				params.height,
+			);
 			if (!result) return null;
 			return result.toString();
 		},

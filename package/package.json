@@ -29,6 +29,7 @@
 		"postinstall": "if [ \"${ELECTROBUN_POSTINSTALL_RUNNING:-0}\" = \"1\" ]; then echo '[electrobun] Skipping nested postinstall'; exit 0; fi; echo '[electrobun] Building...' && ELECTROBUN_POSTINSTALL_RUNNING=1 bun build:dev && echo '[electrobun] Signing binary...' && codesign --force --sign - bin/electrobun && echo '[electrobun] Ready!'",
 		"start": "bun src/bun/index.ts",
 		"check-zig-version": "vendors/zig/zig version",
+		"sync:api": "cp -R src/bun dist/api/ && cp -R src/browser dist/api/ && cp -R src/shared dist/api/",
 		"build:dev": "bun build.ts",
 		"build:release": "bun build.ts --release",
 		"dev": "bun install && bun build:dev && cd ../kitchen && bun install && bun dev",

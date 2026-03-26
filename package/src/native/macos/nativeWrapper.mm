@@ -25,6 +25,7 @@ static bool wgpuDebugEnabled() {
     return cached == 1;
 }
 #import <UserNotifications/UserNotifications.h>
+#import <ApplicationServices/ApplicationServices.h>
 #include <sys/socket.h>
 #include <netinet/in.h>
 #include <unistd.h>
@@ -8605,6 +8606,119 @@ extern "C" const char* getFrontmostAppInfo() {
         NSString *json = [NSString stringWithFormat:@"{\"bundleId\":\"%@\",\"name\":\"%@\",\"path\":\"%@\"}",
             bundleId, name, path];
         result = strdup([json UTF8String]);
+    });
+
+    return result;
+}
+
+// Helper: get AXUIElementRef for the frontmost application's first window.
+// Caller must CFRelease both *outApp and *outWindow when done.
+static bool getFrontmostAXWindow(AXUIElementRef *outApp, AXUIElementRef *outWindow) {
+    NSRunningApplication *app = [[NSWorkspace sharedWorkspace] frontmostApplication];
+    if (!app) return false;
+
+    pid_t pid = app.processIdentifier;
+    AXUIElementRef appRef = AXUIElementCreateApplication(pid);
+    if (!appRef) return false;
+
+    CFTypeRef windowsRef = NULL;
+    AXError err = AXUIElementCopyAttributeValue(appRef, kAXWindowsAttribute, &windowsRef);
+    if (err != kAXErrorSuccess || !windowsRef) {
+        CFRelease(appRef);
+        return false;
+    }
+
+    CFArrayRef windows = (CFArrayRef)windowsRef;
+    if (CFArrayGetCount(windows) == 0) {
+        CFRelease(windows);
+        CFRelease(appRef);
+        return false;
+    }
+
+    AXUIElementRef winRef = (AXUIElementRef)CFArrayGetValueAtIndex(windows, 0);
+    CFRetain(winRef);
+    CFRelease(windows);
+
+    *outApp = appRef;
+    *outWindow = winRef;
+    return true;
+}
+
+static bool getAXWindowBounds(AXUIElementRef winRef, CGPoint *outPos, CGSize *outSize) {
+    CFTypeRef posRef = NULL;
+    CFTypeRef sizeRef = NULL;
+
+    AXError err = AXUIElementCopyAttributeValue(winRef, kAXPositionAttribute, &posRef);
+    if (err != kAXErrorSuccess || !posRef) return false;
+
+    err = AXUIElementCopyAttributeValue(winRef, kAXSizeAttribute, &sizeRef);
+    if (err != kAXErrorSuccess || !sizeRef) {
+        CFRelease(posRef);
+        return false;
+    }
+
+    AXValueGetValue((AXValueRef)posRef, (AXValueType)kAXValueCGPointType, outPos);
+    AXValueGetValue((AXValueRef)sizeRef, (AXValueType)kAXValueCGSizeType, outSize);
+    CFRelease(posRef);
+    CFRelease(sizeRef);
+    return true;
+}
+
+extern "C" const char* getFrontmostWindowBounds() {
+    __block const char* result = NULL;
+
+    dispatch_sync(dispatch_get_main_queue(), ^{
+        AXUIElementRef appRef = NULL;
+        AXUIElementRef winRef = NULL;
+        if (!getFrontmostAXWindow(&appRef, &winRef)) return;
+
+        CGPoint pos;
+        CGSize size;
+        if (getAXWindowBounds(winRef, &pos, &size)) {
+            NSString *json = [NSString stringWithFormat:@"{\"x\":%d,\"y\":%d,\"width\":%d,\"height\":%d}",
+                (int)pos.x, (int)pos.y, (int)size.width, (int)size.height];
+            result = strdup([json UTF8String]);
+        }
+
+        CFRelease(winRef);
+        CFRelease(appRef);
+    });
+
+    return result;
+}
+
+extern "C" const char* setFrontmostWindowBounds(int x, int y, int w, int h) {
+    __block const char* result = NULL;
+
+    dispatch_sync(dispatch_get_main_queue(), ^{
+        AXUIElementRef appRef = NULL;
+        AXUIElementRef winRef = NULL;
+        if (!getFrontmostAXWindow(&appRef, &winRef)) return;
+
+        CGPoint oldPos;
+        CGSize oldSize;
+        if (getAXWindowBounds(winRef, &oldPos, &oldSize)) {
+            NSString *json = [NSString stringWithFormat:@"{\"x\":%d,\"y\":%d,\"width\":%d,\"height\":%d}",
+                (int)oldPos.x, (int)oldPos.y, (int)oldSize.width, (int)oldSize.height];
+            result = strdup([json UTF8String]);
+        }
+
+        CGPoint newPos = CGPointMake(x, y);
+        CGSize newSize = CGSizeMake(w, h);
+        AXValueRef posVal = AXValueCreate((AXValueType)kAXValueCGPointType, &newPos);
+        AXValueRef sizeVal = AXValueCreate((AXValueType)kAXValueCGSizeType, &newSize);
+
+        if (posVal) {
+            AXUIElementSetAttributeValue(winRef, kAXPositionAttribute, posVal);
+            CFRelease(posVal);
+        }
+        if (sizeVal) {
+            AXUIElementSetAttributeValue(winRef, kAXSizeAttribute, sizeVal);
+            CFRelease(sizeVal);
+        }
+
+        CFRelease(winRef);
+        CFRelease(appRef);
     });
 
     return result;

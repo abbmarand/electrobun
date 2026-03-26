@@ -9849,6 +9849,14 @@ ELECTROBUN_EXPORT const char* getFrontmostAppInfo() {
     });
 }
 
+ELECTROBUN_EXPORT const char* getFrontmostWindowBounds() {
+    return NULL;
+}
+
+ELECTROBUN_EXPORT const char* setFrontmostWindowBounds(int x, int y, int w, int h) {
+    return NULL;
+}
+
 ELECTROBUN_EXPORT bool getAppIconToPath(const char* appPath, const char* destPath, int size) {
     // TODO: full implementation requires GDI+ for PNG output
     return false;

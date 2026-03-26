@@ -339,6 +339,49 @@ export const getFrontmostAppInfo = (): FrontmostAppInfo | null => {
 	}
 };
 
+export type WindowBounds = {
+	x: number;
+	y: number;
+	width: number;
+	height: number;
+};
+
+/**
+ * Get the bounds (position + size) of the frontmost application's first window.
+ * Uses the macOS Accessibility API — near-instant, no subprocess.
+ */
+export const getFrontmostWindowBounds = (): WindowBounds | null => {
+	const json = ffi.request.getFrontmostWindowBounds();
+	if (!json) return null;
+	try {
+		return JSON.parse(json);
+	} catch {
+		return null;
+	}
+};
+
+/**
+ * Set the bounds of the frontmost application's first window.
+ * Returns the previous bounds so callers can implement undo/restore.
+ * Uses the macOS Accessibility API — near-instant, no subprocess.
+ */
+export const setFrontmostWindowBounds = (
+	bounds: WindowBounds,
+): WindowBounds | null => {
+	const json = ffi.request.setFrontmostWindowBounds({
+		x: Math.round(bounds.x),
+		y: Math.round(bounds.y),
+		width: Math.round(bounds.width),
+		height: Math.round(bounds.height),
+	});
+	if (!json) return null;
+	try {
+		return JSON.parse(json);
+	} catch {
+		return null;
+	}
+};
+
 /**
  * Extract an app/file icon and save it as a PNG file.
  * @param appPath - Path to the .app bundle, file, or folder

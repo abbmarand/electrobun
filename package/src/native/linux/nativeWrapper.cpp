@@ -8910,6 +8910,14 @@ ELECTROBUN_EXPORT const char* getFrontmostAppInfo() {
     });
 }
 
+ELECTROBUN_EXPORT const char* getFrontmostWindowBounds() {
+    return NULL;
+}
+
+ELECTROBUN_EXPORT const char* setFrontmostWindowBounds(int x, int y, int w, int h) {
+    return NULL;
+}
+
 ELECTROBUN_EXPORT bool getAppIconToPath(const char* appPath, const char* destPath, int size) {
     return dispatch_sync_main([&]() -> bool {
         GFile* file = g_file_new_for_path(appPath);
