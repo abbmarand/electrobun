@@ -9812,6 +9812,31 @@ ELECTROBUN_EXPORT int64_t clipboardGetChangeCount() {
     return (int64_t)GetClipboardSequenceNumber();
 }
 
+// simulatePaste - Simulate a Ctrl+V keystroke to paste from clipboard.
+ELECTROBUN_EXPORT void simulatePaste() {
+    INPUT inputs[4] = {};
+
+    // Ctrl down
+    inputs[0].type = INPUT_KEYBOARD;
+    inputs[0].ki.wVk = VK_CONTROL;
+
+    // V down
+    inputs[1].type = INPUT_KEYBOARD;
+    inputs[1].ki.wVk = 0x56; // 'V'
+
+    // V up
+    inputs[2].type = INPUT_KEYBOARD;
+    inputs[2].ki.wVk = 0x56;
+    inputs[2].ki.dwFlags = KEYEVENTF_KEYUP;
+
+    // Ctrl up
+    inputs[3].type = INPUT_KEYBOARD;
+    inputs[3].ki.wVk = VK_CONTROL;
+    inputs[3].ki.dwFlags = KEYEVENTF_KEYUP;
+
+    SendInput(4, inputs, sizeof(INPUT));
+}
+
 ELECTROBUN_EXPORT const char* getFrontmostAppInfo() {
     return MainThreadDispatcher::dispatch_sync([=]() -> const char* {
         HWND hwnd = GetForegroundWindow();
@@ -9855,6 +9880,87 @@ ELECTROBUN_EXPORT const char* getFrontmostWindowBounds() {
 
 ELECTROBUN_EXPORT const char* setFrontmostWindowBounds(int x, int y, int w, int h) {
     return NULL;
+}
+
+// getOnScreenWindowList - Return JSON array of on-screen, visible windows.
+// Each entry: {"owner":"<app>","name":"<title>","id":<HWND as int>}
+struct WindowEnumData {
+    std::string json;
+    bool first;
+};
+
+static BOOL CALLBACK EnumWindowsCallback(HWND hwnd, LPARAM lParam) {
+    if (!IsWindowVisible(hwnd)) return TRUE;
+
+    char titleBuf[512] = {0};
+    int titleLen = GetWindowTextA(hwnd, titleBuf, sizeof(titleBuf));
+    if (titleLen == 0) return TRUE;
+
+    // Skip windows with empty titles or cloaked windows (UWP hidden windows)
+    DWORD cloaked = 0;
+    typedef HRESULT (WINAPI *DwmGetWindowAttributeFn)(HWND, DWORD, PVOID, DWORD);
+    static auto dwmGetAttr = (DwmGetWindowAttributeFn)GetProcAddress(
+        GetModuleHandleA("dwmapi.dll"), "DwmGetWindowAttribute");
+    if (dwmGetAttr) {
+        dwmGetAttr(hwnd, 14 /* DWMWA_CLOAKED */, &cloaked, sizeof(cloaked));
+        if (cloaked) return TRUE;
+    }
+
+    DWORD pid = 0;
+    GetWindowThreadProcessId(hwnd, &pid);
+
+    char ownerName[256] = {0};
+    if (pid) {
+        HANDLE hProc = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, FALSE, pid);
+        if (hProc) {
+            char pathBuf[MAX_PATH] = {0};
+            DWORD pathLen = MAX_PATH;
+            if (QueryFullProcessImageNameA(hProc, 0, pathBuf, &pathLen) && pathLen > 0) {
+                const char* lastSlash = strrchr(pathBuf, '\\');
+                const char* name = lastSlash ? lastSlash + 1 : pathBuf;
+                const char* dot = strrchr(name, '.');
+                size_t len = dot ? (size_t)(dot - name) : strlen(name);
+                if (len >= sizeof(ownerName)) len = sizeof(ownerName) - 1;
+                memcpy(ownerName, name, len);
+                ownerName[len] = '\0';
+            }
+            CloseHandle(hProc);
+        }
+    }
+
+    auto data = (WindowEnumData*)lParam;
+    if (!data->first) data->json += ",";
+    data->json += "{\"owner\":\"";
+    for (const char* p = ownerName; *p; ++p) {
+        if (*p == '"') data->json += "\\\"";
+        else if (*p == '\\') data->json += "\\\\";
+        else data->json += *p;
+    }
+    data->json += "\",\"name\":\"";
+    for (const char* p = titleBuf; *p; ++p) {
+        if (*p == '"') data->json += "\\\"";
+        else if (*p == '\\') data->json += "\\\\";
+        else data->json += *p;
+    }
+    data->json += "\",\"id\":";
+    data->json += std::to_string((uintptr_t)hwnd);
+    data->json += "}";
+    data->first = false;
+
+    return TRUE;
+}
+
+ELECTROBUN_EXPORT const char* getOnScreenWindowList() {
+    return MainThreadDispatcher::dispatch_sync([=]() -> const char* {
+        WindowEnumData data;
+        data.json = "[";
+        data.first = true;
+
+        EnumWindows(EnumWindowsCallback, (LPARAM)&data);
+
+        data.json += "]";
+        return strdup(data.json.c_str());
+    });
 }
 
 ELECTROBUN_EXPORT bool getAppIconToPath(const char* appPath, const char* destPath, int size) {

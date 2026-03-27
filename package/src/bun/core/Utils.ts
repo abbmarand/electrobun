@@ -312,6 +312,14 @@ export const clipboardClear = (): void => {
 };
 
 /**
+ * Simulate a paste keystroke (Cmd+V on macOS, Ctrl+V on Windows/Linux).
+ * Sends the keypress to the currently focused window via native OS APIs.
+ */
+export const simulatePaste = (): void => {
+	ffi.request.simulatePaste();
+};
+
+/**
  * Get the available formats in the clipboard.
  * @returns Array of format names (e.g., ["text", "image", "files", "html"])
  */

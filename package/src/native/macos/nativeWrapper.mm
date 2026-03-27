@@ -8439,6 +8439,29 @@ extern "C" const char* clipboardAvailableFormats() {
     return result;
 }
 
+// simulatePaste - Simulate a Cmd+V keystroke to paste from clipboard.
+// Uses CGEvents to synthesize the key press on the current session.
+extern "C" void simulatePaste() {
+    dispatch_sync(dispatch_get_main_queue(), ^{
+        CGEventSourceRef source = CGEventSourceCreate(kCGEventSourceStateHIDSystemState);
+        if (!source) return;
+
+        // Key code 9 = 'V' on macOS
+        CGEventRef keyDown = CGEventCreateKeyboardEvent(source, (CGKeyCode)9, true);
+        CGEventRef keyUp = CGEventCreateKeyboardEvent(source, (CGKeyCode)9, false);
+
+        CGEventSetFlags(keyDown, kCGEventFlagMaskCommand);
+        CGEventSetFlags(keyUp, kCGEventFlagMaskCommand);
+
+        CGEventPost(kCGAnnotatedSessionEventTap, keyDown);
+        CGEventPost(kCGAnnotatedSessionEventTap, keyUp);
+
+        CFRelease(keyDown);
+        CFRelease(keyUp);
+        CFRelease(source);
+    });
+}
+
 // captureScreenExcludingWindow - Capture the screen as PNG, excluding a specific window.
 // Uses the legacy CGWindowList API loaded via dlsym to avoid ScreenCaptureKit's
 // recording indicator. The functions still exist in CoreGraphics at runtime even

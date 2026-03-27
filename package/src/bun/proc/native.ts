@@ -625,10 +625,14 @@ export const native = (() => {
 				args: [FFIType.ptr, FFIType.u64], // PNG data pointer, size
 				returns: FFIType.void,
 			},
-			clipboardClear: {
-				args: [],
-				returns: FFIType.void,
-			},
+		clipboardClear: {
+			args: [],
+			returns: FFIType.void,
+		},
+		simulatePaste: {
+			args: [],
+			returns: FFIType.void,
+		},
 			clipboardAvailableFormats: {
 				args: [],
 				returns: FFIType.cstring,
@@ -1738,9 +1742,12 @@ window.__electrobunBunBridge = window.__electrobunBunBridge || window.webkit?.me
 			const { pngData } = params;
 			native.symbols.clipboardWriteImage(ptr(pngData), BigInt(pngData.length));
 		},
-		clipboardClear: (): void => {
-			native.symbols.clipboardClear();
-		},
+	clipboardClear: (): void => {
+		native.symbols.clipboardClear();
+	},
+	simulatePaste: (): void => {
+		native.symbols.simulatePaste();
+	},
 		clipboardAvailableFormats: (): string[] => {
 			const result = native.symbols.clipboardAvailableFormats();
 			if (!result) return [];

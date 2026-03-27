@@ -8834,6 +8834,72 @@ ELECTROBUN_EXPORT int64_t clipboardGetChangeCount() {
     return g_clipboardChangeCounter;
 }
 
+// simulatePaste - Simulate a Ctrl+V keystroke to paste from clipboard.
+// Dynamically loads libXtst for XTestFakeKeyEvent to avoid a hard build dependency.
+ELECTROBUN_EXPORT void simulatePaste() {
+    dispatch_sync_main_void([&]() {
+        Display* display = gdk_x11_get_default_xdisplay();
+        if (!display) return;
+
+        // Try to load XTest dynamically
+        void* xtst = dlopen("libXtst.so.6", RTLD_LAZY);
+        if (!xtst) xtst = dlopen("libXtst.so", RTLD_LAZY);
+
+        if (xtst) {
+            typedef int (*XTestFakeKeyEventFn)(Display*, unsigned int, int, unsigned long);
+            auto fakeKeyEvent = (XTestFakeKeyEventFn)dlsym(xtst, "XTestFakeKeyEvent");
+            if (fakeKeyEvent) {
+                KeyCode ctrl = XKeysymToKeycode(display, XK_Control_L);
+                KeyCode v = XKeysymToKeycode(display, XK_v);
+
+                fakeKeyEvent(display, ctrl, True, 0);
+                fakeKeyEvent(display, v, True, 0);
+                fakeKeyEvent(display, v, False, 0);
+                fakeKeyEvent(display, ctrl, False, 0);
+                XFlush(display);
+                dlclose(xtst);
+                return;
+            }
+            dlclose(xtst);
+        }
+
+        // Fallback: XSendEvent to the focused window
+        Window focused;
+        int revert;
+        XGetInputFocus(display, &focused, &revert);
+        if (focused == None) return;
+
+        KeyCode ctrl = XKeysymToKeycode(display, XK_Control_L);
+        KeyCode v = XKeysymToKeycode(display, XK_v);
+
+        XKeyEvent ev = {};
+        ev.display = display;
+        ev.window = focused;
+        ev.root = DefaultRootWindow(display);
+        ev.subwindow = None;
+        ev.time = CurrentTime;
+        ev.same_screen = True;
+
+        ev.type = KeyPress;
+        ev.keycode = ctrl;
+        ev.state = 0;
+        XSendEvent(display, focused, True, KeyPressMask, (XEvent*)&ev);
+
+        ev.keycode = v;
+        ev.state = ControlMask;
+        XSendEvent(display, focused, True, KeyPressMask, (XEvent*)&ev);
+
+        ev.type = KeyRelease;
+        XSendEvent(display, focused, True, KeyReleaseMask, (XEvent*)&ev);
+
+        ev.keycode = ctrl;
+        ev.state = 0;
+        XSendEvent(display, focused, True, KeyReleaseMask, (XEvent*)&ev);
+
+        XFlush(display);
+    });
+}
+
 ELECTROBUN_EXPORT const char* getFrontmostAppInfo() {
     return dispatch_sync_main([&]() -> const char* {
         Display* display = gdk_x11_get_default_xdisplay();
@@ -8916,6 +8982,109 @@ ELECTROBUN_EXPORT const char* getFrontmostWindowBounds() {
 
 ELECTROBUN_EXPORT const char* setFrontmostWindowBounds(int x, int y, int w, int h) {
     return NULL;
+}
+
+// getOnScreenWindowList - Return JSON array of on-screen, normal-layer windows.
+// Each entry: {"owner":"<app>","name":"<title>","id":<windowId>}
+ELECTROBUN_EXPORT const char* getOnScreenWindowList() {
+    return dispatch_sync_main([&]() -> const char* {
+        Display* display = gdk_x11_get_default_xdisplay();
+        if (!display) return strdup("[]");
+
+        Window root = DefaultRootWindow(display);
+        Atom netClientList = XInternAtom(display, "_NET_CLIENT_LIST_STACKING", False);
+        Atom netWmName = XInternAtom(display, "_NET_WM_NAME", False);
+        Atom utf8String = XInternAtom(display, "UTF8_STRING", False);
+        Atom netWmPid = XInternAtom(display, "_NET_WM_PID", False);
+
+        Atom actualType;
+        int actualFormat;
+        unsigned long nItems, bytesAfter;
+        unsigned char* propData = nullptr;
+
+        int status = XGetWindowProperty(display, root, netClientList,
+            0, 4096, False, XA_WINDOW,
+            &actualType, &actualFormat, &nItems, &bytesAfter, &propData);
+
+        if (status != Success || !propData || nItems == 0) {
+            if (propData) XFree(propData);
+            return strdup("[]");
+        }
+
+        Window* wins = (Window*)propData;
+        std::string json = "[";
+        bool first = true;
+
+        for (unsigned long i = 0; i < nItems; i++) {
+            Window w = wins[i];
+
+            // Get window name
+            unsigned char* nameProp = nullptr;
+            unsigned long nameItems = 0;
+            Atom nameType;
+            int nameFmt;
+            unsigned long nameAfter;
+            char windowName[512] = {0};
+
+            int ns = XGetWindowProperty(display, w, netWmName,
+                0, 128, False, utf8String,
+                &nameType, &nameFmt, &nameItems, &nameAfter, &nameProp);
+            if (ns == Success && nameProp && nameItems > 0) {
+                size_t len = nameItems < sizeof(windowName) - 1 ? nameItems : sizeof(windowName) - 1;
+                memcpy(windowName, nameProp, len);
+                windowName[len] = '\0';
+            }
+            if (nameProp) XFree(nameProp);
+
+            // Get PID and resolve process name
+            unsigned char* pidProp = nullptr;
+            unsigned long pidItems = 0;
+            Atom pidType;
+            int pidFmt;
+            unsigned long pidAfter;
+            char ownerName[256] = {0};
+
+            int ps = XGetWindowProperty(display, w, netWmPid,
+                0, 1, False, XA_CARDINAL,
+                &pidType, &pidFmt, &pidItems, &pidAfter, &pidProp);
+            if (ps == Success && pidProp && pidItems > 0) {
+                pid_t pid = (pid_t)(*(unsigned long*)pidProp);
+                char commPath[64];
+                snprintf(commPath, sizeof(commPath), "/proc/%d/comm", pid);
+                FILE* f = fopen(commPath, "r");
+                if (f) {
+                    if (fgets(ownerName, sizeof(ownerName), f)) {
+                        size_t len = strlen(ownerName);
+                        if (len > 0 && ownerName[len - 1] == '\n') ownerName[len - 1] = '\0';
+                    }
+                    fclose(f);
+                }
+            }
+            if (pidProp) XFree(pidProp);
+
+            if (!first) json += ",";
+            json += "{\"owner\":\"";
+            for (const char* p = ownerName; *p; ++p) {
+                if (*p == '"') json += "\\\"";
+                else if (*p == '\\') json += "\\\\";
+                else json += *p;
+            }
+            json += "\",\"name\":\"";
+            for (const char* p = windowName; *p; ++p) {
+                if (*p == '"') json += "\\\"";
+                else if (*p == '\\') json += "\\\\";
+                else json += *p;
+            }
+            json += "\",\"id\":";
+            json += std::to_string((unsigned long)w);
+            json += "}";
+            first = false;
+        }
+
+        XFree(propData);
+        json += "]";
+        return strdup(json.c_str());
+    });
 }
 
 ELECTROBUN_EXPORT bool getAppIconToPath(const char* appPath, const char* destPath, int size) {
