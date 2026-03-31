@@ -9315,9 +9315,20 @@ extern "C" BOOL registerGlobalShortcut(const char* accelerator) {
 
     ensureEventTap();
 
+    if (!g_eventTap) {
+        // Event tap creation failed (accessibility denied) — roll back so retries work
+        [g_globalShortcutsLock lock];
+        auto it = std::remove_if(g_registeredShortcuts.begin(), g_registeredShortcuts.end(),
+                                 [&](const RegisteredShortcut& s) { return s.accelerator == accelStr; });
+        g_registeredShortcuts.erase(it, g_registeredShortcuts.end());
+        [g_globalShortcutsLock unlock];
+        NSLog(@"[GlobalShortcut] Failed to register %s — no event tap (accessibility denied)", accelerator);
+        return NO;
+    }
+
     NSLog(@"[GlobalShortcut] Registered: %s (keyCode: %d, modifiers: 0x%llX)",
           accelerator, keyCode, (unsigned long long)modifiers);
-    return g_eventTap != nullptr;
+    return YES;
 }
 
 extern "C" BOOL unregisterGlobalShortcut(const char* accelerator) {
