@@ -15,7 +15,7 @@ import {
 	copyFileSync,
 	renameSync,
 } from "fs";
-import { execSync } from "child_process";
+import { execSync, spawnSync } from "child_process";
 import * as readline from "readline";
 import { OS, ARCH } from "../shared/platform";
 import { DEFAULT_CEF_VERSION_STRING } from "../shared/cef-version";
@@ -55,6 +55,26 @@ function createTar(tarPath: string, cwd: string, entries: string[]) {
 			env: { ...process.env, COPYFILE_DISABLE: "1" },
 		},
 	);
+}
+
+/** Best-effort delete of a prior build tree (handles uchg / read-only / root-owned files). */
+function removeBuildTree(absPath: string): void {
+	if (!existsSync(absPath)) return;
+	if (process.platform === "darwin") {
+		spawnSync("chflags", ["-R", "nouchg", absPath], { stdio: "ignore" });
+		spawnSync("chmod", ["-R", "u+w", absPath], { stdio: "ignore" });
+	}
+	try {
+		rmSync(absPath, { recursive: true, force: true });
+	} catch {
+		if (process.platform === "darwin") {
+			const r = spawnSync("sudo", ["rm", "-rf", absPath], { stdio: "inherit" });
+			if (r.status === 0) return;
+		}
+		throw new Error(
+			`Could not remove build folder ${absPath}. Try: sudo rm -rf "${absPath}"`,
+		);
+	}
 }
 
 // Create a tar.gz file using system tar command
@@ -2000,7 +2020,7 @@ Categories=Utility;Application;
 
 		// refresh build folder
 		if (existsSync(buildFolder)) {
-			rmSync(buildFolder, { recursive: true });
+			removeBuildTree(buildFolder);
 		}
 		mkdirSync(buildFolder, { recursive: true });
 		// bundle bun to build/bun
