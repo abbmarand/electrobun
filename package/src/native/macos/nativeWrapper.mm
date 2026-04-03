@@ -3065,6 +3065,12 @@ runOpenPanelWithParameters:(WKOpenPanelParameters *)parameters
         uint32_t webviewIdForLogging = self.webviewId;
         WKWebView *webViewToClean = self.webView;
 
+        // Keep native tracking consistent even if this remove path is called
+        // directly instead of going through webviewRemove().
+        if (globalAbstractViews) {
+            [globalAbstractViews removeObjectForKey:@(self.webviewId)];
+        }
+
         // Dispatch all cleanup to main queue since WKWebView operations require it
         dispatch_async(dispatch_get_main_queue(), ^{
             [webViewToClean stopLoading];
@@ -7398,8 +7404,11 @@ extern "C" BOOL webviewCanGoForward(AbstractView *abstractView) {
     return [abstractView canGoForward];
 }
 
-extern "C" void evaluateJavaScriptWithNoCompletion(AbstractView *abstractView, const char *script) {                    
-    [abstractView evaluateJavaScriptWithNoCompletion:script];        
+extern "C" void evaluateJavaScriptWithNoCompletion(AbstractView *abstractView, const char *script) {
+    if (!abstractView) {
+        return;
+    }
+    [abstractView evaluateJavaScriptWithNoCompletion:script];
 }
 
 extern "C" const char* evaluateJavascriptSync(AbstractView *abstractView, const char *script) {

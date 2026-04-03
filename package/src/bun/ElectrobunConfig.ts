@@ -185,6 +185,36 @@ export interface ElectrobunConfig {
 		locales?: string[] | "*";
 
 		/**
+		 * Additional file or directory paths to watch for changes during `electrobun dev --watch`.
+		 * Paths are relative to the project root.
+		 * Useful for files that affect your build but aren't listed as entrypoints or copy sources.
+		 */
+		watch?: string[];
+
+		/**
+		 * Glob patterns for files that should not trigger a rebuild when changed.
+		 * Patterns are matched against project-relative paths.
+		 * The `build/`, `artifacts/`, and `node_modules/` directories are always ignored automatically.
+		 */
+		watchIgnore?: string[];
+
+		/**
+		 * Carrot build configuration.
+		 * When present, the build also produces a carrot artifact alongside the standalone app.
+		 * Set `carrotOnly: true` to skip the standalone app build entirely.
+		 */
+		carrot?: {
+			id: string;
+			name: string;
+			description?: string;
+			mode?: "window" | "background";
+			carrotOnly?: boolean;
+			permissions?: Record<string, unknown>;
+			dependencies?: Record<string, string>;
+			remoteUIs?: Record<string, { entrypoint: string; [key: string]: unknown }>;
+		};
+
+		/**
 		 * macOS-specific build configuration
 		 */
 		mac?: {

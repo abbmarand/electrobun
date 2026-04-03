@@ -7,6 +7,7 @@ import {
   Tray,
   Utils,
   type RPCSchema,
+  Updater,
 } from "electrobun/bun";
 import { existsSync, mkdirSync, statSync } from "node:fs";
 import { join } from "node:path";
@@ -138,6 +139,7 @@ class CarrotInstance {
   applicationMenu: any[] | null = null;
   controllerWindows = new Map<string, BrowserWindow>();
   controllerWindow: BrowserWindow | null = null;
+  webClients = new Map<string, { send: (data: string) => void }>();
   bunnyWindow: BrowserWindow | null = null;
   bunnyPollTimeout: ReturnType<typeof setTimeout> | null = null;
   worker: Worker | null = null;
@@ -274,25 +276,25 @@ class CarrotInstance {
       void this.stop();
     };
 
-    const shouldCreateControllerWindow =
-      this.carrot.manifest.mode === "window" ||
-      this.carrot.manifest.view.hidden !== true;
-
-    if (shouldCreateControllerWindow) {
-      bootLog("creating carrot controller window", {
-        id: this.carrot.manifest.id,
-        url: this.carrot.viewUrl,
-      });
-      this.createControllerWindow("main");
-    } else {
-      bootLog("skipping hidden background controller window", {
-        id: this.carrot.manifest.id,
-      });
-    }
+    // Send init context to the worker so it has statePath, permissions, etc.
+    const channel = await Updater.localInfo.channel().catch(() => "dev");
+    this.worker!.postMessage({
+      type: "init",
+      manifest: this.carrot.manifest,
+      context: {
+        statePath: this.statePath,
+        logsPath: this.logsPath,
+        permissions: flattenCarrotPermissions(this.carrot.install.permissionsGranted),
+        grantedPermissions: this.carrot.install.permissionsGranted,
+        authToken: runtime.authToken || null,
+        channel: channel || "dev",
+      },
+    });
 
     this.status = "running";
     bootLog("carrot running", { id: this.carrot.manifest.id });
     runtime.notifyDashboardChanged();
+
   }
 
   async stop() {
@@ -539,6 +541,19 @@ class CarrotInstance {
     switch (message.type) {
       case "ready": {
         this.pushLog("worker ready");
+        // Tell connected web clients to re-fetch state from the (new) worker.
+        // This handles the case where the carrot was restarted while web
+        // clients were still connected — their windowId is stale and they
+        // need to call getInitialState again to pick up the new runtime window.
+        for (const client of this.webClients.values()) {
+          try {
+            client.send(JSON.stringify({
+              type: "message",
+              name: "refreshBunnyDashState",
+              payload: {},
+            }));
+          } catch {}
+        }
         break;
       }
       case "response": {
@@ -640,6 +655,42 @@ class CarrotInstance {
       case "screen-get-cursor-screen-point": {
         return Screen.getCursorScreenPoint();
       }
+      case "get-auth-token": {
+        return { token: runtime.authToken || null };
+      }
+      case "set-auth-token": {
+        const token = String((params as any)?.token || "");
+        if (token) {
+          (runtime as any).saveAuthToken(token);
+          // Notify all running carrots about the new token
+          for (const carrot of runtime.carrots.values()) {
+            if (carrot.status === "running") {
+              carrot.sendEvent("auth-token-changed", { token });
+            }
+          }
+        }
+        return { ok: true };
+      }
+      case "list-carrots": {
+        return runtime.summaries();
+      }
+      case "start-carrot": {
+        const id = String((params as any)?.id || "");
+        const carrot = runtime.carrots.get(id);
+        if (!carrot) throw new Error(`Carrot not found: ${id}`);
+        await carrot.start();
+        if (carrot.carrot.manifest.mode === "background") {
+          carrot.sendEvent("boot");
+        }
+        return { ok: true };
+      }
+      case "stop-carrot": {
+        const id = String((params as any)?.id || "");
+        const carrot = runtime.carrots.get(id);
+        if (!carrot) throw new Error(`Carrot not found: ${id}`);
+        await carrot.stop();
+        return { ok: true };
+      }
       default:
         throw new Error(`Unknown host request: ${method}`);
     }
@@ -662,6 +713,11 @@ class CarrotInstance {
           this.pushLog("tray denied by permissions");
           return;
         }
+        if (this.carrot.manifest.id === "bunny-dash") {
+          // Dash uses the runtime tray — don't create a separate one.
+          // Tray click events are forwarded from the runtime tray.
+          break;
+        }
         const trayPayload = payload as { title?: string };
         if (!this.tray) {
           this.tray = new Tray({ title: trayPayload.title || this.carrot.manifest.name });
@@ -676,10 +732,16 @@ class CarrotInstance {
         break;
       }
       case "set-tray-menu": {
-        if (!hasHostPermission(this.carrot.install.permissionsGranted, "tray") || !this.tray) {
+        if (!hasHostPermission(this.carrot.install.permissionsGranted, "tray")) {
           return;
         }
-        this.tray.setMenu(payload as any);
+        if (this.carrot.manifest.id === "bunny-dash") {
+          // Dash carrot extends the runtime tray instead of owning its own
+          runtime.dashTrayExtension = (payload as any[]) || [];
+          runtime.tray?.setMenu(runtime.buildTrayMenu());
+        } else if (this.tray) {
+          this.tray.setMenu(payload as any);
+        }
         break;
       }
       case "window-create": {
@@ -804,8 +866,9 @@ class CarrotInstance {
         await this.toggleBunnyWindow(payload as { screenX?: number; screenY?: number } | undefined);
         break;
       }
-      case "open-manager": {
-        (runtime as any).openManagerWindow();
+      case "open-manager":
+      case "open-farm": {
+        void (runtime as any).handleTrayAction("open-farm");
         break;
       }
       case "remove-tray": {
@@ -836,6 +899,17 @@ class CarrotInstance {
           for (const target of targets) {
             (target?.webview.rpc as any)?.send?.runtimeEvent(eventPayload);
           }
+        }
+        // Also forward to all WebSocket clients — web clients mirror the
+        // primary window so they receive all view messages.
+        for (const client of this.webClients.values()) {
+          try {
+            client.send(JSON.stringify({
+              type: "message",
+              name: eventPayload.name,
+              payload: eventPayload.payload,
+            }));
+          } catch {}
         }
         break;
       }
@@ -971,7 +1045,8 @@ class CarrotInstance {
 }
 
 class BunnyEarsRuntime {
-  tray: Tray;
+  tray: Tray | null;
+  dashTrayExtension: any[] = [];
   managerWindow: BrowserWindow | null = null;
   carrots = new Map<string, CarrotInstance>();
   activeApplicationMenuOwnerId: string | null = null;
@@ -989,7 +1064,9 @@ class BunnyEarsRuntime {
       this.carrots.set(carrot.manifest.id, new CarrotInstance(carrot));
     }
 
-    this.tray = new Tray({ title: "Bunny Ears" });
+    // Bunny Ears owns the system tray. The dash carrot extends it with
+    // workspaces/lenses/carrots via the set-tray-menu action.
+    this.tray = new Tray({ title: "Electrobunny" });
     this.tray.setMenu(this.buildTrayMenu());
     this.tray.on("tray-clicked", (event: any) => {
       const action = event.data?.action;
@@ -1000,14 +1077,6 @@ class BunnyEarsRuntime {
     ApplicationMenu.on("application-menu-clicked", (event: any) => {
       const action = event?.data?.action;
       if (!this.activeApplicationMenuOwnerId) {
-        if (action === "open-manager") {
-          this.openManagerWindow();
-        }
-        return;
-      }
-
-      if (action === "open-manager") {
-        this.openManagerWindow();
         return;
       }
 
@@ -1040,12 +1109,16 @@ class BunnyEarsRuntime {
     this.restoreDefaultApplicationMenu();
   }
 
+  authToken: string | null = null;
+  farmWindow: BrowserWindow | null = null;
+
   async boot() {
     bootLog("runtime boot begin", {
       installRoot: getInstalledCarrotsRoot(),
       carrotIds: Array.from(this.carrots.keys()),
     });
-    this.openManagerWindow();
+
+    // Start all background carrots — always, regardless of auth
     for (const carrot of this.carrots.values()) {
       if (carrot.carrot.manifest.mode === "background") {
         bootLog("booting background carrot", {
@@ -1058,7 +1131,309 @@ class BunnyEarsRuntime {
         });
       }
     }
+
+    this.startWebBridge();
+
+    // Auto-open dash for development
+    this.handleTrayAction("open-dash").catch((err) => {
+      console.error("[bunny-ears] auto-open dash failed:", err);
+    });
+
+    // Auth + instance registration — non-blocking, doesn't gate carrots
+    this.loadAuthToken();
+    if (this.authToken) {
+      // Register instance and start heartbeat in the background
+      this.registerInstanceWithToken(this.authToken).catch(() => {});
+      setInterval(() => {
+        if (this.authToken) {
+          this.registerInstanceWithToken(this.authToken).catch(() => {});
+        }
+      }, 60_000);
+    } else {
+      // No auth — open Farm for login (non-blocking)
+      this.openFarmForLogin().catch(() => {});
+    }
+
     bootLog("runtime boot complete");
+  }
+
+  private getAuthTokenPath() {
+    const path = require("node:path");
+    const os = require("node:os");
+    // Store auth token in ~/.electrobunny/ (global, not per-channel)
+    return path.join(os.homedir(), ".electrobunny", ".auth-token");
+  }
+
+  private loadAuthToken() {
+    const fs = require("node:fs");
+    const tokenPath = this.getAuthTokenPath();
+
+    if (fs.existsSync(tokenPath)) {
+      try {
+        this.authToken = fs.readFileSync(tokenPath, "utf8").trim();
+        bootLog("loaded auth token");
+      } catch {}
+    }
+  }
+
+  private saveAuthToken(token: string) {
+    const fs = require("node:fs");
+    const path = require("node:path");
+    const tokenPath = this.getAuthTokenPath();
+
+    this.authToken = token;
+    if (tokenPath) {
+      try {
+        fs.mkdirSync(path.dirname(tokenPath), { recursive: true });
+        fs.writeFileSync(tokenPath, token);
+      } catch {}
+    }
+  }
+
+  private async getFarmUrl(): Promise<string> {
+    try {
+      const channel = await Updater.localInfo.channel();
+      if (channel === "dev") return "http://localhost:5173";
+      if (channel === "canary") return "https://staging-farm.electrobunny.ai";
+    } catch {}
+    return "https://farm.electrobunny.ai";
+  }
+
+  private async openFarmForLogin(): Promise<void> {
+    const url = await this.getFarmUrl();
+    return new Promise((resolve) => {
+      bootLog("opening Farm for login", { url });
+
+      const rpc = BrowserView.defineRPC({
+        maxRequestTime: 300000, // 5 min for login flow
+        handlers: {
+          requests: {
+            // Farm calls this after successful login
+            getCarrots: () => {
+              return runtime.summaries();
+            },
+            setAuthToken: ({ accessToken }: { accessToken: string }) => {
+              this.saveAuthToken(accessToken);
+              bootLog("received auth token from Farm");
+              // Notify all running carrots about the new token
+              for (const carrot of this.carrots.values()) {
+                if (carrot.status === "running") {
+                  carrot.sendEvent("auth-token-changed", { token: accessToken });
+                }
+              }
+
+              // Keep the Farm window open — user can see their dashboard.
+              // Resize to a comfortable dashboard size.
+              if (this.farmWindow) {
+                this.farmWindow.setFrame(undefined, undefined, 960, 720);
+                this.farmWindow.setTitle("Electrobunny Farm");
+              }
+              resolve();
+              return { ok: true };
+            },
+            clearAuthToken: () => {
+              this.authToken = null;
+              // Delete saved token
+              try {
+                const fs = require("node:fs");
+                const tokenPath = this.getAuthTokenPath();
+                if (fs.existsSync(tokenPath)) fs.unlinkSync(tokenPath);
+              } catch {}
+              // Notify all running carrots
+              for (const carrot of this.carrots.values()) {
+                if (carrot.status === "running") {
+                  carrot.sendEvent("auth-token-cleared");
+                }
+              }
+              bootLog("auth token cleared");
+              return { ok: true };
+            },
+          },
+          messages: {},
+        },
+      });
+
+      this.farmWindow = new BrowserWindow({
+        title: "Electrobunny — Sign In",
+        url,
+        rpc,
+        frame: { width: 900, height: 700 },
+      });
+
+      // Send carrot data to the Farm webview when it's ready
+      this.farmWindow.webview.on("dom-ready", () => {
+        const carrots = runtime.summaries();
+        const machineId = this.getMachineId();
+        this.farmWindow?.webview.executeJavascript(`
+          window.__bunnyEarsData = {
+            machineId: ${JSON.stringify(machineId)},
+            carrots: ${JSON.stringify(carrots)},
+          };
+          window.dispatchEvent(new CustomEvent('bunnyEarsData'));
+        `);
+      });
+
+      // If user closes the window without logging in, continue boot anyway
+      this.farmWindow.on("close", () => {
+        this.farmWindow = null;
+        resolve();
+      });
+    });
+  }
+
+  getMachineId(): string {
+    const fs = require("node:fs");
+    const path = require("node:path");
+    const home = process.env.HOME || process.env.USERPROFILE || "";
+    const idPath = home ? path.join(home, ".electrobunny", "machine-id") : "";
+
+    if (idPath && fs.existsSync(idPath)) {
+      return fs.readFileSync(idPath, "utf8").trim();
+    }
+    const id = crypto.randomUUID();
+    if (idPath) {
+      try {
+        fs.mkdirSync(path.dirname(idPath), { recursive: true });
+        fs.writeFileSync(idPath, id);
+      } catch {}
+    }
+    return id;
+  }
+
+  async registerInstanceWithToken(accessToken: string): Promise<{ ok: boolean; instanceId?: string; error?: string }> {
+    try {
+      const os = require("node:os");
+      const machineId = this.getMachineId();
+      const hostname = os.hostname() || "Unknown";
+      const platform = process.platform === "darwin" ? "macos" : process.platform;
+
+      const channel = await Updater.localInfo.channel().catch(() => "dev");
+      const apiBase = channel === "dev" ? "http://localhost:8787"
+        : channel === "canary" ? "https://staging-api.electrobunny.ai"
+        : "https://api.electrobunny.ai";
+
+      const response = await fetch(`${apiBase}/v1/instances`, {
+        method: "PUT",
+        headers: {
+          Authorization: `Bearer ${accessToken}`,
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({
+          machine_id: machineId,
+          name: hostname,
+          os: platform,
+        }),
+      });
+
+      if (!response.ok) {
+        return { ok: false, error: `API ${response.status}` };
+      }
+
+      const data = await response.json() as any;
+      console.log(`[bunny-ears] Instance registered: ${data.instance?.name} (${data.instance?.id})`);
+      return { ok: true, instanceId: data.instance?.id };
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      console.error(`[bunny-ears] Instance registration failed: ${msg}`);
+      return { ok: false, error: msg };
+    }
+  }
+
+
+  /**
+   * WebSocket bridge for web clients (e.g. Bunny Dash running in a browser).
+   *
+   * Web clients connect and specify a target carrot (default: bunny-dash).
+   * Requests are routed to the carrot worker via CarrotInstance.invoke(),
+   * and emit-view messages from the worker are forwarded back over WebSocket.
+   */
+  private startWebBridge() {
+    const WEB_BRIDGE_PORT = 9333;
+    const self = this;
+    let clientId = 0;
+
+    try {
+      Bun.serve({
+        port: WEB_BRIDGE_PORT,
+        fetch(req, server) {
+          if (server.upgrade(req, { data: { id: `web-${++clientId}` } })) {
+            return;
+          }
+          return new Response("Bunny Ears Web Bridge", { status: 200 });
+        },
+        websocket: {
+          open(ws) {
+            const id = (ws.data as any).id as string;
+            console.log(`[web-bridge] Client connected: ${id}`);
+
+            const dashCarrot = self.carrots.get("bunny-dash");
+            if (dashCarrot) {
+              dashCarrot.webClients.set(id, {
+                send: (data: string) => {
+                  try { ws.send(data); } catch {}
+                },
+              });
+              // The web renderer will call getInitialState on its own when
+              // it mounts. No need to push state here.
+            } else {
+              console.warn("[web-bridge] bunny-dash carrot not found");
+            }
+          },
+          async message(ws, data) {
+            const id = (ws.data as any).id as string;
+            try {
+              const msg = JSON.parse(String(data));
+              const dashCarrot = self.carrots.get("bunny-dash");
+              if (!dashCarrot) {
+                if (msg.type === "request") {
+                  ws.send(JSON.stringify({
+                    type: "response",
+                    id: msg.id,
+                    error: "bunny-dash carrot not running",
+                  }));
+                }
+                return;
+              }
+
+              if (msg.type === "request") {
+                try {
+                  // Don't pass a windowId — let the worker use its current
+                  // window so the request is processed in the right context.
+                  const result = await dashCarrot.invoke(msg.method, msg.params);
+                  ws.send(JSON.stringify({
+                    type: "response",
+                    id: msg.id,
+                    result,
+                  }));
+                } catch (err) {
+                  ws.send(JSON.stringify({
+                    type: "response",
+                    id: msg.id,
+                    error: err instanceof Error ? err.message : String(err),
+                  }));
+                }
+              }
+
+              if (msg.type === "message") {
+                // Fire-and-forget message to the carrot worker
+                dashCarrot.invoke(`send:${msg.name}`, msg.payload).catch(() => {});
+              }
+            } catch (err) {
+              console.error("[web-bridge] Failed to handle message:", err);
+            }
+          },
+          close(ws) {
+            const id = (ws.data as any).id as string;
+            console.log(`[web-bridge] Client disconnected: ${id}`);
+            const dashCarrot = self.carrots.get("bunny-dash");
+            dashCarrot?.webClients.delete(id);
+          },
+        },
+      });
+      console.log(`[web-bridge] Listening on ws://localhost:${WEB_BRIDGE_PORT}`);
+    } catch (err) {
+      console.error(`[web-bridge] Failed to start on port ${WEB_BRIDGE_PORT}:`, err);
+    }
   }
 
   summaries() {
@@ -1074,7 +1449,7 @@ class BunnyEarsRuntime {
   }
 
   notifyDashboardChanged() {
-    this.tray.setMenu(this.buildTrayMenu());
+    this.tray?.setMenu(this.buildTrayMenu());
     (this.managerWindow?.webview.rpc as any)?.send?.dashboardChanged(this.dashboardState());
   }
 
@@ -1083,16 +1458,6 @@ class BunnyEarsRuntime {
       {
         label: "Bunny Ears",
         submenu: [{ role: "quit", accelerator: "cmd+q" }],
-      },
-      {
-        label: "File",
-        submenu: [
-          {
-            type: "normal" as const,
-            label: "Open Bunny Ears",
-            action: "open-manager",
-          },
-        ],
       },
     ];
   }
@@ -1212,31 +1577,46 @@ class BunnyEarsRuntime {
     target.sendEvent(name, this.withSourceEnvelope(sourceCarrotId, undefined, payload));
   }
 
-  private buildTrayMenu() {
-    const summaries = this.summaries();
-    const carrotItems = summaries.map((carrot) => ({
-      type: "normal" as const,
-      label: `${carrot.status === "running" ? "Stop" : "Launch"} ${carrot.name}`,
-      action: carrot.status === "running" ? `stop:${carrot.id}` : `start:${carrot.id}`,
-    }));
+  buildTrayMenu() {
+    const baseItems = [
+      { type: "normal" as const, label: "Open Bunny Dash", action: "open-dash" },
+      { type: "normal" as const, label: "Open Bunny Farm", action: "open-farm" },
+    ];
 
-    return [
-      { type: "normal" as const, label: "Open Bunny Ears", action: "open-manager" },
-      { type: "normal" as const, label: "Install Carrot Source", action: "install-source" },
-      { type: "normal" as const, label: "Install Carrot Artifact", action: "install-artifact" },
-      ...carrotItems,
+    // Dash extension: workspaces, lenses, carrot controls — set by the dash carrot
+    const dashItems = this.dashTrayExtension.length > 0
+      ? [{ type: "divider" as const }, ...this.dashTrayExtension]
+      : [];
+
+    const emergencyItems = [
       { type: "divider" as const },
+      { type: "normal" as const, label: "Reset Local State", action: "emergency-reset" },
       { type: "normal" as const, label: "Quit Bunny Ears", action: "quit" },
     ];
+
+    return [...baseItems, ...dashItems, ...emergencyItems];
   }
 
   private async handleTrayAction(action: string) {
-    if (action === "open-manager") {
-      this.openManagerWindow();
+    if (action === "open-dash") {
+      const dashCarrot = this.carrots.get("bunny-dash");
+      if (!dashCarrot) return;
+      if (dashCarrot.status !== "running") {
+        await dashCarrot.start();
+        dashCarrot.sendEvent("boot");
+      }
+      // Set dash as active menu owner so menu clicks route to it
+      this.activeApplicationMenuOwnerId = dashCarrot.carrot.manifest.id;
+      // Dash manages its own windows — send an event to focus/create
+      dashCarrot.sendEvent("open-window");
       return;
     }
-    if (action === "install-source") {
-      await this.installCarrotSourceFromDisk();
+    if (action === "open-farm") {
+      if (this.farmWindow) {
+        this.farmWindow.focus();
+      } else {
+        this.openFarmForLogin().catch(() => {});
+      }
       return;
     }
     if (action === "install-artifact") {
@@ -1247,7 +1627,25 @@ class BunnyEarsRuntime {
       process.exit(0);
       return;
     }
-    const [verb, carrotId] = action.split(":");
+    if (action === "emergency-reset") {
+      // Stop all carrots and wipe their state
+      for (const carrot of this.carrots.values()) {
+        if (carrot.status === "running") {
+          try { await carrot.stop(); } catch {}
+        }
+        // Wipe carrot state
+        const stateDir = carrot.stateDir;
+        try {
+          const { rmSync } = await import("node:fs");
+          rmSync(stateDir, { recursive: true, force: true });
+        } catch {}
+      }
+      console.log("[bunny-ears] Emergency reset complete. Restarting...");
+      process.exit(0);
+      return;
+    }
+    const [verb, ...rest] = action.split(":");
+    const carrotId = rest.join(":");
     const carrot = carrotId ? this.carrots.get(carrotId) : null;
     if (!carrot) return;
     if (verb === "start") {
@@ -1259,6 +1657,17 @@ class BunnyEarsRuntime {
     }
     if (verb === "stop") {
       await carrot.stop();
+      return;
+    }
+    if (verb === "rebuild") {
+      await this.reinstallCarrot(carrotId);
+      return;
+    }
+
+    // Forward unhandled actions to the dash carrot (workspace/lens/carrot actions)
+    const dashCarrot = this.carrots.get("bunny-dash");
+    if (dashCarrot && dashCarrot.status === "running") {
+      dashCarrot.sendEvent("tray", { action });
     }
   }
 

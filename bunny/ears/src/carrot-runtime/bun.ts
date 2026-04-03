@@ -549,6 +549,24 @@ export const Carrots = {
       payload,
     });
   },
+  async list() {
+    return carrotRuntime.requestHost<Array<{
+      id: string;
+      name: string;
+      description: string;
+      version: string;
+      mode: string;
+      permissions: string[];
+      status: string;
+      devMode: boolean;
+    }>>("list-carrots");
+  },
+  async start(carrotId: string) {
+    return carrotRuntime.requestHost<{ ok: boolean }>("start-carrot", { id: carrotId });
+  },
+  async stop(carrotId: string) {
+    return carrotRuntime.requestHost<{ ok: boolean }>("stop-carrot", { id: carrotId });
+  },
 };
 
 export const ApplicationMenu = {

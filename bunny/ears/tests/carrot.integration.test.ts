@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, test } from "bun:test";
-import { cpSync, existsSync, mkdtempSync, mkdirSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, cpSync, existsSync, mkdtempSync, mkdirSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import type {
@@ -23,15 +23,7 @@ const EARS_ROOT = resolve(import.meta.dir, "..");
 const TEST_CARROTS_ROOT = resolve(EARS_ROOT, "..", "test-carrots");
 const DASH_ROOT = resolve(EARS_ROOT, "..", "dash");
 const PACKAGE_ROOT = resolve(EARS_ROOT, "..", "..", "package");
-const COLAB_GOLDFISHDB_ROOT = resolve(
-  EARS_ROOT,
-  "..",
-  "..",
-  "..",
-  "colab",
-  "node_modules",
-  "goldfishdb",
-);
+const GOLDFISHDB_ROOT = resolve(EARS_ROOT, "..", "..", "..", "goldfishdb", "src", "node", "index.ts");
 
 process.env.BUNNY_EARS_SDK_VIEW_MODULE = join(
   EARS_ROOT,
@@ -48,7 +40,7 @@ process.env.BUNNY_EARS_SDK_BUN_MODULE = join(
 process.env.BUNNY_EARS_ZSTD_BIN = join(PACKAGE_ROOT, "dist-macos-arm64", "zig-zstd");
 
 const { buildCarrotSource } = await import("../src/bun/carrotBuilder");
-const GoldfishDB = (await import(COLAB_GOLDFISHDB_ROOT)).default;
+const GoldfishDB = (await import(GOLDFISHDB_ROOT)).default;
 
 const {
   array,
@@ -132,6 +124,7 @@ type RunningCarrot = {
 };
 
 const cleanups = new Set<() => void>();
+const textDecoder = new TextDecoder();
 
 afterEach(() => {
   for (const cleanup of cleanups) {
@@ -142,6 +135,89 @@ afterEach(() => {
 
 function makeTempDir(prefix: string) {
   return mkdtempSync(join(tmpdir(), prefix));
+}
+
+function runGit(args: string[], cwd: string) {
+  const gitBin = Bun.which("git");
+  if (!gitBin) {
+    throw new Error("git is not installed");
+  }
+
+  const result = Bun.spawnSync([gitBin, ...args], {
+    cwd,
+    stdout: "pipe",
+    stderr: "pipe",
+  });
+
+  if (result.exitCode !== 0) {
+    throw new Error(
+      `git ${args.join(" ")} failed: ${textDecoder.decode(result.stderr || new Uint8Array())}`,
+    );
+  }
+
+  return {
+    stdout: textDecoder.decode(result.stdout || new Uint8Array()),
+    stderr: textDecoder.decode(result.stderr || new Uint8Array()),
+  };
+}
+
+let cachedFakeLlamaCliBinary: string | null = null;
+
+async function withTemporaryEnv<T>(
+  key: string,
+  value: string | undefined,
+  callback: () => Promise<T>,
+) {
+  const previous = process.env[key];
+  if (value === undefined) {
+    delete process.env[key];
+  } else {
+    process.env[key] = value;
+  }
+
+  try {
+    return await callback();
+  } finally {
+    if (previous === undefined) {
+      delete process.env[key];
+    } else {
+      process.env[key] = previous;
+    }
+  }
+}
+
+function createFakeLlamaCliBinary() {
+  if (cachedFakeLlamaCliBinary && existsSync(cachedFakeLlamaCliBinary)) {
+    return cachedFakeLlamaCliBinary;
+  }
+
+  const fakeDir = makeTempDir("bunny-llama-cli-build-");
+  const sourcePath = join(fakeDir, "fake-llama.ts");
+  const binaryPath = join(fakeDir, process.platform === "win32" ? "llama-cli.exe" : "llama-cli");
+  writeFileSync(
+    sourcePath,
+    [
+      'console.write("fake llama completion");',
+      "",
+    ].join("\n"),
+  );
+  const buildResult = Bun.spawnSync(
+    [process.execPath, "build", "--compile", sourcePath, "--outfile", binaryPath],
+    {
+      cwd: fakeDir,
+      stdout: "pipe",
+      stderr: "pipe",
+    },
+  );
+  if (buildResult.exitCode !== 0) {
+    throw new Error(
+      `Failed to build fake llama binary:\n${textDecoder.decode(buildResult.stderr || new Uint8Array())}`,
+    );
+  }
+  chmodSync(binaryPath, 0o755);
+  cleanups.add(() => rmSync(fakeDir, { recursive: true, force: true }));
+  cachedFakeLlamaCliBinary = binaryPath;
+  return binaryPath;
 }
 
 function isActionMessage(message: CarrotWorkerMessage): message is HostActionMessage {
@@ -842,13 +918,16 @@ describe("Bunny Ears carrots", () => {
     expect((logAction.payload as { message: string }).message).toContain("workspace-settings");
   });
 
-  test("Bunny Dash builds from source and exposes a Colab-shaped shell snapshot", async () => {
+  test("Bunny Dash builds from source and exposes a Dash shell snapshot", async () => {
     const built = await buildCarrotAt(DASH_ROOT, "bunny-ears-dash-build-");
     expect(built.manifest.id).toBe("bunny-dash");
     expect(built.manifest.dependencies).toEqual({
       "bunny.pty": "file:../foundation-carrots/pty",
       "bunny.search": "file:../foundation-carrots/search",
       "bunny.git": "file:../foundation-carrots/git",
+      "bunny.tsserver": "file:../foundation-carrots/tsserver",
+      "bunny.biome": "file:../foundation-carrots/biome",
+      "bunny.llama": "file:../foundation-carrots/llama",
     });
     expect(existsSync(join(built.outDir, "lens", "index.js"))).toBe(true);
     expect(existsSync(join(built.outDir, "lens", "index.css"))).toBe(true);
@@ -950,7 +1029,7 @@ describe("Bunny Ears carrots", () => {
         submenu: [
           { type: "normal", label: "Plugins", action: "plugin-marketplace" },
           { type: "normal", label: "Llama Settings", action: "llama-settings" },
-          { type: "normal", label: "Bunny Dash Settings", action: "colab-settings" },
+          { type: "normal", label: "Bunny Dash Settings", action: "bunny-settings" },
           { type: "normal", label: "Workspace Settings", action: "workspace-settings" },
         ],
       },
@@ -970,7 +1049,7 @@ describe("Bunny Ears carrots", () => {
     const initialTrayMenu = await carrot.nextAction("set-tray-menu");
     expect(Array.isArray(initialTrayMenu.payload)).toBe(true);
 
-    const initialColabState = (await carrot.request("getInitialState")) as {
+    const initialBunnyDashState = (await carrot.request("getInitialState")) as {
       buildVars: { channel: string };
       workspace: { id: string; name: string; windows: Array<{ id: string }> };
       bunnyDash: {
@@ -984,17 +1063,17 @@ describe("Bunny Ears carrots", () => {
       };
       projects: Array<{ id: string; name: string }>;
       tokens: unknown[];
-      appSettings: { colabCloud: { email: string } };
+      appSettings: { bunnyCloud: { email: string } };
     };
-    expect(initialColabState.buildVars.channel).toBe("dev");
-    expect(initialColabState.workspace.name).toBe("Local Workspace");
-    expect(initialColabState.workspace.windows[0]?.id).toBe("main");
-    expect(initialColabState.bunnyDash.currentWorkspaceId).toBe("local-workspace");
-    expect(initialColabState.bunnyDash.currentLensId).toBe("starter-lens");
-    expect(initialColabState.bunnyDash.workspaces[0]?.lenses[0]?.name).toBe("Starter Lens");
-    expect(initialColabState.projects).toEqual([]);
-    expect(initialColabState.tokens).toEqual([]);
-    expect(initialColabState.appSettings.colabCloud.email).toBe("");
+    expect(initialBunnyDashState.buildVars.channel).toBe("dev");
+    expect(initialBunnyDashState.workspace.name).toBe("Local Workspace");
+    expect(initialBunnyDashState.workspace.windows[0]?.id).toBe("main");
+    expect(initialBunnyDashState.bunnyDash.currentWorkspaceId).toBe("local-workspace");
+    expect(initialBunnyDashState.bunnyDash.currentLensId).toBe("starter-lens");
+    expect(initialBunnyDashState.bunnyDash.workspaces[0]?.lenses[0]?.name).toBe("Starter Lens");
+    expect(initialBunnyDashState.projects).toEqual([]);
+    expect(initialBunnyDashState.tokens).toEqual([]);
+    expect(initialBunnyDashState.appSettings.bunnyCloud.email).toBe("");
 
     const initial = (await carrot.request("getSnapshot")) as {
       shellTitle: string;
@@ -1685,6 +1764,307 @@ describe("Bunny Ears carrots", () => {
     );
   }, 20000);
 
+  test("Bunny Git carrot builds from source and serves repo operations for client carrots", async () => {
+    const built = await buildCarrotAt(
+      resolve(EARS_ROOT, "..", "foundation-carrots", "git"),
+      "bunny-ears-git-build-",
+    );
+    expect(built.manifest.id).toBe("bunny.git");
+    expect(existsSync(join(built.outDir, "worker.js"))).toBe(true);
+    expect(existsSync(join(built.outDir, "vendor", process.platform === "win32" ? "git.exe" : "git"))).toBe(true);
+    expect(
+      existsSync(join(built.outDir, "vendor", process.platform === "win32" ? "git-remote-https.exe" : "git-remote-https")),
+    ).toBe(true);
+
+    const carrot = await startBuiltCarrot(built);
+    const repoDir = makeTempDir("bunny-git-project-");
+    writeFileSync(join(repoDir, "README.md"), "# Bunny Git\n");
+    runGit(["init", "--initial-branch", "main"], repoDir);
+    runGit(["config", "user.name", "Bunny Test"], repoDir);
+    runGit(["config", "user.email", "bunny@test.local"], repoDir);
+    runGit(["add", "README.md"], repoDir);
+    runGit(["commit", "-m", "Initial commit"], repoDir);
+
+    const isRepoRoot = (await carrot.request("gitCheckIsRepoRoot", {
+      repoRoot: repoDir,
+      __source: {
+        carrotId: "dash-client",
+        windowId: "main",
+      },
+    })) as boolean;
+    expect(isRepoRoot).toBe(true);
+
+    const status = (await carrot.request("gitStatus", {
+      repoRoot: repoDir,
+    })) as { current?: string; modified?: string[] };
+    expect(status.current).toBe("main");
+    expect(status.modified || []).toEqual([]);
+
+    writeFileSync(join(repoDir, "README.md"), "# Bunny Git\n\nchanged\n");
+    const diff = (await carrot.request("gitDiff", {
+      repoRoot: repoDir,
+      options: ["--", "README.md"],
+    })) as string;
+    expect(diff).toContain("changed");
+  }, 20000);
+
+  test("Bunny Biome carrot builds from source and formats files for client carrots", async () => {
+    const built = await buildCarrotAt(
+      resolve(EARS_ROOT, "..", "foundation-carrots", "biome"),
+      "bunny-ears-biome-build-",
+    );
+    expect(built.manifest.id).toBe("bunny.biome");
+    expect(existsSync(join(built.outDir, "worker.js"))).toBe(true);
+    expect(existsSync(join(built.outDir, "@biomejs", "biome", "bin", "biome"))).toBe(true);
+
+    const carrot = await startBuiltCarrot(built);
+    const status = (await carrot.request("getBiomeStatus")) as {
+      installed?: boolean;
+      version?: string;
+    };
+    expect(status.installed).toBe(true);
+    expect(typeof status.version).toBe("string");
+    expect(status.version).not.toBe("");
+
+    const projectDir = makeTempDir("bunny-biome-project-");
+    const filePath = join(projectDir, "index.ts");
+    writeFileSync(filePath, "const answer={value:42}\n");
+
+    const formatResult = (await carrot.request("formatFile", {
+      path: filePath,
+    })) as {
+      success?: boolean;
+      stderr?: string;
+    };
+    expect(formatResult.success).toBe(true);
+    expect(readFileSync(filePath, "utf8")).toContain("const answer = { value: 42 };");
+  }, 20000);
+
+  test("Bunny Llama carrot builds its bundled llama-cli from local vendored source", async () => {
+    const built = await buildCarrotAt(
+      resolve(EARS_ROOT, "..", "foundation-carrots", "llama"),
+      "bunny-ears-llama-source-build-",
+    );
+    expect(built.manifest.id).toBe("bunny.llama");
+    expect(existsSync(join(built.outDir, "worker.js"))).toBe(true);
+    expect(
+      existsSync(join(built.outDir, process.platform === "win32" ? "llama-cli.exe" : "llama-cli")),
+    ).toBe(true);
+  }, 20000);
+
+  test("Bunny Llama carrot builds from source and manages local models and completions", async () => {
+    const fakeBinaryPath = createFakeLlamaCliBinary();
+    const built = await withTemporaryEnv("BUNNY_LLAMA_CLI_BIN", fakeBinaryPath, () =>
+      buildCarrotAt(
+        resolve(EARS_ROOT, "..", "foundation-carrots", "llama"),
+        "bunny-ears-llama-build-",
+      ),
+    );
+
+    expect(built.manifest.id).toBe("bunny.llama");
+    expect(existsSync(join(built.outDir, "worker.js"))).toBe(true);
+    expect(
+      existsSync(join(built.outDir, process.platform === "win32" ? "llama-cli.exe" : "llama-cli")),
+    ).toBe(true);
+
+    const modelsDir = makeTempDir("bunny-llama-models-");
+    cleanups.add(() => rmSync(modelsDir, { recursive: true, force: true }));
+    writeFileSync(join(modelsDir, "test-model.gguf"), "fake-model");
+
+    const downloadBytes = new Uint8Array([1, 2, 3, 4, 5, 6, 7, 8]);
+    const server = Bun.serve({
+      port: 0,
+      fetch() {
+        return new Response(downloadBytes, {
+          headers: {
+            "content-length": String(downloadBytes.byteLength),
+            "content-type": "application/octet-stream",
+          },
+        });
+      },
+    });
+    cleanups.add(() => server.stop(true));
+
+    const carrot = await startBuiltCarrot(built, undefined, {
+      initContext: {
+        llamaModelsDir: modelsDir,
+        llamaMinModelBytes: 1,
+        llamaTimeoutMs: 5_000,
+        llamaDownloadBaseUrlTemplate: `http://127.0.0.1:${server.port}/{user}/{repo}/{filePath}`,
+      },
+    });
+
+    const listed = (await carrot.request("llamaListModels")) as {
+      ok: boolean;
+      models: Array<{ name: string; path: string; source: "llama" | "legacy" }>;
+    };
+    expect(listed.ok).toBe(true);
+    expect(listed.models.some((model) => model.name === "test-model")).toBe(true);
+
+    const completion = (await carrot.request("llamaCompletion", {
+      model: "test-model",
+      prompt: "const greet = ",
+    })) as {
+      ok: boolean;
+      response?: string;
+      error?: string;
+    };
+    expect(completion.ok).toBe(true);
+    expect(completion.response).toContain("fake llama completion");
+
+    const installResult = (await carrot.request("llamaInstallModel", {
+      modelRef: "hf://team/demo/download-model.gguf",
+    })) as {
+      ok: boolean;
+      downloading?: boolean;
+      downloadId?: string;
+    };
+    expect(installResult.ok).toBe(true);
+    expect(installResult.downloading).toBe(true);
+    expect(typeof installResult.downloadId).toBe("string");
+
+    let downloadStatus:
+      | {
+          ok: boolean;
+          status?: {
+            status: "downloading" | "completed" | "failed";
+            progress: number;
+            fileName: string;
+            error?: string;
+          };
+        }
+      | undefined;
+    for (let attempt = 0; attempt < 20; attempt += 1) {
+      downloadStatus = (await carrot.request("llamaDownloadStatus", {
+        downloadId: installResult.downloadId,
+      })) as typeof downloadStatus;
+      if (downloadStatus?.status?.status === "completed") {
+        break;
+      }
+      if (downloadStatus?.status?.status === "failed") {
+        break;
+      }
+      await new Promise((resolve) => setTimeout(resolve, 50));
+    }
+
+    expect(downloadStatus?.ok).toBe(true);
+    expect(downloadStatus?.status?.status).toBe("completed");
+    expect(existsSync(join(modelsDir, "download-model.gguf"))).toBe(true);
+
+    const listedAfterInstall = (await carrot.request("llamaListModels")) as {
+      ok: boolean;
+      models: Array<{ name: string }>;
+    };
+    expect(listedAfterInstall.ok).toBe(true);
+    expect(listedAfterInstall.models.some((model) => model.name === "download-model")).toBe(true);
+
+    const removeResult = (await carrot.request("llamaRemoveModel", {
+      modelPath: join(modelsDir, "download-model.gguf"),
+    })) as {
+      ok: boolean;
+      error?: string;
+    };
+    expect(removeResult.ok).toBe(true);
+    expect(existsSync(join(modelsDir, "download-model.gguf"))).toBe(false);
+  }, 20000);
+
+  test("Bunny TS Server carrot builds from source and emits tsserver messages for client carrots", async () => {
+    const built = await buildCarrotAt(
+      resolve(EARS_ROOT, "..", "foundation-carrots", "tsserver"),
+      "bunny-ears-tsserver-build-",
+    );
+    expect(built.manifest.id).toBe("bunny.tsserver");
+    expect(existsSync(join(built.outDir, "worker.js"))).toBe(true);
+    expect(existsSync(join(built.outDir, "typescript", "lib", "tsserver.js"))).toBe(true);
+
+    const carrot = await startBuiltCarrot(built);
+    const typeScriptStatus = (await carrot.request("getTypeScriptStatus")) as {
+      installed?: boolean;
+      version?: string;
+    };
+    expect(typeScriptStatus.installed).toBe(true);
+    expect(typeof typeScriptStatus.version).toBe("string");
+    expect(typeScriptStatus.version).not.toBe("");
+
+    const projectDir = makeTempDir("bunny-tsserver-project-");
+    const filePath = join(projectDir, "index.ts");
+    writeFileSync(filePath, "const answer = 42;\nanswer.toFixed(2);\n");
+
+    const metadata = {
+      workspaceId: "workspace-1",
+      windowId: "main",
+      editorId: "editor-1",
+    };
+
+    await carrot.request("tsServerRequest", {
+      command: "open",
+      args: {
+        file: filePath,
+      },
+      metadata,
+      __source: {
+        carrotId: "dash-client",
+        windowId: "main",
+      },
+    });
+
+    await carrot.request("tsServerRequest", {
+      command: "quickinfo",
+      args: {
+        file: filePath,
+        line: 2,
+        offset: 1,
+      },
+      metadata,
+      __source: {
+        carrotId: "dash-client",
+        windowId: "main",
+      },
+    });
+
+    const quickInfoEvent = await carrot.nextAction(
+      "emit-carrot-event",
+      (message) =>
+        (message.payload as {
+          carrotId?: string;
+          name?: string;
+          payload?: {
+            metadata?: { editorId?: string };
+            message?: { command?: string; type?: string; success?: boolean; body?: { displayString?: string } };
+          };
+        } | undefined)?.carrotId === "dash-client" &&
+        (message.payload as { name?: string } | undefined)?.name === "tsserver-message" &&
+        (message.payload as { payload?: { metadata?: { editorId?: string } } } | undefined)?.payload?.metadata?.editorId === "editor-1" &&
+        (message.payload as { payload?: { message?: { command?: string } } } | undefined)?.payload?.message?.command === "quickinfo",
+    );
+    expect((quickInfoEvent.payload as { name?: string } | undefined)?.name).toBe("tsserver-message");
+    expect(
+      (quickInfoEvent.payload as { payload?: { message?: { success?: boolean } } } | undefined)?.payload?.message?.success,
+    ).toBe(true);
+    expect(
+      String(
+        (quickInfoEvent.payload as { payload?: { message?: { body?: { displayString?: string } } } } | undefined)
+          ?.payload?.message?.body?.displayString || "",
+      ),
+    ).toContain("const answer");
+
+    const closeWindowResult = (await carrot.request("closeWindowEditors", {
+      windowId: "main",
+      workspaceId: "workspace-1",
+      __source: {
+        carrotId: "dash-client",
+        windowId: "main",
+      },
+    })) as {
+      closedEditors?: number;
+      closedFiles?: number;
+      shutdown?: boolean;
+    };
+    expect(closeWindowResult.closedEditors).toBe(1);
+    expect(closeWindowResult.closedFiles).toBe(1);
+    expect(typeof closeWindowResult.shutdown).toBe("boolean");
+  }, 20000);
+
   test("Bunny Dash uses bunny.search as its workspace search backend", async () => {
     const built = await buildCarrotAt(DASH_ROOT, "bunny-ears-dash-search-build-");
     const carrot = await startBuiltCarrot(built);
@@ -1760,6 +2140,203 @@ describe("Bunny Ears carrots", () => {
         (result) => result.endsWith("needle.ts"),
       ),
     ).toBe(true);
+  }, 20000);
+
+  test("Bunny Dash uses bunny.git as its git backend dependency", async () => {
+    const built = await buildCarrotAt(DASH_ROOT, "bunny-ears-dash-git-build-");
+    const carrot = await startBuiltCarrot(built);
+    const repoDir = makeTempDir("bunny-dash-git-project-");
+    writeFileSync(join(repoDir, "README.md"), "# Dash Git\n");
+    runGit(["init", "--initial-branch", "main"], repoDir);
+    runGit(["config", "user.name", "Dash Git"], repoDir);
+    runGit(["config", "user.email", "dash-git@test.local"], repoDir);
+    runGit(["add", "README.md"], repoDir);
+    runGit(["commit", "-m", "Initial commit"], repoDir);
+
+    await carrot.nextAction("set-tray");
+    await carrot.nextAction("set-tray-menu");
+
+    const createdWorkspace = (await carrot.request("createWorkspace", {
+      name: "Git Workspace",
+      subtitle: "Workspace git wiring test.",
+    })) as {
+      currentWorkspace: { id: string };
+    };
+
+    await carrot.request("addProjectMount", {
+      workspaceId: createdWorkspace.currentWorkspace.id,
+      name: "git-project",
+      path: repoDir,
+    });
+
+    const isRepoRoot = (await carrot.request("gitCheckIsRepoRoot", {
+      repoRoot: repoDir,
+    })) as boolean;
+    expect(isRepoRoot).toBe(true);
+
+    const status = (await carrot.request("gitStatus", {
+      repoRoot: repoDir,
+    })) as { current?: string; modified?: string[] };
+    expect(status.current).toBe("main");
+    expect(status.modified || []).toEqual([]);
+
+    writeFileSync(join(repoDir, "README.md"), "# Dash Git\n\nchanged\n");
+    const diff = (await carrot.request("gitDiff", {
+      repoRoot: repoDir,
+      options: ["--", "README.md"],
+    })) as string;
+    expect(diff).toContain("changed");
+
+    const gitConfig = (await carrot.request("getGitConfig")) as {
+      hasKeychainHelper?: boolean;
+      name?: string;
+      email?: string;
+    };
+    expect(typeof gitConfig.hasKeychainHelper).toBe("boolean");
+    expect(typeof gitConfig.name).toBe("string");
+    expect(typeof gitConfig.email).toBe("string");
+  }, 20000);
+
+  test("Bunny Dash routes tsserver requests through bunny.tsserver", async () => {
+    const built = await buildCarrotAt(DASH_ROOT, "bunny-ears-dash-tsserver-build-");
+    const carrot = await startBuiltCarrot(built);
+    const projectDir = makeTempDir("bunny-dash-tsserver-project-");
+    const filePath = join(projectDir, "index.ts");
+    writeFileSync(filePath, "const answer = 42;\nanswer.toFixed(2);\n");
+
+    await carrot.nextAction("set-tray");
+    await carrot.nextAction("set-tray-menu");
+
+    const initialState = (await carrot.request("getInitialState")) as {
+      peerDependencies?: {
+        typescript?: {
+          installed?: boolean;
+          version?: string;
+        };
+      };
+    };
+    expect(initialState.peerDependencies?.typescript?.installed).toBe(true);
+    expect(typeof initialState.peerDependencies?.typescript?.version).toBe("string");
+    expect(initialState.peerDependencies?.typescript?.version).not.toBe("");
+
+    const metadata = {
+      workspaceId: "local-workspace",
+      windowId: "main",
+      editorId: "editor-1",
+    };
+
+    await carrot.request("send:tsServerRequest", {
+      command: "open",
+      args: {
+        file: filePath,
+      },
+      metadata,
+    });
+
+    await carrot.request("send:tsServerRequest", {
+      command: "quickinfo",
+      args: {
+        file: filePath,
+        line: 2,
+        offset: 1,
+      },
+      metadata,
+    });
+
+    const quickInfoEvent = await carrot.nextAction(
+      "emit-view",
+      (message) =>
+        (message.payload as {
+          name?: string;
+          raw?: boolean;
+          payload?: {
+            metadata?: { editorId?: string };
+            message?: { command?: string; success?: boolean; body?: { displayString?: string } };
+          };
+        } | undefined)?.name === "tsServerMessage" &&
+        (message.payload as { raw?: boolean } | undefined)?.raw === false &&
+        (message.payload as { payload?: { metadata?: { editorId?: string } } } | undefined)?.payload?.metadata?.editorId === "editor-1" &&
+        (message.payload as { payload?: { message?: { command?: string } } } | undefined)?.payload?.message?.command === "quickinfo",
+    );
+    expect((quickInfoEvent.payload as { name?: string } | undefined)?.name).toBe("tsServerMessage");
+    expect(
+      (quickInfoEvent.payload as { payload?: { message?: { success?: boolean } } } | undefined)?.payload?.message?.success,
+    ).toBe(true);
+    expect(
+      String(
+        (quickInfoEvent.payload as { payload?: { message?: { body?: { displayString?: string } } } } | undefined)
+          ?.payload?.message?.body?.displayString || "",
+      ),
+    ).toContain("const answer");
+  }, 20000);
+
+  test("Bunny Dash routes formatFile through bunny.biome", async () => {
+    const built = await buildCarrotAt(DASH_ROOT, "bunny-ears-dash-biome-build-");
+    const carrot = await startBuiltCarrot(built);
+    const projectDir = makeTempDir("bunny-dash-biome-project-");
+    const filePath = join(projectDir, "index.ts");
+    writeFileSync(filePath, "const answer={value:42}\n");
+
+    await carrot.nextAction("set-tray");
+    await carrot.nextAction("set-tray-menu");
+
+    const initialState = (await carrot.request("getInitialState")) as {
+      peerDependencies?: {
+        biome?: {
+          installed?: boolean;
+          version?: string;
+        };
+      };
+    };
+    expect(initialState.peerDependencies?.biome?.installed).toBe(true);
+    expect(typeof initialState.peerDependencies?.biome?.version).toBe("string");
+    expect(initialState.peerDependencies?.biome?.version).not.toBe("");
+
+    await carrot.request("send:formatFile", {
+      path: filePath,
+    });
+
+    expect(readFileSync(filePath, "utf8")).toContain("const answer = { value: 42 };");
+  }, 20000);
+
+  test("Bunny Dash routes llama requests through bunny.llama", async () => {
+    const fakeBinaryPath = createFakeLlamaCliBinary();
+    await withTemporaryEnv("BUNNY_LLAMA_CLI_BIN", fakeBinaryPath, async () => {
+      const built = await buildCarrotAt(DASH_ROOT, "bunny-ears-dash-llama-build-");
+      const modelsDir = makeTempDir("bunny-dash-llama-models-");
+      cleanups.add(() => rmSync(modelsDir, { recursive: true, force: true }));
+      writeFileSync(join(modelsDir, "dash-model.gguf"), "fake-model");
+
+      const carrot = await startBuiltCarrot(built, undefined, {
+        dependencyInitContext: {
+          "bunny.llama": {
+            llamaModelsDir: modelsDir,
+            llamaMinModelBytes: 1,
+            llamaTimeoutMs: 5_000,
+          },
+        },
+      });
+      await carrot.nextAction("set-tray");
+      await carrot.nextAction("set-tray-menu");
+
+      const listed = (await carrot.request("llamaListModels")) as {
+        ok: boolean;
+        models: Array<{ name: string }>;
+      };
+      expect(listed.ok).toBe(true);
+      expect(listed.models.some((model) => model.name === "dash-model")).toBe(true);
+
+      const completion = (await carrot.request("llamaCompletion", {
+        model: "dash-model",
+        prompt: "function greet() {",
+      })) as {
+        ok: boolean;
+        response?: string;
+        error?: string;
+      };
+      expect(completion.ok).toBe(true);
+      expect(completion.response).toContain("fake llama completion");
+    });
   }, 20000);
 
   test("Bunny PTY carrot kills orphaned terminals after the heartbeat timeout", async () => {

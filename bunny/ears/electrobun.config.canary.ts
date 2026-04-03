@@ -2,9 +2,9 @@ import type { ElectrobunConfig } from "electrobun";
 
 export default {
   app: {
-    name: "Bunny Ears",
+    name: "Bunny Ears Canary",
     identifier: "ai.electrobunny.ears",
-    version: "0.0.1"
+    version: "0.1.0-canary"
   },
   runtime: {
     exitOnLastWindowClosed: false
@@ -28,7 +28,7 @@ export default {
       "src/carrot-runtime/bun.ts": "carrot-runtime/bun.ts",
     },
     mac: {
-      createDmg: false,
+      createDmg: true,
       bundleCEF: false,
       bundleWGPU: true
     },

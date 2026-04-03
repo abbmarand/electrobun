@@ -210,6 +210,7 @@ function writeWorkerBootstrap(
       `globalThis.__bunnyCarrotBootstrap = ${JSON.stringify({
         manifest,
         context: {
+          currentDir,
           statePath: join(stateDir, "state.json"),
           logsPath: join(stateDir, "logs.txt"),
           permissions: flattenCarrotPermissions(install.permissionsGranted),
@@ -232,14 +233,16 @@ function assertPreparedCarrotPayload(sourceDir: string) {
 
   const manifest = readManifestAt(manifestPath);
   const workerPath = resolveInside(sourceDir, manifest.worker.relativePath);
-  const viewPath = resolveInside(sourceDir, manifest.view.relativePath);
 
   if (!existsSync(workerPath)) {
     throw new Error(`Missing worker for ${manifest.id}: ${workerPath}`);
   }
 
-  if (!existsSync(viewPath)) {
-    throw new Error(`Missing view entry for ${manifest.id}: ${viewPath}`);
+  if (manifest.view?.relativePath) {
+    const viewPath = resolveInside(sourceDir, manifest.view.relativePath);
+    if (!existsSync(viewPath)) {
+      throw new Error(`Missing view entry for ${manifest.id}: ${viewPath}`);
+    }
   }
 
   return { manifest };
@@ -273,14 +276,22 @@ function loadInstalledCarrot(record: CarrotInstallRecord): InstalledCarrot | nul
   const paths = getCarrotPaths(record.id);
   const manifestPath = join(paths.currentDir, "carrot.json");
   if (!existsSync(manifestPath)) {
+    console.warn(`[carrotStore] skipping ${record.id}: missing carrot.json at ${manifestPath}`);
     return null;
   }
 
   const manifest = readManifestAt(manifestPath);
   const bundleWorkerPath = resolveInside(paths.currentDir, manifest.worker.relativePath);
-  const viewPath = resolveInside(paths.currentDir, manifest.view.relativePath);
+  const viewPath = manifest.view?.relativePath
+    ? resolveInside(paths.currentDir, manifest.view.relativePath)
+    : "";
 
-  if (!existsSync(bundleWorkerPath) || !existsSync(viewPath)) {
+  if (!existsSync(bundleWorkerPath)) {
+    console.warn(`[carrotStore] skipping ${record.id}: missing worker at ${bundleWorkerPath}`);
+    return null;
+  }
+  if (viewPath && !existsSync(viewPath)) {
+    console.warn(`[carrotStore] skipping ${record.id}: missing view at ${viewPath}`);
     return null;
   }
 
@@ -301,7 +312,7 @@ function loadInstalledCarrot(record: CarrotInstallRecord): InstalledCarrot | nul
     bundleWorkerPath,
     workerPath,
     viewPath,
-    viewUrl: toViewsUrl(manifest.view.relativePath),
+    viewUrl: manifest.view?.relativePath ? toViewsUrl(manifest.view.relativePath) : "",
   };
 }
 
@@ -436,9 +447,12 @@ function normalizeBuildError(error: unknown) {
 
 function looksLikeSourceDirectory(path: string) {
   return (
+    existsSync(join(path, "electrobun.config.ts")) ||
+    existsSync(join(path, "carrot.json")) ||
     existsSync(join(path, "web")) ||
     existsSync(join(path, "build.ts")) ||
-    existsSync(join(path, "worker.ts"))
+    existsSync(join(path, "worker.ts")) ||
+    existsSync(join(path, "src", "bun", "worker.ts"))
   );
 }
 
@@ -632,6 +646,23 @@ export async function prepareArtifactCarrotInstall(
     devMode: false,
     lastBuildAt: null,
     cleanup: prepared.cleanup,
+  });
+}
+
+/**
+ * Install a carrot from a pre-built artifact directory.
+ * The directory must contain carrot.json + worker.js + optional view files.
+ * No build step is performed — the artifact is copied directly.
+ */
+export function installPrebuiltCarrot(
+  artifactDir: string,
+  permissionsGranted?: CarrotPermissionGrant,
+) {
+  const { manifest } = assertPreparedCarrotPayload(artifactDir);
+  return installPreparedCarrot(artifactDir, {
+    source: { kind: "artifact" as const, location: artifactDir },
+    permissionsGranted: permissionsGranted ?? manifest.permissions,
+    devMode: false,
   });
 }
 

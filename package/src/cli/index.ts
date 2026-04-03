@@ -502,35 +502,41 @@ async function ensureBunBinary(
 	targetOS: "macos" | "win" | "linux",
 	targetArch: "arm64" | "x64",
 	bunVersion?: string,
+	bunnyBun?: string,
 ): Promise<string> {
-	if (!bunVersion) {
+	const effectiveVersion = bunnyBun || bunVersion;
+	if (!effectiveVersion) {
 		return getPlatformPaths(targetOS, targetArch).BUN_BINARY;
 	}
 
 	const binExt = targetOS === "win" ? ".exe" : "";
-	const overrideDir = join(ELECTROBUN_CACHE_PATH, "bun-override", `${targetOS}-${targetArch}`);
+	const cacheSubdir = bunnyBun ? "bunny-bun-override" : "bun-override";
+	const overrideDir = join(ELECTROBUN_CACHE_PATH, cacheSubdir, `${targetOS}-${targetArch}`);
 	const overrideBinary = join(overrideDir, `bun${binExt}`);
 	const versionFile = join(overrideDir, ".bun-version");
 
 	// Check if already downloaded with matching version
 	if (existsSync(overrideBinary) && existsSync(versionFile)) {
 		const cachedVersion = readFileSync(versionFile, "utf8").trim();
-		if (cachedVersion === bunVersion) {
+		if (cachedVersion === effectiveVersion) {
 			console.log(
-				`Custom Bun ${bunVersion} already cached for ${targetOS}-${targetArch}`,
+				`${bunnyBun ? "Bunny" : "Custom"} Bun ${effectiveVersion} already cached for ${targetOS}-${targetArch}`,
 			);
 			return overrideBinary;
 		}
-		// Version mismatch - remove stale cache
 		console.log(
-			`Cached Bun version "${cachedVersion}" does not match requested "${bunVersion}", re-downloading...`,
+			`Cached Bun version "${cachedVersion}" does not match requested "${effectiveVersion}", re-downloading...`,
 		);
 		rmSync(overrideDir, { recursive: true, force: true });
 	} else if (existsSync(overrideDir)) {
 		rmSync(overrideDir, { recursive: true, force: true });
 	}
 
-	await downloadCustomBun(bunVersion, targetOS, targetArch);
+	if (bunnyBun) {
+		await downloadBunnyBun(bunnyBun, targetOS, targetArch);
+	} else {
+		await downloadCustomBun(effectiveVersion, targetOS, targetArch);
+	}
 	return overrideBinary;
 }
 
@@ -680,6 +686,123 @@ async function downloadCustomBun(
 		console.error(
 			`\nVerify the Bun version string and that it exists at: https://github.com/oven-sh/bun/releases`,
 		);
+		process.exit(1);
+	}
+}
+
+/**
+ * Downloads Electrobunny's Bun fork from blackboardsh/bun GitHub releases.
+ * Release assets follow the same naming convention as oven-sh/bun:
+ *   bun-darwin-aarch64.zip, bun-linux-x64.zip, etc.
+ */
+async function downloadBunnyBun(
+	releaseTag: string,
+	platformOS: "macos" | "win" | "linux",
+	platformArch: "arm64" | "x64",
+) {
+	let assetName: string;
+	let dirName: string;
+
+	// Asset names match the CI artifact names from blackboardsh/bun
+	if (platformOS === "win") {
+		assetName = "bun-windows-x64.zip";
+		dirName = "bun-windows-x64";
+	} else if (platformOS === "macos") {
+		assetName = platformArch === "arm64" ? "bun-darwin-arm64.zip" : "bun-darwin-x64.zip";
+		dirName = platformArch === "arm64" ? "bun-darwin-arm64" : "bun-darwin-x64";
+	} else {
+		assetName = platformArch === "arm64" ? "bun-linux-arm64.zip" : "bun-linux-x64.zip";
+		dirName = platformArch === "arm64" ? "bun-linux-arm64" : "bun-linux-x64";
+	}
+
+	const binExt = platformOS === "win" ? ".exe" : "";
+	const overrideDir = join(ELECTROBUN_CACHE_PATH, "bunny-bun-override", `${platformOS}-${platformArch}`);
+	const overrideBinary = join(overrideDir, `bun${binExt}`);
+	const bunUrl = `https://github.com/blackboardsh/bun/releases/download/${releaseTag}/${assetName}`;
+
+	console.log(`Using Bunny Bun: ${releaseTag}`);
+	console.log(`Downloading from: ${bunUrl}`);
+
+	mkdirSync(overrideDir, { recursive: true });
+	const tempZipPath = join(overrideDir, "temp.zip");
+
+	try {
+		const response = await fetch(bunUrl);
+		if (!response.ok) {
+			throw new Error(`HTTP ${response.status}: ${response.statusText}`);
+		}
+
+		const contentLength = response.headers.get("content-length");
+		const totalSize = contentLength ? parseInt(contentLength, 10) : 0;
+		const fileStream = createWriteStream(tempZipPath);
+		let downloadedSize = 0;
+		let lastReportedPercent = -1;
+
+		if (response.body) {
+			const reader = response.body.getReader();
+			while (true) {
+				const { done, value } = await reader.read();
+				if (done) break;
+				const chunk = Buffer.from(value);
+				fileStream.write(chunk);
+				downloadedSize += chunk.length;
+				if (totalSize > 0) {
+					const percent = Math.round((downloadedSize / totalSize) * 100);
+					const percentTier = Math.floor(percent / 10) * 10;
+					if (percentTier > lastReportedPercent && percentTier <= 100) {
+						console.log(`  Progress: ${percentTier}% (${Math.round(downloadedSize / 1024 / 1024)}MB/${Math.round(totalSize / 1024 / 1024)}MB)`);
+						lastReportedPercent = percentTier;
+					}
+				}
+			}
+		}
+
+		await new Promise((resolve, reject) => {
+			fileStream.end((error: any) => { if (error) reject(error); else resolve(void 0); });
+		});
+
+		console.log(`Download completed (${Math.round(downloadedSize / 1024 / 1024)}MB), extracting...`);
+
+		if (platformOS === "win") {
+			execSync(`powershell -command "Expand-Archive -Path '${tempZipPath}' -DestinationPath '${overrideDir}' -Force"`, { stdio: "inherit" });
+		} else {
+			execSync(`unzip -o ${escapePathForTerminal(tempZipPath)} -d ${escapePathForTerminal(overrideDir)}`, { stdio: "inherit" });
+		}
+
+		// Move binary from extracted subdirectory
+		const extractedBinary = join(overrideDir, dirName, `bun${binExt}`);
+		if (existsSync(extractedBinary)) {
+			renameSync(extractedBinary, overrideBinary);
+		} else {
+			throw new Error(`Bun binary not found after extraction at ${extractedBinary}`);
+		}
+
+		if (platformOS !== "win") {
+			execSync(`chmod +x ${escapePathForTerminal(overrideBinary)}`);
+		}
+
+		// Also extract ICU data if present
+		const extractedDir = join(overrideDir, dirName);
+		if (existsSync(extractedDir)) {
+			for (const file of readdirSync(extractedDir)) {
+				if (file.endsWith(".dat")) {
+					renameSync(join(extractedDir, file), join(overrideDir, file));
+				}
+			}
+		}
+
+		writeFileSync(join(overrideDir, ".bun-version"), releaseTag);
+
+		if (existsSync(tempZipPath)) unlinkSync(tempZipPath);
+		if (existsSync(extractedDir)) rmSync(extractedDir, { recursive: true, force: true });
+
+		console.log(`Bunny Bun ${releaseTag} for ${platformOS}-${platformArch} set up successfully`);
+	} catch (error: any) {
+		if (existsSync(overrideDir)) {
+			try { rmSync(overrideDir, { recursive: true, force: true }); } catch {}
+		}
+		console.error(`Failed to set up Bunny Bun ${releaseTag} for ${platformOS}-${platformArch}:`, error.message);
+		console.error(`\nVerify the release tag exists at: https://github.com/blackboardsh/bun/releases`);
 		process.exit(1);
 	}
 }
@@ -1377,6 +1500,7 @@ const defaultConfig = {
 		cefVersion: undefined as string | undefined, // Override CEF version: "CEF_VERSION+chromium-CHROMIUM_VERSION"
 		wgpuVersion: undefined as string | undefined, // Override Dawn (WebGPU) version: "0.2.3" or "v0.2.3-beta.0"
 		bunVersion: undefined as string | undefined, // Override Bun runtime version: "1.4.2"
+		bunnyBun: undefined as string | undefined, // Use Electrobunny's Bun fork: "bunny-bun-abc1234" (release tag from blackboardsh/bun)
 		locales: undefined as string[] | "*" | undefined, // ICU locales subset (Linux/Windows)
 		mac: {
 			codesign: false,
@@ -1418,6 +1542,16 @@ const defaultConfig = {
 		copy: undefined as Record<string, string> | undefined,
 		watch: undefined as string[] | undefined,
 		watchIgnore: undefined as string[] | undefined,
+		carrot: undefined as {
+			id: string;
+			name: string;
+			description?: string;
+			mode?: "window" | "background";
+			permissions?: Record<string, unknown>;
+			dependencies?: Record<string, string>;
+			remoteUIs?: Record<string, { entrypoint: string; [key: string]: unknown }>;
+			carrotOnly?: boolean;
+		} | undefined,
 	},
 	runtime: {} as Record<string, unknown>,
 	scripts: {
@@ -2033,21 +2167,38 @@ Categories=Utility;Application;
 			);
 		}
 
+		const isCarrotOnly = config.build.carrot?.carrotOnly === true;
+
 		// build macos bundle
 		// Use display name (with spaces) for macOS bundle folders, sanitized name for other platforms
+		let appBundleFolderPath: string;
+		let appBundleFolderContentsPath: string;
+		let appBundleMacOSPath: string;
+		let appBundleFolderResourcesPath: string;
+		let appBundleFolderFrameworksPath: string;
+		let appBundleAppCodePath: string;
 		const bundleName =
 			targetOS === "macos" ? macOSBundleDisplayName : appFileName;
-		const {
-			appBundleFolderPath,
-			appBundleFolderContentsPath,
-			appBundleMacOSPath,
-			appBundleFolderResourcesPath,
-			appBundleFolderFrameworksPath,
-		} = createAppBundle(bundleName, buildFolder, targetOS);
 
-		const appBundleAppCodePath = join(appBundleFolderResourcesPath, "app");
-
-		mkdirSync(appBundleAppCodePath, { recursive: true });
+		if (isCarrotOnly) {
+			// For carrot-only builds, create a minimal output structure for bun/view builds
+			appBundleFolderPath = join(buildFolder, "carrot-build");
+			appBundleFolderContentsPath = appBundleFolderPath;
+			appBundleMacOSPath = appBundleFolderPath;
+			appBundleFolderResourcesPath = appBundleFolderPath;
+			appBundleFolderFrameworksPath = appBundleFolderPath;
+			appBundleAppCodePath = join(appBundleFolderPath, "app");
+			mkdirSync(appBundleAppCodePath, { recursive: true });
+		} else {
+			const bundle = createAppBundle(bundleName, buildFolder, targetOS);
+			appBundleFolderPath = bundle.appBundleFolderPath;
+			appBundleFolderContentsPath = bundle.appBundleFolderContentsPath;
+			appBundleMacOSPath = bundle.appBundleMacOSPath;
+			appBundleFolderResourcesPath = bundle.appBundleFolderResourcesPath;
+			appBundleFolderFrameworksPath = bundle.appBundleFolderFrameworksPath;
+			appBundleAppCodePath = join(appBundleFolderResourcesPath, "app");
+			mkdirSync(appBundleAppCodePath, { recursive: true });
+		}
 
 		// const bundledBunPath = join(appBundleMacOSPath, 'bun');
 		// cpSync(bunPath, bundledBunPath);
@@ -2058,6 +2209,10 @@ Categories=Utility;Application;
 
 		// We likely want to let users configure this for different environments (eg: dev, canary, stable) and/or
 		// provide methods to help segment data in those folders based on channel/environment
+
+		let InfoPlistContents = "";
+
+		if (!isCarrotOnly) {
 		// Generate usage descriptions from entitlements
 		const usageDescriptions = generateUsageDescriptions(
 			config.build.mac.entitlements || {},
@@ -2068,7 +2223,7 @@ Categories=Utility;Application;
 			config.app.identifier,
 		);
 
-		const InfoPlistContents = `<?xml version="1.0" encoding="UTF-8"?>
+		InfoPlistContents = `<?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
 <dict>
@@ -2211,6 +2366,7 @@ Categories=Utility;Application;
 			currentTarget.os,
 			currentTarget.arch,
 			config.build.bunVersion,
+			config.build.bunnyBun,
 		);
 		// Note: .bin/bun binary in node_modules is a symlink to the versioned one in another place
 		// in node_modules, so we have to dereference here to get the actual binary in the bundle.
@@ -2820,6 +2976,7 @@ Categories=Utility;Application;
 				});
 			}
 		}
+		} // end if (!isCarrotOnly)
 
 		// transpile developer's bun code
 		const bunDestFolder = join(appBundleAppCodePath, "bun");
@@ -2915,10 +3072,112 @@ Categories=Utility;Application;
 			console.log("Copied content blocker rules to app bundle");
 		}
 
-		buildIcons(appBundleFolderResourcesPath, appBundleFolderPath);
+		if (!isCarrotOnly) {
+			buildIcons(appBundleFolderResourcesPath, appBundleFolderPath);
+		}
 
-		// Run postBuild script
-		runHook("postBuild");
+		// Build carrot artifact if configured (before postBuild so the hook can add custom views)
+		let carrotBuildDir: string | null = null;
+		if (config.build.carrot) {
+			const carrotConfig = config.build.carrot;
+			carrotBuildDir = join(buildFolder, "carrot", carrotConfig.id);
+
+			if (existsSync(carrotBuildDir)) {
+				rmSync(carrotBuildDir, { recursive: true });
+			}
+			mkdirSync(carrotBuildDir, { recursive: true });
+
+			// Copy the bun bundle as worker.js
+			const bunOutputDir = join(appBundleAppCodePath, "bun");
+			// The output filename matches the entrypoint name (e.g., worker.ts → worker.js)
+			const bunEntryName = basename(config.build.bun.entrypoint).replace(/\.ts$/, ".js");
+			const workerSrc = join(bunOutputDir, bunEntryName);
+			if (existsSync(workerSrc)) {
+				cpSync(workerSrc, join(carrotBuildDir, "worker.js"));
+			}
+
+			// Copy views
+			const viewsSrc = join(appBundleAppCodePath, "views");
+			if (existsSync(viewsSrc)) {
+				const viewsDest = join(carrotBuildDir, "views");
+				cpSync(viewsSrc, viewsDest, { recursive: true });
+			}
+
+			// Copy static assets
+			for (const relSource in config.build.copy) {
+				const destRel = config.build.copy[relSource]!;
+				const builtAsset = join(appBundleAppCodePath, destRel);
+				if (existsSync(builtAsset)) {
+					const carrotDest = join(carrotBuildDir, destRel);
+					mkdirSync(dirname(carrotDest), { recursive: true });
+					cpSync(builtAsset, carrotDest, { recursive: true });
+				}
+			}
+
+			// Build remote UIs if configured
+			if (carrotConfig.remoteUIs) {
+				for (const remoteUIName in carrotConfig.remoteUIs) {
+					const remoteUIConfig = carrotConfig.remoteUIs[remoteUIName]!;
+					const remoteUISource = join(projectRoot, remoteUIConfig.entrypoint);
+					if (!existsSync(remoteUISource)) {
+						console.error(`Remote UI entrypoint not found: ${remoteUISource}`);
+						continue;
+					}
+					const remoteUIDestFolder = join(carrotBuildDir, "remote-ui", remoteUIName);
+					mkdirSync(remoteUIDestFolder, { recursive: true });
+
+					const { entrypoint: _entrypoint, ...remoteUIBuildOptions } = remoteUIConfig;
+					const remoteUIBuildResult = await Bun.build({
+						...remoteUIBuildOptions,
+						entrypoints: [remoteUISource],
+						outdir: remoteUIDestFolder,
+						target: "browser",
+					});
+
+					if (!remoteUIBuildResult.success) {
+						console.error(`Failed to build remote UI: ${remoteUIName}`);
+						printBuildLogs(remoteUIBuildResult.logs);
+					}
+				}
+			}
+
+			// Write carrot.json manifest
+			const carrotManifest = {
+				id: carrotConfig.id,
+				name: carrotConfig.name,
+				version: config.app.version,
+				description: carrotConfig.description || config.app.description || "",
+				mode: carrotConfig.mode || "window",
+				permissions: carrotConfig.permissions || {},
+				dependencies: carrotConfig.dependencies || {},
+				worker: { relativePath: "worker.js" },
+				view: existsSync(viewsSrc) ? { relativePath: "views/index.html" } : undefined,
+			};
+			writeFileSync(
+				join(carrotBuildDir, "carrot.json"),
+				JSON.stringify(carrotManifest, null, 2),
+			);
+
+			console.log(`Carrot built: ${carrotConfig.id} v${config.app.version}`);
+		}
+
+		// Run postBuild script — with carrot dir available if configured
+		runHook("postBuild", carrotBuildDir ? { ELECTROBUN_CARROT_DIR: carrotBuildDir } : {});
+
+		// Compress carrot artifact for non-dev builds
+		if (config.build.carrot && carrotBuildDir && buildEnvironment !== "dev") {
+			const artifactName = `${config.build.carrot.id}-${config.app.version}.tar.zst`;
+			mkdirSync(artifactFolder, { recursive: true });
+			const artifactPath = join(artifactFolder, artifactName);
+
+			execSync(`tar -C "${carrotBuildDir}" -cf - . | zstd -o "${artifactPath}"`, { stdio: "pipe" });
+			const size = statSync(artifactPath).size;
+			console.log(`Carrot artifact: ${artifactPath} (${(size / 1024).toFixed(0)} KB)`);
+		}
+
+		if (isCarrotOnly) {
+			return;
+		}
 
 		// Pack app resources into ASAR archive if enabled
 		if (config.build.useAsar) {
@@ -3154,6 +3413,7 @@ Categories=Utility;Application;
 				? { cefVersion: config.build?.cefVersion ?? DEFAULT_CEF_VERSION_STRING }
 				: {}),
 			bunVersion: config.build?.bunVersion ?? BUN_VERSION,
+			...(config.build?.bunnyBun ? { bunnyBun: config.build.bunnyBun } : {}),
 		};
 
 		// Include chromiumFlags only if the developer defined them
