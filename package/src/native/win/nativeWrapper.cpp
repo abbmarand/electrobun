@@ -12062,15 +12062,17 @@ extern "C" ELECTROBUN_EXPORT void setDockIcon(const char* imagePath) {
     // Dock icon is a macOS concept; no-op on Windows
 }
 
+#ifndef WDA_EXCLUDEFROMCAPTURE
+#define WDA_EXCLUDEFROMCAPTURE 0x00000011
+#endif
+
 extern "C" ELECTROBUN_EXPORT const uint8_t* captureScreenExcludingWindow(void *window, size_t *outSize) {
     if (outSize) *outSize = 0;
     ensureGdiplus();
 
     HWND excludeHwnd = reinterpret_cast<HWND>(window);
-    bool wasVisible = false;
     if (excludeHwnd && IsWindow(excludeHwnd)) {
-        wasVisible = IsWindowVisible(excludeHwnd) != FALSE;
-        if (wasVisible) ShowWindow(excludeHwnd, SW_HIDE);
+        SetWindowDisplayAffinity(excludeHwnd, WDA_EXCLUDEFROMCAPTURE);
     }
 
     int screenW = GetSystemMetrics(SM_CXSCREEN);
@@ -12083,8 +12085,8 @@ extern "C" ELECTROBUN_EXPORT const uint8_t* captureScreenExcludingWindow(void *w
     BitBlt(memDC, 0, 0, screenW, screenH, screenDC, 0, 0, SRCCOPY);
     SelectObject(memDC, oldBitmap);
 
-    if (excludeHwnd && wasVisible) {
-        ShowWindow(excludeHwnd, SW_SHOWNOACTIVATE);
+    if (excludeHwnd && IsWindow(excludeHwnd)) {
+        SetWindowDisplayAffinity(excludeHwnd, WDA_NONE);
     }
 
     Gdiplus::Bitmap* srcBmp = Gdiplus::Bitmap::FromHBITMAP(hBitmap, NULL);
