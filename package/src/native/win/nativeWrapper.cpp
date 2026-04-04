@@ -11400,6 +11400,28 @@ extern "C" ELECTROBUN_EXPORT BOOL registerGlobalShortcut(const char* accelerator
         return FALSE;
     }
 
+    if (result && (modifiers & MOD_ALT) && !(modifiers & MOD_CONTROL)) {
+        int altGrId = g_nextHotkeyId++;
+        BOOL altGrResult = FALSE;
+        HANDLE altGrEvent = CreateEvent(NULL, FALSE, FALSE, NULL);
+
+        HotkeyRegisterData altGrData;
+        altGrData.hotkeyId = altGrId;
+        altGrData.modifiers = (modifiers | MOD_CONTROL) | MOD_NOREPEAT;
+        altGrData.vkCode = vkCode;
+        altGrData.accelerator = accelStr;
+        altGrData.result = &altGrResult;
+        altGrData.completionEvent = altGrEvent;
+
+        PostMessage(g_hotkeyWindow, WM_REGISTER_HOTKEY, 0, reinterpret_cast<LPARAM>(&altGrData));
+        WaitForSingleObject(altGrEvent, 5000);
+        CloseHandle(altGrEvent);
+
+        if (altGrResult) {
+            ::log("GlobalShortcut: Also registered AltGr variant (Ctrl+Alt) for '" + accelStr + "'");
+        }
+    }
+
     return result;
 }
 
