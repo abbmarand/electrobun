@@ -23,6 +23,7 @@
 #include <WebView2.h>
 #include <WebView2EnvironmentOptions.h>
 #include <map>
+#include <set>
 #include <algorithm>
 #include <stdint.h>
 #include <shellapi.h>
@@ -335,6 +336,7 @@ extern "C" __declspec(dllexport) void asar_close(void* archive) {
 }
 
 // Push macro definitions to avoid conflicts with Windows headers
+#ifndef ELECTROBUN_NO_CEF
 #pragma push_macro("GetNextSibling")
 #pragma push_macro("GetFirstChild")
 #undef GetNextSibling
@@ -356,6 +358,7 @@ extern "C" __declspec(dllexport) void asar_close(void* archive) {
 // Restore macro definitions
 #pragma pop_macro("GetFirstChild")
 #pragma pop_macro("GetNextSibling")
+#endif // ELECTROBUN_NO_CEF
 
 // Link required Windows libraries
 #pragma comment(lib, "gdi32.lib")
@@ -429,6 +432,11 @@ bool checkNavigationRules(AbstractView* view, const std::string& url);
 // Forward declarations for HTML content management
 extern "C" ELECTROBUN_EXPORT const char* getWebviewHTMLContent(uint32_t webviewId);
 extern "C" ELECTROBUN_EXPORT void setWebviewHTMLContent(uint32_t webviewId, const char* htmlContent);
+
+// Dock icon (taskbar) visibility state for Windows
+static bool g_dockIconVisible = true;
+static std::set<HWND> g_allAppWindows;
+static std::mutex g_allAppWindowsMutex;
 
 // Global mutex to serialize webview creation
 static std::mutex g_webviewCreationMutex;
@@ -4906,6 +4914,13 @@ LRESULT CALLBACK WindowProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
             }
             break;
 
+        case WM_SYSCOMMAND:
+            // Block Alt+Space system menu and Alt-key menu bar activation
+            if ((wParam & 0xFFF0) == SC_KEYMENU) {
+                return 0;
+            }
+            break;
+
         case WM_CLOSE:
             if (data && data->closeHandler) {
                 data->closeHandler(data->windowId);
@@ -4948,7 +4963,6 @@ LRESULT CALLBACK WindowProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
             break;
 
         case WM_ACTIVATE:
-            // Window activation - WA_ACTIVE or WA_CLICKACTIVE means window is being activated
             if (LOWORD(wParam) == WA_INACTIVE) {
                 if (data && data->blurHandler) {
                     data->blurHandler(data->windowId);
@@ -4956,6 +4970,21 @@ LRESULT CALLBACK WindowProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
             } else {
                 if (data && data->focusHandler) {
                     data->focusHandler(data->windowId);
+                }
+                // Propagate focus into the WebView2 controller so the web input
+                // field receives keyboard events immediately.
+                {
+                    auto cit = g_containerViews.find(hwnd);
+                    if (cit != g_containerViews.end()) {
+                        HWND containerHwnd = cit->second->GetHwnd();
+                        auto wit = g_webview2Views.find(containerHwnd);
+                        if (wit != g_webview2Views.end()) {
+                            auto* wv2 = static_cast<WebView2View*>(wit->second);
+                            if (wv2 && wv2->getController()) {
+                                wv2->getController()->MoveFocus(COREWEBVIEW2_MOVE_FOCUS_REASON_PROGRAMMATIC);
+                            }
+                        }
+                    }
                 }
             }
             break;
@@ -4988,6 +5017,12 @@ LRESULT CALLBACK WindowProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
             
             // Clean up container view
             g_containerViews.erase(hwnd);
+            
+            // Remove from tracked windows
+            {
+                std::lock_guard<std::mutex> lock(g_allAppWindowsMutex);
+                g_allAppWindows.erase(hwnd);
+            }
             
             // Clean up window data
             if (data) {
@@ -6049,6 +6084,23 @@ static std::shared_ptr<WebView2View> createWebView2View(uint32_t webviewId,
                                 }
                             }
 
+                            // Forward Alt / Alt+Space to JavaScript by disabling
+                            // the browser's own accelerator handling for system keys.
+                            ctrl->add_AcceleratorKeyPressed(
+                                Callback<ICoreWebView2AcceleratorKeyPressedEventHandler>(
+                                    [](ICoreWebView2Controller* sender, ICoreWebView2AcceleratorKeyPressedEventArgs* args) -> HRESULT {
+                                        COREWEBVIEW2_KEY_EVENT_KIND kind;
+                                        args->get_KeyEventKind(&kind);
+                                        if (kind == COREWEBVIEW2_KEY_EVENT_KIND_SYSTEM_KEY_DOWN ||
+                                            kind == COREWEBVIEW2_KEY_EVENT_KIND_SYSTEM_KEY_UP) {
+                                            ComPtr<ICoreWebView2AcceleratorKeyPressedEventArgs2> args2;
+                                            if (SUCCEEDED(args->QueryInterface(IID_PPV_ARGS(&args2)))) {
+                                                args2->put_IsBrowserAcceleratorKeyEnabled(FALSE);
+                                            }
+                                        }
+                                        return S_OK;
+                                    }).Get(), nullptr);
+
                             // Capture webviewId and handler for event handlers
                             uint32_t capturedWebviewId = view->webviewId;
                             WebviewEventHandler capturedHandler = view->webviewEventHandler;
@@ -7000,6 +7052,10 @@ BOOL WINAPI ConsoleControlHandler(DWORD dwCtrlType) {
 extern "C" {
 
 ELECTROBUN_EXPORT void startEventLoop(const char* identifier, const char* name, const char* channel) {
+    // Enable per-monitor DPI awareness so windows render at native
+    // resolution on high-DPI displays (e.g. 4K/5K screens).
+    SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);
+
     g_mainThreadId = GetCurrentThreadId();
 
     // Store identifier, name, and channel globally for use in CEF initialization
@@ -8445,6 +8501,13 @@ ELECTROBUN_EXPORT void evaluateJavaScriptWithNoCompletion(AbstractView *abstract
     
 }
 
+ELECTROBUN_EXPORT const char* evaluateJavascriptSync(AbstractView *abstractView, const char *script) {
+    (void)abstractView;
+    (void)script;
+    // WebView2 ExecuteScript is async-only; return null for now
+    return nullptr;
+}
+
 ELECTROBUN_EXPORT void testFFI(void *ptr) {
     // Stub implementation
 }
@@ -8606,6 +8669,16 @@ ELECTROBUN_EXPORT void webviewStopFind(AbstractView *abstractView) {
     }
 }
 
+ELECTROBUN_EXPORT void webviewShowFindBar(void *window) {
+    (void)window;
+    // Find bar UI not yet implemented on Windows
+}
+
+ELECTROBUN_EXPORT void webviewHideFindBar(void *window) {
+    (void)window;
+    // Find bar UI not yet implemented on Windows
+}
+
 ELECTROBUN_EXPORT void webviewOpenDevTools(AbstractView *abstractView) {
     if (abstractView) {
         MainThreadDispatcher::dispatch_sync([abstractView]() {
@@ -8672,6 +8745,7 @@ ELECTROBUN_EXPORT HWND createWindowWithFrameAndStyleFromWorker(
     uint32_t styleMask,
     const char* titleBarStyle,
     bool transparent,
+    bool toolbar,
     WindowCloseHandler zigCloseHandler,
     WindowMoveHandler zigMoveHandler,
     WindowResizeHandler zigResizeHandler,
@@ -8722,9 +8796,14 @@ ELECTROBUN_EXPORT HWND createWindowWithFrameAndStyleFromWorker(
         }
         // else: default titleBarStyle = WS_OVERLAPPEDWINDOW (standard window)
 
-        if (styleMask & (1 << 7)) {
-            windowExStyle |= WS_EX_NOACTIVATE | WS_EX_TOOLWINDOW;
+        if ((styleMask & (1 << 7)) || !g_dockIconVisible) {
+            windowExStyle |= WS_EX_TOOLWINDOW;
             windowExStyle &= ~WS_EX_APPWINDOW;
+            // Note: WS_EX_NOACTIVATE is NOT set on Windows. On macOS,
+            // NonactivatingPanel allows key focus without app activation.
+            // On Windows, WS_EX_NOACTIVATE prevents ALL activation including
+            // keyboard focus, which breaks input fields. WS_EX_TOOLWINDOW
+            // alone handles taskbar hiding.
         }
 
         if (transparent) {
@@ -8734,7 +8813,7 @@ ELECTROBUN_EXPORT HWND createWindowWithFrameAndStyleFromWorker(
         // Create the window
         HWND hwnd = CreateWindowExA(
             windowExStyle,
-            "BasicWindowClass",  // Use ANSI string
+            "BasicWindowClass",
             "",
             windowStyle,
             (int)x, (int)y,
@@ -8743,6 +8822,12 @@ ELECTROBUN_EXPORT HWND createWindowWithFrameAndStyleFromWorker(
         );
 
         if (hwnd) {
+            // Track window for dock icon visibility management
+            {
+                std::lock_guard<std::mutex> lock(g_allAppWindowsMutex);
+                g_allAppWindows.insert(hwnd);
+            }
+
             // Store our data with the window
             SetWindowLongPtr(hwnd, GWLP_USERDATA, (LONG_PTR)data);
 
@@ -8795,43 +8880,49 @@ ELECTROBUN_EXPORT void showWindow(void *window) {
     }
     
     MainThreadDispatcher::dispatch_sync([=]() {
-        LONG_PTR exStyle = GetWindowLongPtr(hwnd, GWL_EXSTYLE);
-        bool isNonActivating = (exStyle & WS_EX_NOACTIVATE) != 0;
-
         if (!IsWindowVisible(hwnd)) {
-            ShowWindow(hwnd, isNonActivating ? SW_SHOWNOACTIVATE : SW_SHOW);
+            ShowWindow(hwnd, SW_SHOW);
         }
 
-        if (isNonActivating) {
-            SetWindowPos(hwnd, HWND_TOPMOST, 0, 0, 0, 0,
-                        SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE | SWP_SHOWWINDOW);
-        } else {
-            if (SetForegroundWindow(hwnd)) {
-            } else {
-                DWORD currentThreadId = GetCurrentThreadId();
-                DWORD foregroundThreadId = GetWindowThreadProcessId(GetForegroundWindow(), NULL);
-                
-                if (currentThreadId != foregroundThreadId) {
-                    if (AttachThreadInput(currentThreadId, foregroundThreadId, TRUE)) {
-                        SetForegroundWindow(hwnd);
-                        SetFocus(hwnd);
-                        AttachThreadInput(currentThreadId, foregroundThreadId, FALSE);
-                    } else {
-                        FLASHWINFO fwi = {0};
-                        fwi.cbSize = sizeof(FLASHWINFO);
-                        fwi.hwnd = hwnd;
-                        fwi.dwFlags = FLASHW_ALL | FLASHW_TIMERNOFG;
-                        fwi.uCount = 3;
-                        fwi.dwTimeout = 0;
-                        FlashWindowEx(&fwi);
-                    }
+        if (!SetForegroundWindow(hwnd)) {
+            DWORD currentThreadId = GetCurrentThreadId();
+            DWORD foregroundThreadId = GetWindowThreadProcessId(GetForegroundWindow(), NULL);
+            if (currentThreadId != foregroundThreadId) {
+                AttachThreadInput(currentThreadId, foregroundThreadId, TRUE);
+                SetForegroundWindow(hwnd);
+                AttachThreadInput(currentThreadId, foregroundThreadId, FALSE);
+            }
+        }
+        SetActiveWindow(hwnd);
+        SetFocus(hwnd);
+
+        bool isToolWindow = (GetWindowLongPtr(hwnd, GWL_EXSTYLE) & WS_EX_TOOLWINDOW) != 0;
+        SetWindowPos(hwnd, isToolWindow ? HWND_TOPMOST : HWND_TOP, 0, 0, 0, 0,
+                    SWP_NOMOVE | SWP_NOSIZE | SWP_SHOWWINDOW);
+
+        // Focus the WebView2 controller so the web input field gets keyboard input.
+        auto cit = g_containerViews.find(hwnd);
+        if (cit != g_containerViews.end()) {
+            HWND containerHwnd = cit->second->GetHwnd();
+            auto wit = g_webview2Views.find(containerHwnd);
+            if (wit != g_webview2Views.end()) {
+                auto* wv2 = static_cast<WebView2View*>(wit->second);
+                if (wv2 && wv2->getController()) {
+                    wv2->getController()->MoveFocus(COREWEBVIEW2_MOVE_FOCUS_REASON_PROGRAMMATIC);
                 }
             }
-            SetActiveWindow(hwnd);
-            SetFocus(hwnd);
-            SetWindowPos(hwnd, HWND_TOP, 0, 0, 0, 0,
-                        SWP_NOMOVE | SWP_NOSIZE | SWP_SHOWWINDOW);
         }
+    });
+}
+
+ELECTROBUN_EXPORT void hideWindow(void *window) {
+    HWND hwnd = reinterpret_cast<HWND>(window);
+    if (!IsWindow(hwnd)) {
+        ::log("ERROR: Invalid window handle in hideWindow");
+        return;
+    }
+    MainThreadDispatcher::dispatch_sync([=]() {
+        ShowWindow(hwnd, SW_HIDE);
     });
 }
 
@@ -10617,12 +10708,19 @@ ELECTROBUN_EXPORT uint32_t getWindowStyle(
     bool DocModalWindow,
     bool NonactivatingPanel,
     bool HUDWindow) {
-    // Stub implementation that returns a composite style mask
     uint32_t mask = 0;
     if (Borderless) mask |= 1;
-    if (Titled) mask |= 2;
-    if (Closable) mask |= 4;
-    if (Resizable) mask |= 8;
+    if (Titled) mask |= (1 << 1);
+    if (Closable) mask |= (1 << 2);
+    if (Miniaturizable) mask |= (1 << 3);
+    if (Resizable) mask |= (1 << 4);
+    if (UnifiedTitleAndToolbar) mask |= (1 << 5);
+    if (FullScreen) mask |= (1 << 6);
+    if (NonactivatingPanel) mask |= (1 << 7);
+    if (FullSizeContentView) mask |= (1 << 8);
+    if (UtilityWindow) mask |= (1 << 9);
+    if (DocModalWindow) mask |= (1 << 10);
+    if (HUDWindow) mask |= (1 << 11);
     return mask;
 }
 
@@ -11859,15 +11957,48 @@ extern "C" ELECTROBUN_EXPORT void setAppReopenHandler(void (*callback)()) {
     // Not supported on Windows - stub to prevent dlopen failure
 }
 
-// Dock icon visibility - macOS only, stubs for Windows
+extern "C" ELECTROBUN_EXPORT void setDockIcon(const char* imagePath) {
+    (void)imagePath;
+    // Dock icon is a macOS concept; no-op on Windows
+}
+
+extern "C" ELECTROBUN_EXPORT const uint8_t* captureScreenExcludingWindow(void *window, size_t *outSize) {
+    (void)window;
+    if (outSize) *outSize = 0;
+    return nullptr;
+}
+
+extern "C" ELECTROBUN_EXPORT const uint8_t* captureWindowById(uint32_t windowId, size_t *outSize) {
+    (void)windowId;
+    if (outSize) *outSize = 0;
+    return nullptr;
+}
+
 extern "C" ELECTROBUN_EXPORT void setDockIconVisible(bool visible) {
-    (void)visible;
-    // Not supported on Windows - stub to prevent dlopen failure
+    g_dockIconVisible = visible;
+
+    MainThreadDispatcher::dispatch_sync([=]() {
+        std::lock_guard<std::mutex> lock(g_allAppWindowsMutex);
+        for (HWND hwnd : g_allAppWindows) {
+            if (!IsWindow(hwnd)) continue;
+
+            LONG_PTR exStyle = GetWindowLongPtr(hwnd, GWL_EXSTYLE);
+            if (visible) {
+                exStyle |= WS_EX_APPWINDOW;
+                exStyle &= ~WS_EX_TOOLWINDOW;
+            } else {
+                exStyle |= WS_EX_TOOLWINDOW;
+                exStyle &= ~WS_EX_APPWINDOW;
+            }
+            SetWindowLongPtr(hwnd, GWL_EXSTYLE, exStyle);
+            SetWindowPos(hwnd, NULL, 0, 0, 0, 0,
+                         SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_FRAMECHANGED | SWP_NOACTIVATE);
+        }
+    });
 }
 
 extern "C" ELECTROBUN_EXPORT bool isDockIconVisible() {
-    // Not supported on Windows
-    return true;
+    return g_dockIconVisible;
 }
 
 // Window icon - Linux only, no-op for Windows

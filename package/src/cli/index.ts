@@ -12,8 +12,10 @@ import {
 	readdirSync,
 	symlinkSync,
 	statSync,
-	copyFileSync,
 	renameSync,
+	openSync,
+	writeSync,
+	closeSync,
 } from "fs";
 import { execSync, spawnSync } from "child_process";
 import * as readline from "readline";
@@ -57,12 +59,46 @@ function createTar(tarPath: string, cwd: string, entries: string[]) {
 	);
 }
 
-/** Best-effort delete of a prior build tree (handles uchg / read-only / root-owned files). */
+/** Best-effort delete of a prior build tree (handles uchg / read-only / root-owned files, and Windows file locks). */
 function removeBuildTree(absPath: string): void {
 	if (!existsSync(absPath)) return;
 	if (process.platform === "darwin") {
 		spawnSync("chflags", ["-R", "nouchg", absPath], { stdio: "ignore" });
 		spawnSync("chmod", ["-R", "u+w", absPath], { stdio: "ignore" });
+	}
+	if (process.platform === "win32") {
+		// Kill any processes running executables from the build folder
+		// (e.g. bun.exe, launcher.exe from a previous run) before deleting.
+		try {
+			spawnSync(
+				"powershell",
+				[
+					"-NoProfile",
+					"-Command",
+					`Get-Process -ErrorAction SilentlyContinue | Where-Object { $_.Path -and $_.Path.ToLower().StartsWith('${absPath.toLowerCase()}') } | Stop-Process -Force -ErrorAction SilentlyContinue`,
+				],
+				{ stdio: "ignore" },
+			);
+		} catch {}
+		// Give Windows a moment to release file handles after killing processes
+		const start = Date.now();
+		while (Date.now() - start < 500) { /* spin */ }
+		// Retry rmSync with backoff to handle lingering locks
+		let lastError: Error | null = null;
+		for (let attempt = 0; attempt < 10; attempt++) {
+			try {
+				rmSync(absPath, { recursive: true, force: true });
+				return;
+			} catch (err: unknown) {
+				lastError = err as Error;
+				const code = (err as NodeJS.ErrnoException).code;
+				if (code !== "EPERM" && code !== "EBUSY") throw err;
+				const retryStart = Date.now();
+				while (Date.now() - retryStart < 300) { /* spin */ }
+			}
+		}
+		if (lastError) throw lastError;
+		return;
 	}
 	try {
 		rmSync(absPath, { recursive: true, force: true });
@@ -2981,18 +3017,21 @@ Categories=Utility;Application;
 		// transpile developer's bun code
 		const bunDestFolder = join(appBundleAppCodePath, "bun");
 		// Build bun-javascript ts files
-		const { entrypoint: _bunEntrypoint, ...bunBuildOptions } = bunConfig;
-		const buildResult = await Bun.build({
-			...bunBuildOptions,
-			entrypoints: [bunSource],
-			outdir: bunDestFolder,
-			// minify: true, // todo (yoav): add minify in canary and prod builds
-			target: "bun",
-		});
-
-		if (!buildResult.success) {
+		// Use a CLI subprocess instead of Bun.build() API to correctly resolve
+		// workspace symlinks (SYMLINKD) on Windows — the Bun.build() API in
+		// v1.1.21 does not traverse SYMLINKD entries for node_modules resolution.
+		const hostPaths = getPlatformPaths(OS, ARCH);
+		mkdirSync(bunDestFolder, { recursive: true });
+		const bunBuildProc = Bun.spawnSync(
+			[hostPaths.BUN_BINARY, "build", bunSource, "--outdir", bunDestFolder, "--target", "bun"],
+			{ stdio: ["ignore", "pipe", "pipe"], cwd: projectRoot },
+		);
+		if (bunBuildProc.exitCode !== 0) {
 			console.error("failed to build", bunSource);
-			printBuildLogs(buildResult.logs);
+			const stderr = new TextDecoder().decode(bunBuildProc.stderr as Uint8Array);
+			const stdout = new TextDecoder().decode(bunBuildProc.stdout as Uint8Array);
+			if (stderr) console.error(stderr);
+			if (stdout) console.error(stdout);
 			throw new Error("Build failed: bun build failed");
 		}
 
@@ -4156,7 +4195,17 @@ Categories=Utility;Application;
 		return {
 			kill: () => {
 				try {
-					mainProc.kill();
+					if (OS === "win" && mainProc.pid) {
+						// On Windows, killing the parent (launcher.exe) doesn't kill its
+						// children (e.g. bun.exe). Use taskkill /T to kill the whole tree
+						// so file locks on the build directory are released before rmSync.
+						Bun.spawnSync(
+							["taskkill", "/F", "/T", "/PID", String(mainProc.pid)],
+							{ stdio: ["ignore", "ignore", "ignore"] },
+						);
+					} else {
+						mainProc.kill();
+					}
 				} catch {}
 			},
 			exited: exitedPromise,
@@ -4594,7 +4643,10 @@ Categories=Utility;Application;
 		config: any,
 		projectRoot: string,
 	): Promise<string> {
-		console.log("Creating Windows installer with separate archive...");
+		console.log("Creating single-file Windows self-extracting installer...");
+
+		const METADATA_MARKER = "ELECTROBUN_METADATA_V1";
+		const ARCHIVE_MARKER = "ELECTROBUN_ARCHIVE_V1";
 
 		const setupFileName = getWindowsSetupFileName(
 			config.app.name,
@@ -4602,11 +4654,12 @@ Categories=Utility;Application;
 		);
 		const outputExePath = join(buildFolder, setupFileName);
 
-		// Copy the extractor exe
+		// Start with the extractor exe bytes
 		const extractorExe = readFileSync(targetPaths.EXTRACTOR);
 		writeFileSync(outputExePath, new Uint8Array(extractorExe));
 
-		// Embed icon into the wrapper EXE if provided
+		// Embed icon into the wrapper EXE if provided (must happen before
+		// appending archive data since rcedit modifies the PE structure)
 		if (config.build.win?.icon) {
 			const iconSourcePath =
 				config.build.win.icon.startsWith("/") ||
@@ -4619,7 +4672,6 @@ Categories=Utility;Application;
 				try {
 					let iconPath = iconSourcePath;
 
-					// Convert PNG to ICO if needed
 					if (iconSourcePath.toLowerCase().endsWith(".png")) {
 						const pngToIco = (await import("png-to-ico")).default;
 						const tempIcoPath = join(buildFolder, "temp-icon.ico");
@@ -4629,14 +4681,12 @@ Categories=Utility;Application;
 						console.log(`Converted PNG to ICO format: ${tempIcoPath}`);
 					}
 
-					// Use rcedit to embed the icon
 					const rcedit = (await import("rcedit")).default;
 					await rcedit(outputExePath, {
 						icon: iconPath,
 					});
 					console.log(`Successfully embedded icon into ${setupFileName}`);
 
-					// Clean up temp ICO file
 					if (iconPath !== iconSourcePath && existsSync(iconPath)) {
 						unlinkSync(iconPath);
 					}
@@ -4650,41 +4700,31 @@ Categories=Utility;Application;
 			}
 		}
 
-		// Create metadata JSON file
-		const metadata = {
+		// Build metadata
+		const metadataJson = JSON.stringify({
 			identifier: config.app.identifier,
 			name: config.app.name,
 			channel: buildEnvironment,
 			hash: hash,
-		};
-		const metadataJson = JSON.stringify(metadata, null, 2);
-		const metadataFileName = setupFileName.replace(".exe", ".metadata.json");
-		const metadataPath = join(buildFolder, metadataFileName);
-		writeFileSync(metadataPath, metadataJson);
+		});
 
-		// Copy the compressed archive with matching name
-		const archiveFileName = setupFileName.replace(".exe", ".tar.zst");
-		const archivePath = join(buildFolder, archiveFileName);
-		copyFileSync(compressedTarPath, archivePath);
+		// Read the compressed archive
+		const archiveBytes = readFileSync(compressedTarPath);
 
-		// Make the exe executable (though Windows doesn't need chmod)
-		if (OS !== "win") {
-			execSync(`chmod +x ${escapePathForTerminal(outputExePath)}`);
-		}
+		// Append: METADATA_MARKER + metadata_json + ARCHIVE_MARKER + archive_bytes
+		// The extractor searches for the second occurrence of each marker
+		// (skipping the first which is embedded in the binary's own string literals)
+		const fd = openSync(outputExePath, "a");
+		writeSync(fd, Buffer.from(METADATA_MARKER, "utf-8"));
+		writeSync(fd, Buffer.from(metadataJson, "utf-8"));
+		writeSync(fd, Buffer.from(ARCHIVE_MARKER, "utf-8"));
+		writeSync(fd, archiveBytes);
+		closeSync(fd);
 
-		const exeSize = statSync(outputExePath).size;
-		const archiveSize = statSync(archivePath).size;
-		const totalSize = exeSize + archiveSize;
-
-		console.log(`Created Windows installer:`);
-		console.log(
-			`  - Extractor: ${outputExePath} (${(exeSize / 1024 / 1024).toFixed(2)} MB)`,
-		);
-		console.log(
-			`  - Archive: ${archivePath} (${(archiveSize / 1024 / 1024).toFixed(2)} MB)`,
-		);
-		console.log(`  - Metadata: ${metadataPath}`);
-		console.log(`  - Total size: ${(totalSize / 1024 / 1024).toFixed(2)} MB`);
+		const totalSize = statSync(outputExePath).size;
+		console.log(`Created single-file Windows installer:`);
+		console.log(`  - ${outputExePath}`);
+		console.log(`  - Size: ${(totalSize / 1024 / 1024).toFixed(2)} MB`);
 
 		return outputExePath;
 	}
@@ -4695,46 +4735,15 @@ Categories=Utility;Application;
 	): Promise<string> {
 		const exeName = basename(exePath);
 		const exeStem = exeName.replace(".exe", "");
-
-		// Derive the paths for metadata and archive files
-		const metadataPath = join(buildFolder, `${exeStem}.metadata.json`);
-		const archivePath = join(buildFolder, `${exeStem}.tar.zst`);
-		// Sanitize the zip filename (no spaces in artifact URLs) while inner files keep their original names
 		const zipPath = join(buildFolder, `${exeStem.replace(/ /g, "")}.zip`);
 
-		// Verify all files exist
 		if (!existsSync(exePath)) {
 			throw new Error(`Installer exe not found: ${exePath}`);
 		}
-		if (!existsSync(metadataPath)) {
-			throw new Error(`Metadata file not found: ${metadataPath}`);
-		}
-		if (!existsSync(archivePath)) {
-			throw new Error(`Archive file not found: ${archivePath}`);
-		}
-
-		// Create staging directory to control zip layout
-		const stagingDir = join(
-			buildFolder,
-			`.installer-zip-${exeStem.replace(/[^a-zA-Z0-9_-]/g, "")}`,
-		);
-		const stagingInstallerDir = join(stagingDir, ".installer");
-
-		if (existsSync(stagingDir)) {
-			rmSync(stagingDir, { recursive: true, force: true });
-		}
-		mkdirSync(stagingInstallerDir, { recursive: true });
-
-		// Add Setup.exe at the root level for easy access
-		copyFileSync(exePath, join(stagingDir, basename(exePath)));
-		// Put metadata and archive in a subdirectory to discourage manual extraction
-		copyFileSync(metadataPath, join(stagingInstallerDir, basename(metadataPath)));
-		copyFileSync(archivePath, join(stagingInstallerDir, basename(archivePath)));
 
 		try {
-			// Create zip archive (Windows only)
 			execSync(
-				`powershell -command "Compress-Archive -Path '${stagingDir}\\\\*' -DestinationPath '${zipPath}' -Force"`,
+				`powershell -command "Compress-Archive -Path '${exePath}' -DestinationPath '${zipPath}' -Force"`,
 				{ stdio: "inherit" },
 			);
 
@@ -4745,10 +4754,9 @@ Categories=Utility;Application;
 				`Created Windows installer package: ${zipPath} (${zipSizeMb} MB)`,
 			);
 			return zipPath;
-		} finally {
-			if (existsSync(stagingDir)) {
-				rmSync(stagingDir, { recursive: true, force: true });
-			}
+		} catch (error) {
+			console.warn(`Warning: Failed to create zip: ${error}`);
+			return exePath;
 		}
 	}
 

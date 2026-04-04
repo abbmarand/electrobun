@@ -250,9 +250,10 @@ pub fn main() !void {
         std.debug.print("Dev build detected - console output enabled\n", .{});
     }
 
-    // Windows non-dev builds: Use CreateProcessW with CREATE_NO_WINDOW (no console)
-    // Dev builds and other platforms: Use standard spawn with inherited I/O
-    const use_gui_mode = builtin.os.tag == .windows and !is_dev_build;
+    // Always use CreateProcessW with CREATE_NO_WINDOW on Windows to prevent
+    // console windows from appearing. Only fall back to the console-visible
+    // std.process.Child path when ELECTROBUN_CONSOLE=1 is explicitly set.
+    const use_gui_mode = builtin.os.tag == .windows and !force_console;
 
     if (use_gui_mode) {
         // Windows non-dev build - use CreateProcessW with CREATE_NO_WINDOW

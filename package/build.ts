@@ -917,7 +917,7 @@ async function vendorZig() {
 		// Always use x64 for Windows since we only build x64 Windows binaries
 		const zigArch = "x86_64";
 		const zigFolder = `zig-windows-${zigArch}-0.13.0`;
-		await $`mkdir -p vendors/zig && curl -L https://ziglang.org/download/0.13.0/${zigFolder}.zip -o vendors/zig.zip && powershell -ExecutionPolicy Bypass -Command Expand-Archive -Path vendors/zig.zip -DestinationPath vendors/zig-temp && mv vendors/zig-temp/${zigFolder}/zig.exe vendors/zig && mv vendors/zig-temp/${zigFolder}/lib vendors/zig/`;
+		await $`mkdir -p vendors/zig && curl -L https://ziglang.org/download/0.13.0/${zigFolder}.zip -o vendors/zig.zip && powershell -ExecutionPolicy Bypass -Command Expand-Archive -Path vendors/zig.zip -DestinationPath vendors/zig-temp -Force && mv vendors/zig-temp/${zigFolder}/zig.exe vendors/zig && rm -rf vendors/zig/lib && mv vendors/zig-temp/${zigFolder}/lib vendors/zig/ && rm -rf vendors/zig-temp && rm -f vendors/zig.zip`;
 	} else if (OS === "linux") {
 		const zigArch = ARCH === "arm64" ? "aarch64" : "x86_64";
 		await $`mkdir -p vendors/zig && curl -L https://ziglang.org/download/0.13.0/zig-linux-${zigArch}-0.13.0.tar.xz | tar -xJ --strip-components=1 -C vendors/zig zig-linux-${zigArch}-0.13.0/zig zig-linux-${zigArch}-0.13.0/lib zig-linux-${zigArch}-0.13.0/doc`;
@@ -1511,6 +1511,38 @@ async function vendorCEF() {
 			console.log("CEF extracted successfully");
 		}
 
+		// The minimal CEF distribution omits cef_sandbox_win.h and several internal
+		// platform headers that libcef_dll's CMakeLists.txt lists as sources.
+		// We patch CMakeLists.txt to skip missing files, but also keep a sandbox stub
+		// in case an unpatched version of the cmake file is used.
+		const sandboxStub = join(process.cwd(), "vendors", "cef", "include", "cef_sandbox_win.h");
+		if (!existsSync(sandboxStub)) {
+			writeFileSync(sandboxStub, [
+				"// Stub for minimal CEF distribution (CEF_USE_SANDBOX=OFF).",
+				"// The minimal download omits this file; an empty stub satisfies cmake.",
+				"#ifndef CEF_INCLUDE_CEF_SANDBOX_WIN_H_",
+				"#define CEF_INCLUDE_CEF_SANDBOX_WIN_H_",
+				"#pragma once",
+				"#endif  // CEF_INCLUDE_CEF_SANDBOX_WIN_H_",
+			].join("\n") + "\n");
+		}
+
+		// Patch the CEF cmake wrapper to skip listing files that don't exist.
+		// The minimal distribution omits platform-specific internal headers that are
+		// only used for Visual Studio project organisation, not compilation.
+		const cefCMakeWrapperFile = join(process.cwd(), "vendors", "cef", "libcef_dll", "CMakeLists.txt");
+		if (existsSync(cefCMakeWrapperFile)) {
+			let cmakeContent = readFileSync(cefCMakeWrapperFile, "utf-8");
+			const patchMarker = "# PATCHED: skip missing platform sources";
+			if (!cmakeContent.includes(patchMarker)) {
+				cmakeContent = cmakeContent.replace(
+					/if\("\$\{CMAKE_SYSTEM_NAME\}" STREQUAL "Windows" AND \$\{name_of_list\}_WINDOWS\)\s*\n\s*list\(APPEND \$\{name_of_list\} \$\{\$\{name_of_list\}_WINDOWS\}\)\s*\n\s*endif\(\)/,
+					`if("\${CMAKE_SYSTEM_NAME}" STREQUAL "Windows" AND \${name_of_list}_WINDOWS)\n    ${patchMarker}\n    foreach(_cef_plat_src \${\${name_of_list}_WINDOWS})\n      if(EXISTS "\${CMAKE_CURRENT_SOURCE_DIR}/\${_cef_plat_src}")\n        list(APPEND \${name_of_list} \${_cef_plat_src})\n      endif()\n    endforeach()\n  endif()`,
+				);
+				writeFileSync(cefCMakeWrapperFile, cmakeContent);
+			}
+		}
+
 		// Build CEF wrapper library for Windows
 		if (
 			!existsSync(
@@ -2087,8 +2119,21 @@ async function buildCli() {
 	const compileTarget =
 		process.platform === "win32" ? "--target=bun-windows-x64-baseline" : "";
 
-	// Use vendored Bun for building CLI to ensure consistency with CI and proper code signing
-	await $`BUN_INSTALL_CACHE_DIR=/tmp/bun-cache ${PATH.bun.RUNTIME} build src/cli/index.ts --compile ${compileTarget} --outfile src/cli/build/electrobun`;
+	// On Windows, bun's bundler can't follow SYMLINKD directory symlinks in the bun
+	// link-farm (node_modules/.bun/...) when running as a subprocess, causing EACCES.
+	// Skip the rebuild if the CLI exe already exists — it can be built manually with:
+	//   bun build src/cli/index.ts --compile --target=bun-windows-x64-baseline --outfile src/cli/build/electrobun
+	if (isWindows) {
+		const cliExe = join(process.cwd(), "src", "cli", "build", "electrobun.exe");
+		if (existsSync(cliExe)) {
+			console.log("CLI already built at", cliExe, "— skipping rebuild on Windows");
+			return;
+		}
+		await $`${PATH.bun.RUNTIME} build src/cli/index.ts --compile ${compileTarget} --outfile src/cli/build/electrobun`;
+	} else {
+		// Use vendored Bun for building CLI to ensure consistency with CI and proper code signing
+		await $`BUN_INSTALL_CACHE_DIR=/tmp/bun-cache ${PATH.bun.RUNTIME} build src/cli/index.ts --compile ${compileTarget} --outfile src/cli/build/electrobun`;
+	}
 }
 
 async function buildContentBlockerRules() {

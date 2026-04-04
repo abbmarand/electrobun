@@ -4,10 +4,14 @@ const { execSync, spawn } = require('child_process');
 const { existsSync, mkdirSync, unlinkSync, chmodSync, copyFileSync, createWriteStream } = require('fs');
 const { join, dirname } = require('path');
 const https = require('https');
-const ProxyAgent = require('proxy-agent').ProxyAgent;
-
-// Create an HTTPS agent that respects environment proxy settings
-const agent = new ProxyAgent();
+let agent;
+try {
+  const ProxyAgent = require('proxy-agent').ProxyAgent;
+  agent = new ProxyAgent();
+} catch {
+  // proxy-agent not available; fallback to default agent (fine for local builds)
+  agent = undefined;
+}
 
 // Detect platform and architecture
 function getPlatform() {

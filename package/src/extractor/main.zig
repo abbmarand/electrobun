@@ -2,6 +2,66 @@ const std = @import("std");
 const builtin = @import("builtin");
 const zstd = std.compress.zstd;
 
+const win32 = if (builtin.os.tag == .windows) struct {
+    const DWORD = std.os.windows.DWORD;
+    const HANDLE = std.os.windows.HANDLE;
+    const WORD = std.os.windows.WORD;
+    const LPWSTR = std.os.windows.LPWSTR;
+
+    const STARTUPINFOW = extern struct {
+        cb: DWORD,
+        lpReserved: ?LPWSTR,
+        lpDesktop: ?LPWSTR,
+        lpTitle: ?LPWSTR,
+        dwX: DWORD,
+        dwY: DWORD,
+        dwXSize: DWORD,
+        dwYSize: DWORD,
+        dwXCountChars: DWORD,
+        dwYCountChars: DWORD,
+        dwFillAttribute: DWORD,
+        dwFlags: DWORD,
+        wShowWindow: WORD,
+        cbReserved2: WORD,
+        lpReserved2: ?*u8,
+        hStdInput: ?HANDLE,
+        hStdOutput: ?HANDLE,
+        hStdError: ?HANDLE,
+    };
+
+    const PROCESS_INFORMATION = extern struct {
+        hProcess: HANDLE,
+        hThread: HANDLE,
+        dwProcessId: DWORD,
+        dwThreadId: DWORD,
+    };
+
+    const CREATE_NO_WINDOW: DWORD = 0x08000000;
+    const INFINITE: DWORD = 0xFFFFFFFF;
+
+    extern "kernel32" fn CreateProcessW(
+        lpApplicationName: ?[*:0]const u16,
+        lpCommandLine: ?[*:0]u16,
+        lpProcessAttributes: ?*anyopaque,
+        lpThreadAttributes: ?*anyopaque,
+        bInheritHandles: std.os.windows.BOOL,
+        dwCreationFlags: DWORD,
+        lpEnvironment: ?*anyopaque,
+        lpCurrentDirectory: ?[*:0]const u16,
+        lpStartupInfo: *STARTUPINFOW,
+        lpProcessInformation: *PROCESS_INFORMATION,
+    ) callconv(std.os.windows.WINAPI) std.os.windows.BOOL;
+
+    extern "kernel32" fn WaitForSingleObject(
+        hHandle: HANDLE,
+        dwMilliseconds: DWORD,
+    ) callconv(std.os.windows.WINAPI) DWORD;
+
+    extern "kernel32" fn CloseHandle(
+        hObject: HANDLE,
+    ) callconv(std.os.windows.WINAPI) std.os.windows.BOOL;
+} else struct {};
+
 // const COMPRESSED_APP_BUNDLE_REL_PATH = "/Users/yoav/code/electrobun/example/build/canary/ElectrobunPlayground-0-0-1-canary.app/Contents/Resources/compressed.tar.zst";
 // const COMPRESSED_APP_BUNDLE_REL_PATH = "../Resources/compressed.tar.zst";
 const BUNLE_RESOURCES_REL_PATH = "../Resources/";
@@ -61,13 +121,6 @@ const ProgressIndicator = struct {
     }
 
     fn startProgressDialog(self: *ProgressIndicator, metadata: AppMetadata) !void {
-        // On Windows, start a spinner thread in the console
-        if (builtin.os.tag == .windows) {
-            // Start spinner thread
-            self.spinner_thread = try std.Thread.spawn(.{}, spinnerThread, .{self});
-            return;
-        }
-
         if (builtin.os.tag != .linux) return;
 
         // Try zenity first (most common)
@@ -581,6 +634,50 @@ fn extractAndInstall(allocator: std.mem.Allocator, compressed_data: []const u8, 
     }
 
     std.debug.print("Installation completed successfully!\n", .{});
+
+    // Auto-launch the app after installation (like Electron installers)
+    if (builtin.os.tag == .windows) {
+        const launcher_path = try std.fs.path.join(allocator, &.{ app_dir, "bin", "launcher.exe" });
+        defer allocator.free(launcher_path);
+
+        std.fs.cwd().access(launcher_path, .{}) catch {
+            std.debug.print("Warning: launcher.exe not found at {s}, skipping auto-launch\n", .{launcher_path});
+            return true;
+        };
+
+        const cmd_str = try std.fmt.allocPrintZ(allocator, "\"{s}\"", .{launcher_path});
+        defer allocator.free(cmd_str);
+        const cmd_w = try std.unicode.utf8ToUtf16LeWithNull(allocator, cmd_str);
+        defer allocator.free(cmd_w);
+
+        var si = std.mem.zeroes(win32.STARTUPINFOW);
+        si.cb = @sizeOf(win32.STARTUPINFOW);
+        var pi: win32.PROCESS_INFORMATION = undefined;
+
+        if (win32.CreateProcessW(null, @constCast(cmd_w.ptr), null, null, 0, win32.CREATE_NO_WINDOW, null, null, &si, &pi) != 0) {
+            _ = win32.CloseHandle(pi.hProcess);
+            _ = win32.CloseHandle(pi.hThread);
+            std.debug.print("Auto-launched app (PID {d})\n", .{pi.dwProcessId});
+        }
+    } else if (builtin.os.tag == .linux) {
+        const launcher_path = try std.fs.path.join(allocator, &.{ app_dir, "bin", "launcher" });
+        defer allocator.free(launcher_path);
+
+        std.fs.cwd().access(launcher_path, .{}) catch {
+            std.debug.print("Warning: launcher not found at {s}, skipping auto-launch\n", .{launcher_path});
+            return true;
+        };
+
+        const argv = [_][]const u8{launcher_path};
+        var child = std.process.Child.init(&argv, allocator);
+        child.stdout_behavior = .Ignore;
+        child.stderr_behavior = .Ignore;
+        _ = child.spawn() catch {
+            std.debug.print("Warning: Could not auto-launch app\n", .{});
+            return true;
+        };
+    }
+
     return true;
 }
 
@@ -1091,32 +1188,26 @@ fn createWindowsShortcutFile(allocator: std.mem.Allocator, shortcut_dir: []const
     , .{ lnk_path, target_path, working_dir, icon_path });
     defer allocator.free(ps_content);
 
-    // Execute PowerShell command
-    const ps_args = [_][]const u8{
-        "powershell",
-        "-NoProfile",
-        "-NonInteractive",
-        "-WindowStyle",
-        "Hidden",
-        "-Command",
-        ps_content,
-    };
+    // Use CreateProcessW with CREATE_NO_WINDOW to prevent a console window
+    // from flashing. std.process.Child only passes CREATE_UNICODE_ENVIRONMENT
+    // which causes Windows to allocate a visible console for console-subsystem
+    // children when the parent is a GUI-subsystem process.
+    if (builtin.os.tag == .windows) {
+        const cmd_str = try std.fmt.allocPrintZ(allocator, "powershell -NoProfile -NonInteractive -WindowStyle Hidden -Command {s}", .{ps_content});
+        defer allocator.free(cmd_str);
+        const cmd_w = try std.unicode.utf8ToUtf16LeWithNull(allocator, cmd_str);
+        defer allocator.free(cmd_w);
 
-    var child = std.process.Child.init(&ps_args, allocator);
-    child.stdout_behavior = .Ignore;
-    child.stderr_behavior = .Ignore;
+        var si = std.mem.zeroes(win32.STARTUPINFOW);
+        si.cb = @sizeOf(win32.STARTUPINFOW);
+        var pi: win32.PROCESS_INFORMATION = undefined;
 
-    _ = child.spawn() catch |err| {
-        std.debug.print("Warning: Could not spawn PowerShell to create shortcut: {}\n", .{err});
-        return;
-    };
-
-    _ = child.wait() catch |err| {
-        std.debug.print("Warning: PowerShell shortcut creation failed: {}\n", .{err});
-        return;
-    };
-
-    std.debug.print("Created Windows shortcut: {s}\n", .{lnk_path});
+        if (win32.CreateProcessW(null, @constCast(cmd_w.ptr), null, null, 0, win32.CREATE_NO_WINDOW, null, null, &si, &pi) != 0) {
+            _ = win32.WaitForSingleObject(pi.hProcess, win32.INFINITE);
+            _ = win32.CloseHandle(pi.hProcess);
+            _ = win32.CloseHandle(pi.hThread);
+        }
+    }
 }
 
 fn createWindowsShortcut(allocator: std.mem.Allocator, app_dir: []const u8, metadata: AppMetadata) !void {
