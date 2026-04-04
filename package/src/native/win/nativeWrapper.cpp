@@ -12063,9 +12063,89 @@ extern "C" ELECTROBUN_EXPORT void setDockIcon(const char* imagePath) {
 }
 
 extern "C" ELECTROBUN_EXPORT const uint8_t* captureScreenExcludingWindow(void *window, size_t *outSize) {
-    (void)window;
     if (outSize) *outSize = 0;
-    return nullptr;
+    ensureGdiplus();
+
+    HWND excludeHwnd = reinterpret_cast<HWND>(window);
+    bool wasVisible = false;
+    if (excludeHwnd && IsWindow(excludeHwnd)) {
+        wasVisible = IsWindowVisible(excludeHwnd) != FALSE;
+        if (wasVisible) ShowWindow(excludeHwnd, SW_HIDE);
+    }
+
+    int screenW = GetSystemMetrics(SM_CXSCREEN);
+    int screenH = GetSystemMetrics(SM_CYSCREEN);
+
+    HDC screenDC = GetDC(NULL);
+    HDC memDC = CreateCompatibleDC(screenDC);
+    HBITMAP hBitmap = CreateCompatibleBitmap(screenDC, screenW, screenH);
+    HBITMAP oldBitmap = (HBITMAP)SelectObject(memDC, hBitmap);
+    BitBlt(memDC, 0, 0, screenW, screenH, screenDC, 0, 0, SRCCOPY);
+    SelectObject(memDC, oldBitmap);
+
+    if (excludeHwnd && wasVisible) {
+        ShowWindow(excludeHwnd, SW_SHOWNOACTIVATE);
+    }
+
+    Gdiplus::Bitmap* srcBmp = Gdiplus::Bitmap::FromHBITMAP(hBitmap, NULL);
+    if (!srcBmp) {
+        DeleteObject(hBitmap);
+        DeleteDC(memDC);
+        ReleaseDC(NULL, screenDC);
+        return nullptr;
+    }
+
+    const int maxDim = 1920;
+    int newW = screenW, newH = screenH;
+    if (newW > maxDim) {
+        float ratio = (float)maxDim / (float)newW;
+        newW = maxDim;
+        newH = (int)(screenH * ratio);
+    }
+
+    Gdiplus::Bitmap dstBmp(newW, newH, PixelFormat24bppRGB);
+    {
+        Gdiplus::Graphics g(&dstBmp);
+        g.SetInterpolationMode(Gdiplus::InterpolationModeHighQualityBicubic);
+        g.DrawImage(srcBmp, 0, 0, newW, newH);
+    }
+    delete srcBmp;
+    DeleteObject(hBitmap);
+    DeleteDC(memDC);
+    ReleaseDC(NULL, screenDC);
+
+    CLSID jpegClsid;
+    if (!getEncoderClsid(L"image/jpeg", &jpegClsid)) return nullptr;
+
+    IStream* stream = NULL;
+    if (FAILED(CreateStreamOnHGlobal(NULL, TRUE, &stream))) return nullptr;
+
+    Gdiplus::EncoderParameters encParams;
+    encParams.Count = 1;
+    encParams.Parameter[0].Guid = Gdiplus::EncoderQuality;
+    encParams.Parameter[0].Type = Gdiplus::EncoderParameterValueTypeLong;
+    encParams.Parameter[0].NumberOfValues = 1;
+    ULONG quality = 75;
+    encParams.Parameter[0].Value = &quality;
+
+    if (dstBmp.Save(stream, &jpegClsid, &encParams) != Gdiplus::Ok) {
+        stream->Release();
+        return nullptr;
+    }
+
+    HGLOBAL hGlobal = NULL;
+    GetHGlobalFromStream(stream, &hGlobal);
+    size_t dataSize = (size_t)GlobalSize(hGlobal);
+    void* streamData = GlobalLock(hGlobal);
+
+    uint8_t* result = (uint8_t*)malloc(dataSize);
+    memcpy(result, streamData, dataSize);
+
+    GlobalUnlock(hGlobal);
+    stream->Release();
+
+    if (outSize) *outSize = dataSize;
+    return result;
 }
 
 extern "C" ELECTROBUN_EXPORT const uint8_t* captureWindowById(uint32_t windowId, size_t *outSize) {
