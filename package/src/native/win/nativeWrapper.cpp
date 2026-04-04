@@ -28,6 +28,7 @@
 #include <stdint.h>
 #include <shellapi.h>
 #include <commctrl.h>
+#include <commoncontrols.h>
 #include <mutex>
 #include <atomic>
 #include <cstdarg>
@@ -43,6 +44,8 @@
 #include <d2d1.h>      // For Direct2D
 #include <direct.h>    // For _getcwd
 #include <tlhelp32.h>  // For process enumeration
+#include <gdiplus.h>   // For icon-to-PNG conversion
+#pragma comment(lib, "gdiplus.lib")
 
 // Shared cross-platform utilities
 #include "../shared/glob_match.h"
@@ -10119,9 +10122,106 @@ ELECTROBUN_EXPORT const char* getOnScreenWindowList() {
     });
 }
 
-ELECTROBUN_EXPORT bool getAppIconToPath(const char* appPath, const char* destPath, int size) {
-    // TODO: full implementation requires GDI+ for PNG output
+static bool g_gdiplusInitialized = false;
+static ULONG_PTR g_gdiplusToken = 0;
+
+static void ensureGdiplus() {
+    if (!g_gdiplusInitialized) {
+        Gdiplus::GdiplusStartupInput input;
+        Gdiplus::GdiplusStartup(&g_gdiplusToken, &input, nullptr);
+        g_gdiplusInitialized = true;
+    }
+}
+
+static bool getEncoderClsid(const WCHAR* format, CLSID* pClsid) {
+    UINT num = 0, sz = 0;
+    Gdiplus::GetImageEncodersSize(&num, &sz);
+    if (sz == 0) return false;
+    auto buf = std::make_unique<BYTE[]>(sz);
+    auto* codecs = reinterpret_cast<Gdiplus::ImageCodecInfo*>(buf.get());
+    Gdiplus::GetImageEncoders(num, sz, codecs);
+    for (UINT i = 0; i < num; i++) {
+        if (wcscmp(codecs[i].MimeType, format) == 0) {
+            *pClsid = codecs[i].Clsid;
+            return true;
+        }
+    }
     return false;
+}
+
+// SHIL_JUMBO = 0x4 (256x256), not defined in older SDK headers
+#ifndef SHIL_JUMBO
+#define SHIL_JUMBO 0x4
+#endif
+
+static HICON getJumboIcon(const std::wstring& path) {
+    SHFILEINFOW sfi = {};
+    DWORD_PTR hr = SHGetFileInfoW(path.c_str(), 0, &sfi, sizeof(sfi),
+                                   SHGFI_SYSICONINDEX);
+    if (!hr) return nullptr;
+
+    HIMAGELIST imgList = nullptr;
+    // Try jumbo (256x256) first, fall back to extra-large (48x48)
+    HRESULT result = SHGetImageList(SHIL_JUMBO, IID_IImageList, (void**)&imgList);
+    if (FAILED(result) || !imgList) {
+        result = SHGetImageList(SHIL_EXTRALARGE, IID_IImageList, (void**)&imgList);
+        if (FAILED(result) || !imgList) return nullptr;
+    }
+
+    HICON hIcon = ImageList_GetIcon(imgList, sfi.iIcon, ILD_TRANSPARENT);
+    return hIcon;
+}
+
+ELECTROBUN_EXPORT bool getAppIconToPath(const char* appPath, const char* destPath, int size) {
+    if (!appPath || !destPath) return false;
+    ensureGdiplus();
+
+    int wideLen = MultiByteToWideChar(CP_UTF8, 0, appPath, -1, nullptr, 0);
+    if (wideLen <= 0) return false;
+    std::wstring widePath(wideLen - 1, 0);
+    MultiByteToWideChar(CP_UTF8, 0, appPath, -1, &widePath[0], wideLen);
+
+    HICON hIcon = getJumboIcon(widePath);
+    if (!hIcon) {
+        // Fallback to basic SHGetFileInfo
+        SHFILEINFOW sfi = {};
+        SHGetFileInfoW(widePath.c_str(), 0, &sfi, sizeof(sfi), SHGFI_ICON | SHGFI_LARGEICON);
+        hIcon = sfi.hIcon;
+    }
+    if (!hIcon) return false;
+
+    ICONINFO ii;
+    if (!GetIconInfo(hIcon, &ii)) {
+        DestroyIcon(hIcon);
+        return false;
+    }
+
+    Gdiplus::Bitmap srcBmp(ii.hbmColor, nullptr);
+    DeleteObject(ii.hbmColor);
+    DeleteObject(ii.hbmMask);
+
+    int outSize = (size > 0) ? size : 64;
+    Gdiplus::Bitmap dst(outSize, outSize, PixelFormat32bppARGB);
+    {
+        Gdiplus::Graphics g(&dst);
+        g.SetInterpolationMode(Gdiplus::InterpolationModeHighQualityBicubic);
+        g.SetSmoothingMode(Gdiplus::SmoothingModeAntiAlias);
+        g.DrawImage(&srcBmp, 0, 0, outSize, outSize);
+    }
+
+    int destWideLen = MultiByteToWideChar(CP_UTF8, 0, destPath, -1, nullptr, 0);
+    std::wstring wideDestPath(destWideLen - 1, 0);
+    MultiByteToWideChar(CP_UTF8, 0, destPath, -1, &wideDestPath[0], destWideLen);
+
+    CLSID pngClsid;
+    if (!getEncoderClsid(L"image/png", &pngClsid)) {
+        DestroyIcon(hIcon);
+        return false;
+    }
+
+    Gdiplus::Status status = dst.Save(wideDestPath.c_str(), &pngClsid, nullptr);
+    DestroyIcon(hIcon);
+    return (status == Gdiplus::Ok);
 }
 
 // Window procedure for handling tray messages
