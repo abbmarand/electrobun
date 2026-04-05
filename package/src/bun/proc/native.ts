@@ -563,6 +563,22 @@ export const native = (() => {
 				returns: FFIType.bool,
 			},
 
+			// System appearance
+			getSystemAppearance: {
+				args: [],
+				returns: FFIType.cstring,
+			},
+			setThemeChangedCallback: {
+				args: [FFIType.function],
+				returns: FFIType.void,
+			},
+
+			// App activation
+			activateAppByBundleId: {
+				args: [FFIType.cstring],
+				returns: FFIType.void,
+			},
+
 			// Screen API
 			getAllDisplays: {
 				args: [],
@@ -636,6 +652,14 @@ export const native = (() => {
 			clipboardAvailableFormats: {
 				args: [],
 				returns: FFIType.cstring,
+			},
+			hasScreenRecordingPermission: {
+				args: [],
+				returns: FFIType.bool,
+			},
+			requestScreenRecordingPermission: {
+				args: [],
+				returns: FFIType.bool,
 			},
 			captureScreenExcludingWindow: {
 				args: [FFIType.ptr, FFIType.ptr], // window ptr, size_t* outSize
@@ -1836,6 +1860,12 @@ window.__electrobunBunBridge = window.__electrobunBunBridge || window.webkit?.me
 			if (!formatsStr) return [];
 			return formatsStr.split(",").filter((f) => f.length > 0);
 		},
+		hasScreenRecordingPermission: (): boolean => {
+			return native_.symbols.hasScreenRecordingPermission();
+		},
+		requestScreenRecordingPermission: (): boolean => {
+			return native_.symbols.requestScreenRecordingPermission();
+		},
 		captureScreenExcludingWindow: (params: { winId: number | null }): Uint8Array | null => {
 			const windowPtr = params.winId != null ? getWindowPtr(params.winId) : null;
 			const sizeBuffer = new BigUint64Array(1);
@@ -1872,6 +1902,13 @@ window.__electrobunBunBridge = window.__electrobunBunBridge || window.webkit?.me
 			const result = native_.symbols.getFrontmostAppInfo();
 			if (!result) return null;
 			return result.toString();
+		},
+		getSystemAppearance: (): string => {
+			const result = native_.symbols.getSystemAppearance();
+			return result ? result.toString() : "light";
+		},
+		activateAppByBundleId: (bundleId: string): void => {
+			native_.symbols.activateAppByBundleId(toCString(bundleId));
 		},
 		getFrontmostWindowBounds: (): string | null => {
 			const result = native_.symbols.getFrontmostWindowBounds();
@@ -2307,7 +2344,27 @@ if (native) {
 		{ args: [FFIType.cstring], returns: "void", threadsafe: true },
 	);
 	native_.symbols.setGlobalShortcutCallback(globalShortcutCallback);
+
+	const themeChangedCallback = new JSCallback(
+		(themePtr) => {
+			const theme = new CString(themePtr).toString();
+			for (const handler of themeChangedHandlers) {
+				handler(theme);
+			}
+		},
+		{ args: [FFIType.cstring], returns: "void", threadsafe: true },
+	);
+	native_.symbols.setThemeChangedCallback(themeChangedCallback);
 }
+
+const themeChangedHandlers: Set<(theme: string) => void> = new Set();
+
+export const SystemTheme = {
+	onChanged: (handler: (theme: string) => void): (() => void) => {
+		themeChangedHandlers.add(handler);
+		return () => themeChangedHandlers.delete(handler);
+	},
+};
 
 // GlobalShortcut module for external use
 export const GlobalShortcut = {
@@ -2434,9 +2491,26 @@ export const Screen = {
 	},
 
 	/**
+	 * Check whether the app has Screen Recording permission (macOS only).
+	 * @returns true if permission is granted, false otherwise
+	 */
+	hasScreenRecordingPermission: (): boolean => {
+		return ffi.request.hasScreenRecordingPermission();
+	},
+
+	/**
+	 * Prompt the user to grant Screen Recording permission (macOS only).
+	 * Opens System Settings to the Screen Recording pane.
+	 * @returns true if already granted, false if the prompt was shown
+	 */
+	requestScreenRecordingPermission: (): boolean => {
+		return ffi.request.requestScreenRecordingPermission();
+	},
+
+	/**
 	 * Capture the screen as PNG, optionally excluding a window by its ID.
 	 * Uses CGWindowListCreateImageFromArray to composite all on-screen windows
-	 * minus the excluded one.
+	 * minus the excluded one. Captures the display under the mouse cursor.
 	 * @param excludeWinId - Electrobun window ID to exclude, or null for full capture
 	 * @returns PNG data as Uint8Array, or null on failure
 	 */

@@ -11390,4 +11390,73 @@ ELECTROBUN_EXPORT void setContentBlockerEnabled(AbstractView* abstractView, bool
     });
 }
 
+// ----------------------- System Appearance -----------------------
+
+ELECTROBUN_EXPORT const char* getSystemAppearance() {
+    GtkSettings *gtk_settings = gtk_settings_get_default();
+    if (gtk_settings) {
+        gchar *theme_name = NULL;
+        g_object_get(gtk_settings, "gtk-theme-name", &theme_name, NULL);
+        if (theme_name) {
+            gboolean is_dark = (g_str_has_suffix(theme_name, "-dark") ||
+                                g_str_has_suffix(theme_name, "-Dark") ||
+                                g_strstr_len(theme_name, -1, "dark") != NULL ||
+                                g_strstr_len(theme_name, -1, "Dark") != NULL);
+            g_free(theme_name);
+            return strdup(is_dark ? "dark" : "light");
+        }
+    }
+    gboolean prefer_dark = FALSE;
+    g_object_get(gtk_settings_get_default(), "gtk-application-prefer-dark-theme", &prefer_dark, NULL);
+    return strdup(prefer_dark ? "dark" : "light");
+}
+
+typedef void (*ThemeChangedCallback)(const char* theme);
+static ThemeChangedCallback g_themeChangedCallback = nullptr;
+static gulong g_themeSignalId = 0;
+
+static void onGtkThemeChanged(GtkSettings*, GParamSpec*, gpointer) {
+    if (!g_themeChangedCallback) return;
+    GtkSettings *settings = gtk_settings_get_default();
+    if (!settings) return;
+
+    gchar *theme_name = NULL;
+    g_object_get(settings, "gtk-theme-name", &theme_name, NULL);
+
+    const char *result = "light";
+    if (theme_name) {
+        if (g_str_has_suffix(theme_name, "-dark") ||
+            g_str_has_suffix(theme_name, "-Dark") ||
+            g_strstr_len(theme_name, -1, "dark") != NULL ||
+            g_strstr_len(theme_name, -1, "Dark") != NULL) {
+            result = "dark";
+        }
+        g_free(theme_name);
+    } else {
+        gboolean prefer_dark = FALSE;
+        g_object_get(settings, "gtk-application-prefer-dark-theme", &prefer_dark, NULL);
+        if (prefer_dark) result = "dark";
+    }
+    g_themeChangedCallback(result);
+}
+
+ELECTROBUN_EXPORT void setThemeChangedCallback(ThemeChangedCallback callback) {
+    g_themeChangedCallback = callback;
+
+    GtkSettings *settings = gtk_settings_get_default();
+    if (g_themeSignalId && settings) {
+        g_signal_handler_disconnect(settings, g_themeSignalId);
+        g_themeSignalId = 0;
+    }
+
+    if (callback && settings) {
+        g_themeSignalId = g_signal_connect(settings, "notify::gtk-theme-name",
+            G_CALLBACK(onGtkThemeChanged), NULL);
+    }
+}
+
+ELECTROBUN_EXPORT void activateAppByBundleId(const char* bundleId) {
+    (void)bundleId;
+}
+
 }

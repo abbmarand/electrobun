@@ -3872,6 +3872,21 @@ Categories=Utility;Application;
 					const applicationsLink = join(dmgStagingDir, "Applications");
 					symlinkSync("/Applications", applicationsLink);
 
+					// Set the volume icon from the app's .icns
+					const appIconPath = join(
+						selfExtractingBundle.appBundleFolderResourcesPath,
+						"AppIcon.icns",
+					);
+					if (existsSync(appIconPath)) {
+						const volumeIconPath = join(dmgStagingDir, ".VolumeIcon.icns");
+						cpSync(appIconPath, volumeIconPath);
+						try {
+							execSync(`SetFile -a C ${escapePathForTerminal(dmgStagingDir)}`);
+						} catch {
+							// SetFile may not be available in all environments
+						}
+					}
+
 					// hdiutil create -volname "YourAppName" -srcfolder /path/to/staging -ov -format UDZO YourAppName.dmg
 					// Note: use ULFO (lzfse) for better compatibility with large CEF frameworks and modern macOS
 					execSync(

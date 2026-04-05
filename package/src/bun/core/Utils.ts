@@ -349,6 +349,22 @@ export const getFrontmostAppInfo = (): FrontmostAppInfo | null => {
 	}
 };
 
+/**
+ * Get the current system appearance ("light" or "dark").
+ */
+export const getSystemAppearance = (): "light" | "dark" => {
+	const result = ffi.request.getSystemAppearance();
+	return result === "dark" ? "dark" : "light";
+};
+
+/**
+ * Activate (bring to front) an application by its bundle identifier.
+ * macOS only; no-op on other platforms.
+ */
+export const activateApp = (bundleId: string): void => {
+	ffi.request.activateAppByBundleId(bundleId);
+};
+
 export type WindowBounds = {
 	x: number;
 	y: number;

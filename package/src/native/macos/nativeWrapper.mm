@@ -8471,10 +8471,24 @@ extern "C" void simulatePaste() {
     });
 }
 
+// hasScreenRecordingPermission - Check whether the app has Screen Recording permission.
+// Returns YES if granted, NO otherwise. Available since macOS 10.15.
+extern "C" BOOL hasScreenRecordingPermission(void) {
+    return CGPreflightScreenCaptureAccess();
+}
+
+// requestScreenRecordingPermission - Prompt the user to grant Screen Recording permission.
+// On macOS 10.15+, this opens System Settings to the Screen Recording pane.
+// Returns YES if permission was already granted, NO if the prompt was shown.
+extern "C" BOOL requestScreenRecordingPermission(void) {
+    return CGRequestScreenCaptureAccess();
+}
+
 // captureScreenExcludingWindow - Capture the screen as PNG, excluding a specific window.
 // Uses the legacy CGWindowList API loaded via dlsym to avoid ScreenCaptureKit's
 // recording indicator. The functions still exist in CoreGraphics at runtime even
 // though the macOS 15 SDK marks them as obsoleted.
+// Captures the display under the mouse cursor (multi-monitor aware).
 // window: NSWindow* to exclude (or NULL to capture the entire screen)
 // outSize: receives the byte length of the returned PNG buffer
 // Returns: malloc'd PNG data (caller must free), or NULL on failure
@@ -8513,7 +8527,19 @@ extern "C" const uint8_t* captureScreenExcludingWindow(NSWindow *window, size_t 
             }
         }
 
-        CGRect screenBounds = CGDisplayBounds(CGMainDisplayID());
+        CGDirectDisplayID targetDisplay = CGMainDisplayID();
+        NSPoint mouse = [NSEvent mouseLocation];
+        for (NSScreen *screen in [NSScreen screens]) {
+            if (NSPointInRect(mouse, [screen frame])) {
+                NSDictionary *desc = [screen deviceDescription];
+                NSNumber *displayId = desc[@"NSScreenNumber"];
+                if (displayId) {
+                    targetDisplay = [displayId unsignedIntValue];
+                }
+                break;
+            }
+        }
+        CGRect screenBounds = CGDisplayBounds(targetDisplay);
         CGImageRef image = imageCreate(screenBounds, filtered, kCGWindowImageDefault);
         CFRelease(filtered);
         if (!image) return;
@@ -10017,5 +10043,56 @@ extern "C" void setContentBlockerEnabled(AbstractView *abstractView, bool enable
             [ucc removeAllContentRuleLists];
             NSLog(@"[ContentBlocker] Disabled for webview %u", webviewId);
         }
+    });
+}
+
+// ----------------------- System Appearance -----------------------
+
+extern "C" const char* getSystemAppearance() {
+    NSString *style = [[NSUserDefaults standardUserDefaults] stringForKey:@"AppleInterfaceStyle"];
+    if (style && [style caseInsensitiveCompare:@"Dark"] == NSOrderedSame) {
+        return strdup("dark");
+    }
+    return strdup("light");
+}
+
+typedef void (*ThemeChangedCallback)(const char* theme);
+static ThemeChangedCallback g_themeChangedCallback = nullptr;
+static id g_themeObserver = nil;
+
+extern "C" void setThemeChangedCallback(ThemeChangedCallback callback) {
+    g_themeChangedCallback = callback;
+
+    if (g_themeObserver) {
+        [[NSDistributedNotificationCenter defaultCenter] removeObserver:g_themeObserver];
+        g_themeObserver = nil;
+    }
+
+    if (callback) {
+        g_themeObserver = [[NSDistributedNotificationCenter defaultCenter]
+            addObserverForName:@"AppleInterfaceThemeChangedNotification"
+            object:nil
+            queue:[NSOperationQueue mainQueue]
+            usingBlock:^(NSNotification * _Nonnull note) {
+                NSString *style = [[NSUserDefaults standardUserDefaults]
+                    stringForKey:@"AppleInterfaceStyle"];
+                const char *theme = (style && [style caseInsensitiveCompare:@"Dark"] == NSOrderedSame)
+                    ? "dark" : "light";
+                if (g_themeChangedCallback) {
+                    g_themeChangedCallback(theme);
+                }
+            }];
+    }
+}
+
+// ----------------------- Activate App by Bundle ID -----------------------
+
+extern "C" void activateAppByBundleId(const char* bundleId) {
+    if (!bundleId) return;
+    NSString *bid = [NSString stringWithUTF8String:bundleId];
+    dispatch_async(dispatch_get_main_queue(), ^{
+        NSArray<NSRunningApplication *> *apps =
+            [NSRunningApplication runningApplicationsWithBundleIdentifier:bid];
+        [apps.firstObject activateWithOptions:NSApplicationActivateIgnoringOtherApps];
     });
 }

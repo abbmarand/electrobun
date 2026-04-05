@@ -12478,3 +12478,82 @@ extern "C" ELECTROBUN_EXPORT void setContentBlockerEnabled(AbstractView* abstrac
         }
     });
 }
+
+// ----------------------- System Appearance -----------------------
+
+ELECTROBUN_EXPORT const char* getSystemAppearance() {
+    HKEY hKey;
+    DWORD value = 1;
+    DWORD size = sizeof(value);
+    if (RegOpenKeyExW(HKEY_CURRENT_USER,
+            L"Software\\Microsoft\\Windows\\CurrentVersion\\Themes\\Personalize",
+            0, KEY_READ, &hKey) == ERROR_SUCCESS) {
+        RegQueryValueExW(hKey, L"AppsUseLightTheme", NULL, NULL,
+            (LPBYTE)&value, &size);
+        RegCloseKey(hKey);
+    }
+    return strdup(value == 0 ? "dark" : "light");
+}
+
+typedef void (*ThemeChangedCallback)(const char* theme);
+static ThemeChangedCallback g_themeChangedCallback = nullptr;
+static HANDLE g_themeWatcherThread = NULL;
+static HANDLE g_themeStopEvent = NULL;
+
+static DWORD WINAPI themeWatcherProc(LPVOID) {
+    HKEY hKey = NULL;
+    if (RegOpenKeyExW(HKEY_CURRENT_USER,
+            L"Software\\Microsoft\\Windows\\CurrentVersion\\Themes\\Personalize",
+            0, KEY_NOTIFY | KEY_READ, &hKey) != ERROR_SUCCESS) {
+        return 0;
+    }
+
+    DWORD prevValue = 1;
+    DWORD size = sizeof(prevValue);
+    RegQueryValueExW(hKey, L"AppsUseLightTheme", NULL, NULL, (LPBYTE)&prevValue, &size);
+
+    while (true) {
+        HANDLE events[2];
+        events[0] = g_themeStopEvent;
+        events[1] = CreateEventW(NULL, FALSE, FALSE, NULL);
+        RegNotifyChangeKeyValue(hKey, FALSE, REG_NOTIFY_CHANGE_LAST_SET, events[1], TRUE);
+
+        DWORD waitResult = WaitForMultipleObjects(2, events, FALSE, INFINITE);
+        CloseHandle(events[1]);
+        if (waitResult == WAIT_OBJECT_0) break;
+
+        DWORD newValue = 1;
+        size = sizeof(newValue);
+        RegQueryValueExW(hKey, L"AppsUseLightTheme", NULL, NULL, (LPBYTE)&newValue, &size);
+        if (newValue != prevValue) {
+            prevValue = newValue;
+            if (g_themeChangedCallback) {
+                g_themeChangedCallback(newValue == 0 ? "dark" : "light");
+            }
+        }
+    }
+    RegCloseKey(hKey);
+    return 0;
+}
+
+ELECTROBUN_EXPORT void setThemeChangedCallback(ThemeChangedCallback callback) {
+    g_themeChangedCallback = callback;
+
+    if (g_themeWatcherThread) {
+        SetEvent(g_themeStopEvent);
+        WaitForSingleObject(g_themeWatcherThread, 2000);
+        CloseHandle(g_themeWatcherThread);
+        CloseHandle(g_themeStopEvent);
+        g_themeWatcherThread = NULL;
+        g_themeStopEvent = NULL;
+    }
+
+    if (callback) {
+        g_themeStopEvent = CreateEventW(NULL, TRUE, FALSE, NULL);
+        g_themeWatcherThread = CreateThread(NULL, 0, themeWatcherProc, NULL, 0, NULL);
+    }
+}
+
+ELECTROBUN_EXPORT void activateAppByBundleId(const char* bundleId) {
+    (void)bundleId;
+}
