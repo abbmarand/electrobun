@@ -2373,10 +2373,19 @@ Categories=Utility;Application;
 						);
 					}
 
-					// Use rcedit to embed the icon into launcher.exe
+					// Use rcedit to embed the icon and version info into launcher.exe
 					const rcedit = (await import("rcedit")).default;
 					await rcedit(bunCliLauncherDestination, {
 						icon: iconPath,
+						"file-version": config.app.version,
+						"product-version": config.app.version,
+						"version-string": {
+							ProductName: config.app.name,
+							FileDescription: config.app.name,
+							CompanyName: config.app.identifier,
+							InternalName: "launcher",
+							OriginalFilename: "launcher.exe",
+						},
 					});
 					console.log(`Successfully embedded icon into launcher.exe`);
 
@@ -2470,10 +2479,17 @@ Categories=Utility;Application;
 						);
 					}
 
-					// Use rcedit to embed the icon into bun.exe
+					// Use rcedit to embed the icon and version info into bun.exe
 					const rcedit = (await import("rcedit")).default;
 					await rcedit(bunBinaryDestInBundlePath, {
 						icon: iconPath,
+						"file-version": config.app.version,
+						"product-version": config.app.version,
+						"version-string": {
+							ProductName: config.app.name,
+							FileDescription: config.app.name,
+							CompanyName: config.app.identifier,
+						},
 					});
 					console.log(`Successfully embedded icon into bun.exe`);
 
@@ -4699,6 +4715,13 @@ Categories=Utility;Application;
 					const rcedit = (await import("rcedit")).default;
 					await rcedit(outputExePath, {
 						icon: iconPath,
+						"file-version": config.app.version,
+						"product-version": config.app.version,
+						"version-string": {
+							ProductName: config.app.name,
+							FileDescription: `${config.app.name} Setup`,
+							CompanyName: config.app.identifier,
+						},
 					});
 					console.log(`Successfully embedded icon into ${setupFileName}`);
 

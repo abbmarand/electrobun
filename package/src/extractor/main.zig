@@ -60,6 +60,23 @@ const win32 = if (builtin.os.tag == .windows) struct {
     extern "kernel32" fn CloseHandle(
         hObject: HANDLE,
     ) callconv(std.os.windows.WINAPI) std.os.windows.BOOL;
+
+    const HWND = std.os.windows.HWND;
+    const MB_OK: u32 = 0x00000000;
+    const MB_ICONERROR: u32 = 0x00000010;
+    const MB_ICONINFORMATION: u32 = 0x00000040;
+    const MB_SYSTEMMODAL: u32 = 0x00001000;
+
+    extern "user32" fn MessageBoxW(
+        hWnd: ?HWND,
+        lpText: [*:0]const u16,
+        lpCaption: [*:0]const u16,
+        uType: u32,
+    ) callconv(std.os.windows.WINAPI) i32;
+
+    extern "kernel32" fn AllocConsole() callconv(std.os.windows.WINAPI) std.os.windows.BOOL;
+    extern "kernel32" fn FreeConsole() callconv(std.os.windows.WINAPI) std.os.windows.BOOL;
+    extern "kernel32" fn SetConsoleTitleW(lpConsoleTitle: [*:0]const u16) callconv(std.os.windows.WINAPI) std.os.windows.BOOL;
 } else struct {};
 
 // const COMPRESSED_APP_BUNDLE_REL_PATH = "/Users/yoav/code/electrobun/example/build/canary/ElectrobunPlayground-0-0-1-canary.app/Contents/Resources/compressed.tar.zst";
@@ -121,7 +138,19 @@ const ProgressIndicator = struct {
     }
 
     fn startProgressDialog(self: *ProgressIndicator, metadata: AppMetadata) !void {
-        if (builtin.os.tag != .linux) return;
+        if (builtin.os.tag != .linux and builtin.os.tag != .windows) return;
+
+        if (builtin.os.tag == .windows) {
+            // Allocate a console so the user can see installation progress
+            _ = win32.AllocConsole();
+            const title = std.fmt.allocPrint(self.allocator, "Installing {s}...", .{metadata.name}) catch return;
+            defer self.allocator.free(title);
+            const title_w = std.unicode.utf8ToUtf16LeWithNull(self.allocator, title) catch return;
+            defer self.allocator.free(title_w);
+            _ = win32.SetConsoleTitleW(title_w.ptr);
+            self.spinner_thread = std.Thread.spawn(.{}, spinnerThread, .{self}) catch null;
+            return;
+        }
 
         // Try zenity first (most common)
         const extract_text = try std.fmt.allocPrint(self.allocator, "--text=Extracting {s}...", .{metadata.name});
@@ -186,6 +215,10 @@ const ProgressIndicator = struct {
             // Terminate if still running
             _ = child.kill() catch {};
             _ = child.wait() catch {};
+        }
+
+        if (builtin.os.tag == .windows) {
+            _ = win32.FreeConsole();
         }
     }
 };
@@ -642,6 +675,11 @@ fn extractAndInstall(allocator: std.mem.Allocator, compressed_data: []const u8, 
 
         std.fs.cwd().access(launcher_path, .{}) catch {
             std.debug.print("Warning: launcher.exe not found at {s}, skipping auto-launch\n", .{launcher_path});
+            const err_msg = std.unicode.utf8ToUtf16LeWithNull(allocator, "Installation succeeded but the app could not be found to launch. Please launch it from the Start Menu or Desktop shortcut.") catch return true;
+            defer allocator.free(err_msg);
+            const caption = std.unicode.utf8ToUtf16LeWithNull(allocator, metadata.name) catch return true;
+            defer allocator.free(caption);
+            _ = win32.MessageBoxW(null, err_msg.ptr, caption.ptr, win32.MB_OK | win32.MB_ICONINFORMATION);
             return true;
         };
 
@@ -650,14 +688,29 @@ fn extractAndInstall(allocator: std.mem.Allocator, compressed_data: []const u8, 
         const cmd_w = try std.unicode.utf8ToUtf16LeWithNull(allocator, cmd_str);
         defer allocator.free(cmd_w);
 
+        // Get the bin directory as the working directory for the launcher
+        const bin_dir = std.fs.path.dirname(launcher_path) orelse app_dir;
+        const bin_dir_w = try std.unicode.utf8ToUtf16LeWithNull(allocator, bin_dir);
+        defer allocator.free(bin_dir_w);
+
         var si = std.mem.zeroes(win32.STARTUPINFOW);
         si.cb = @sizeOf(win32.STARTUPINFOW);
         var pi: win32.PROCESS_INFORMATION = undefined;
 
-        if (win32.CreateProcessW(null, @constCast(cmd_w.ptr), null, null, 0, win32.CREATE_NO_WINDOW, null, null, &si, &pi) != 0) {
+        // Use 0 for creation flags instead of CREATE_NO_WINDOW — the launcher
+        // is already a GUI subsystem app, and CREATE_NO_WINDOW can prevent
+        // child GUI processes from displaying windows in some configurations
+        if (win32.CreateProcessW(null, @constCast(cmd_w.ptr), null, null, 0, 0, null, bin_dir_w.ptr, &si, &pi) != 0) {
             _ = win32.CloseHandle(pi.hProcess);
             _ = win32.CloseHandle(pi.hThread);
             std.debug.print("Auto-launched app (PID {d})\n", .{pi.dwProcessId});
+        } else {
+            std.debug.print("Warning: Failed to auto-launch app\n", .{});
+            const err_msg = std.unicode.utf8ToUtf16LeWithNull(allocator, "Installation succeeded but the app failed to launch. Please launch it from the Start Menu or Desktop shortcut.") catch return true;
+            defer allocator.free(err_msg);
+            const caption = std.unicode.utf8ToUtf16LeWithNull(allocator, metadata.name) catch return true;
+            defer allocator.free(caption);
+            _ = win32.MessageBoxW(null, err_msg.ptr, caption.ptr, win32.MB_OK | win32.MB_ICONINFORMATION);
         }
     } else if (builtin.os.tag == .linux) {
         const launcher_path = try std.fs.path.join(allocator, &.{ app_dir, "bin", "launcher" });
