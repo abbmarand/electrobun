@@ -6800,6 +6800,31 @@ CefRefPtr<CefRequestContext> CreateRequestContextForPartition(const char* partit
     }
     - (void)windowWillClose:(NSNotification *)notification {
         NSWindow *window = [notification object];
+
+        // cmd+W / red traffic-light close goes straight to Cocoa's window
+        // deallocation path — `AbstractView::remove` (where the explicit
+        // media-stop lives) is never called. Without this, MSE-based players
+        // (YouTube etc.) keep audio playing in WebKit's WebContent process for
+        // a moment after the window is gone. Pause + clear every <video>/<audio>
+        // synchronously now so the audio HAL releases samples before the
+        // webview is torn down.
+        NSView *contentView = [window contentView];
+        if ([contentView isKindOfClass:[ContainerView class]]) {
+            ContainerView *containerView = (ContainerView *)contentView;
+            for (AbstractView *abstractView in containerView.abstractViews) {
+                if (![abstractView isKindOfClass:[WKWebViewImpl class]]) continue;
+                WKWebView *wv = ((WKWebViewImpl *)abstractView).webView;
+                if (!wv) continue;
+                @try {
+                    [wv evaluateJavaScript:@"(function(){try{document.querySelectorAll('video,audio').forEach(function(m){try{m.pause();m.muted=true;m.removeAttribute('src');m.srcObject=null;m.load();}catch(e){}});}catch(e){}})()"
+                                   inFrame:nil
+                            inContentWorld:[WKContentWorld pageWorld]
+                         completionHandler:nil];
+                    [wv stopLoading];
+                } @catch (NSException *e) {}
+            }
+        }
+
         if (self.closeHandler) {
             self.closeHandler(self.windowId);
         }
