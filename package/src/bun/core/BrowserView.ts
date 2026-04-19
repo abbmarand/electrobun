@@ -334,6 +334,7 @@ export class BrowserView<T extends RPCWithTransport = RPCWithTransport> {
 			| "did-navigate-in-page"
 			| "did-commit-navigation"
 			| "dom-ready"
+			| "new-window-open"
 			| "download-started"
 			| "download-progress"
 			| "download-completed"
