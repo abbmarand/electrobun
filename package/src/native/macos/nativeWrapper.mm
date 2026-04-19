@@ -3073,6 +3073,19 @@ runOpenPanelWithParameters:(WKOpenPanelParameters *)parameters
 
         // Dispatch all cleanup to main queue since WKWebView operations require it
         dispatch_async(dispatch_get_main_queue(), ^{
+            // Stop any HTML5 media first. WKWebView's about:blank navigation below
+            // would normally tear down media, but MSE-based players (YouTube etc.)
+            // can keep an audio session alive in the WebContent process for a moment
+            // after the WKWebView is dismissed — explicitly pausing every <video>/<audio>
+            // and clearing their sources forces the audio HAL to release samples
+            // immediately, so closing the window also stops the sound.
+            @try {
+                [webViewToClean evaluateJavaScript:@"(function(){try{document.querySelectorAll('video,audio').forEach(function(m){try{m.pause();m.muted=true;m.removeAttribute('src');m.srcObject=null;m.load();}catch(e){}});}catch(e){}})()"
+                                           inFrame:nil
+                                    inContentWorld:[WKContentWorld pageWorld]
+                                 completionHandler:nil];
+            } @catch (NSException *e) {}
+
             [webViewToClean stopLoading];
 
             // Remove KVO observer
