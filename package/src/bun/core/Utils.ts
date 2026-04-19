@@ -65,6 +65,14 @@ export const isDockIconVisible = (): boolean => {
 	return ffi.request.isDockIconVisible();
 };
 
+/**
+ * Set the taskbar / title-bar icon for a specific window (Windows: WM_SETICON).
+ * No-op on macOS if the window no longer exists. Uses {@link BrowserWindow} id resolution internally.
+ */
+export const setWindowIcon = (windowId: number, iconPath: string): void => {
+	ffi.request.setWindowIcon({ winId: windowId, iconPath });
+};
+
 export type NotificationOptions = {
 	/**
 	 * The title of the notification (required)

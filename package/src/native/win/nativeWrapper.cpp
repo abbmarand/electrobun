@@ -12205,10 +12205,90 @@ extern "C" ELECTROBUN_EXPORT bool isDockIconVisible() {
     return g_dockIconVisible;
 }
 
-// Window icon - Linux only, no-op for Windows
+namespace {
+
+const char* kElectrobunWndIconSmallProp = "ElectrobunWndIconSm";
+const char* kElectrobunWndIconBigProp = "ElectrobunWndIconLg";
+
+static HICON loadIconAtPixelSize(const std::wstring& path, int w, int h) {
+    HICON icon = (HICON)LoadImageW(NULL, path.c_str(), IMAGE_ICON, w, h, LR_LOADFROMFILE);
+    if (icon) return icon;
+
+    ensureGdiplus();
+    Gdiplus::Bitmap* bmp = Gdiplus::Bitmap::FromFile(path.c_str());
+    if (!bmp || bmp->GetLastStatus() != Gdiplus::Ok) {
+        if (bmp) delete bmp;
+        return nullptr;
+    }
+
+    HICON hIcon = nullptr;
+    Gdiplus::Status st = bmp->GetHICON(&hIcon);
+    delete bmp;
+
+    if (st != Gdiplus::Ok || !hIcon) {
+        return nullptr;
+    }
+
+    HICON resized = (HICON)CopyImage(hIcon, IMAGE_ICON, w, h, 0);
+    if (resized) {
+        DestroyIcon(hIcon);
+        return resized;
+    }
+    return hIcon;
+}
+
+static void applyWindowIcons(HWND hwnd, HICON hSmall, HICON hLarge) {
+    HICON prevOwnedSmall = (HICON)GetPropA(hwnd, kElectrobunWndIconSmallProp);
+    HICON prevOwnedBig = (HICON)GetPropA(hwnd, kElectrobunWndIconBigProp);
+
+    if (hSmall) {
+        SendMessageW(hwnd, WM_SETICON, ICON_SMALL, (LPARAM)hSmall);
+        SetPropA(hwnd, kElectrobunWndIconSmallProp, (HANDLE)hSmall);
+    }
+    if (hLarge) {
+        SendMessageW(hwnd, WM_SETICON, ICON_BIG, (LPARAM)hLarge);
+        SetPropA(hwnd, kElectrobunWndIconBigProp, (HANDLE)hLarge);
+    }
+
+    if (prevOwnedSmall) DestroyIcon(prevOwnedSmall);
+    if (prevOwnedBig) DestroyIcon(prevOwnedBig);
+}
+
+} // namespace
+
 extern "C" ELECTROBUN_EXPORT void setWindowIcon(void* window, const char* iconPath) {
-    // Not yet implemented on Windows
-    // TODO: Implement using SetWindowIcon/LoadImage APIs
+    if (!window || !iconPath || !*iconPath) return;
+
+    HWND hwnd = reinterpret_cast<HWND>(window);
+    if (!hwnd || !IsWindow(hwnd)) return;
+
+    int wideLen = MultiByteToWideChar(CP_UTF8, 0, iconPath, -1, nullptr, 0);
+    if (wideLen <= 0) return;
+    std::wstring wPath(static_cast<size_t>(wideLen - 1), 0);
+    MultiByteToWideChar(CP_UTF8, 0, iconPath, -1, &wPath[0], wideLen);
+
+    MainThreadDispatcher::dispatch_sync([hwnd, wPath]() {
+        int smW = GetSystemMetrics(SM_CXSMICON);
+        int smH = GetSystemMetrics(SM_CYSMICON);
+        int lgW = GetSystemMetrics(SM_CXICON);
+        int lgH = GetSystemMetrics(SM_CYICON);
+
+        HICON hSmall = loadIconAtPixelSize(wPath, smW, smH);
+        HICON hLarge = loadIconAtPixelSize(wPath, lgW, lgH);
+
+        if (hSmall && !hLarge) {
+            hLarge = (HICON)CopyImage(hSmall, IMAGE_ICON, lgW, lgH, 0);
+        } else if (hLarge && !hSmall) {
+            hSmall = (HICON)CopyImage(hLarge, IMAGE_ICON, smW, smH, 0);
+        }
+
+        if (!hSmall && !hLarge) {
+            ::log("[setWindowIcon] Failed to load icon from file");
+            return;
+        }
+
+        applyWindowIcons(hwnd, hSmall, hLarge);
+    });
 }
 
 // ----------------------- Content Blocker -----------------------

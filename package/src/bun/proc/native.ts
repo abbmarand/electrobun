@@ -1128,6 +1128,15 @@ const _ffiImpl = {
 			return native_.symbols.isWindowMinimized(windowPtr);
 		},
 
+		setWindowIcon: (params: { winId: number; iconPath: string }): void => {
+			const { winId, iconPath } = params;
+			const windowPtr = getWindowPtr(winId);
+			if (!windowPtr) {
+				return;
+			}
+			native_.symbols.setWindowIcon(windowPtr, toCString(iconPath));
+		},
+
 		maximizeWindow: (params: { winId: number }) => {
 			const { winId } = params;
 			const windowPtr = getWindowPtr(winId);
