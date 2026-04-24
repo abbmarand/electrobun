@@ -2138,10 +2138,6 @@ async function buildCli() {
 
 async function buildContentBlockerRules() {
 	const outputDir = join(process.cwd(), "dist", "content-blockers");
-	if (existsSync(outputDir) && readdirSync(outputDir).some(f => f.endsWith(".json"))) {
-		console.log("Content blocker rules already exist, skipping conversion");
-		return;
-	}
 	try {
 		await $`bun run scripts/convert-filters.ts --output ${outputDir}`;
 	} catch (e) {
