@@ -92,12 +92,18 @@ export class Tray {
 		ffi.request.setTrayTitle({ id: this.id, title });
 	}
 
-	setImage(imgPath: string) {
+	setImage(imgPath: string, options?: { template?: boolean; width?: number; height?: number }) {
 		this.image = imgPath;
+		if (options?.template !== undefined) this.template = options.template;
+		if (options?.width !== undefined) this.width = options.width;
+		if (options?.height !== undefined) this.height = options.height;
 		if (!this.ptr) return;
 		ffi.request.setTrayImage({
 			id: this.id,
 			image: this.resolveImagePath(imgPath),
+			template: this.template,
+			width: this.width,
+			height: this.height,
 		});
 	}
 

@@ -492,7 +492,13 @@ export const native = (() => {
 				returns: FFIType.void,
 			},
 			setTrayImage: {
-				args: [FFIType.ptr, FFIType.cstring],
+				args: [
+					FFIType.ptr, // statusItem
+					FFIType.cstring, // pathToImage
+					FFIType.bool, // isTemplate
+					FFIType.u32, // width
+					FFIType.u32, // height
+				],
 				returns: FFIType.void,
 			},
 			setTrayMenu: {
@@ -1661,13 +1667,19 @@ window.__electrobunBunBridge = window.__electrobunBunBridge || window.webkit?.me
 
 			native_.symbols.setTrayTitle(tray.ptr, toCString(title));
 		},
-		setTrayImage: (params: { id: number; image: string }): void => {
-			const { id, image } = params;
+		setTrayImage: (params: {
+			id: number;
+			image: string;
+			template?: boolean;
+			width?: number;
+			height?: number;
+		}): void => {
+			const { id, image, template = true, width = 18, height = 18 } = params;
 
 			const tray = Tray.getById(id);
 			if (!tray) return;
 
-			native_.symbols.setTrayImage(tray.ptr, toCString(image));
+			native_.symbols.setTrayImage(tray.ptr, toCString(image), template, width, height);
 		},
 		setTrayMenu: (params: {
 			id: number;

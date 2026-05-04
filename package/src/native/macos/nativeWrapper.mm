@@ -9013,11 +9013,29 @@ extern "C" void setTrayTitle(NSStatusItem *statusItem, const char *title) {
     }
 }
 
-extern "C" void setTrayImage(NSStatusItem *statusItem, const char *image) {
-    if (statusItem) {
-        NSString *imgPath = [NSString stringWithUTF8String:image ?: ""];
-        statusItem.button.image = [[NSImage alloc] initWithContentsOfFile:imgPath];
+extern "C" void setTrayImage(NSStatusItem *statusItem, const char *image, bool isTemplate,
+                              uint32_t width, uint32_t height) {
+    if (!statusItem) return;
+    NSString *imgPath = [NSString stringWithUTF8String:image ?: ""];
+    if (imgPath.length == 0) {
+        statusItem.button.image = nil;
+        return;
     }
+    NSImage *img = [[NSImage alloc] initWithContentsOfFile:imgPath];
+    if (!img) return;
+    // `setTemplate:YES` makes NSStatusItem render the image as a monochrome
+    // glyph that auto-tints with the menu bar appearance (white on dark, black
+    // on light). Without this, the raw RGBA bitmap shows through — including
+    // any anti-aliased edges from SVG rasterisers like qlmanage — which is
+    // why menu-bar extensions like Coffee looked like a giant coloured square.
+    [img setTemplate:isTemplate];
+    if (width > 0 && height > 0) {
+        // Setting `image.size` constrains the *displayed* size. The underlying
+        // bitmap can stay at whatever native resolution qlmanage produced
+        // (44px for retina), so the icon stays crisp on HiDPI displays.
+        img.size = NSMakeSize(width, height);
+    }
+    statusItem.button.image = img;
 }
 
 
