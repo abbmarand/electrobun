@@ -1,8 +1,6 @@
 import { existsSync } from "fs";
-import path from "path";
+import { join, dirname } from "path";
 import { dlopen, suffix, FFIType } from "bun:ffi";
-
-const { join, dirname } = path;
 
 // NOTE: WGPUStringView is passed by value in the C API. Bun FFI does not support
 // by-value structs, so WGPUStringView parameters are exposed as pointers for now.
