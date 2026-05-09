@@ -10661,6 +10661,17 @@ ELECTROBUN_EXPORT void simulatePaste() {
     SendInput(4, inputs, sizeof(INPUT));
 }
 
+ELECTROBUN_EXPORT bool macPermissionStatus(const char* kind) {
+    return false;
+}
+
+ELECTROBUN_EXPORT int requestMacPermissionDragGuide(const char* kind, const char* appName, bool forceGuide) {
+    return -1;
+}
+
+ELECTROBUN_EXPORT void closeMacPermissionDragGuide() {
+}
+
 ELECTROBUN_EXPORT const char* getFrontmostAppInfo() {
     return MainThreadDispatcher::dispatch_sync([=]() -> const char* {
         HWND hwnd = GetForegroundWindow();

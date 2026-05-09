@@ -567,7 +567,7 @@ export const native = (() => {
 			},
 			registerGlobalShortcut: {
 				args: [FFIType.cstring],
-				returns: FFIType.bool,
+				returns: FFIType.int,
 			},
 			unregisterGlobalShortcut: {
 				args: [FFIType.cstring],
@@ -679,6 +679,18 @@ export const native = (() => {
 			requestScreenRecordingPermission: {
 				args: [],
 				returns: FFIType.bool,
+			},
+			macPermissionStatus: {
+				args: [FFIType.cstring],
+				returns: FFIType.bool,
+			},
+			requestMacPermissionDragGuide: {
+				args: [FFIType.cstring, FFIType.cstring, FFIType.bool],
+				returns: FFIType.int,
+			},
+			closeMacPermissionDragGuide: {
+				args: [],
+				returns: FFIType.void,
 			},
 			captureScreenExcludingWindow: {
 				args: [FFIType.ptr, FFIType.ptr], // window ptr, size_t* outSize
@@ -959,7 +971,7 @@ function createFfiRequestProxy(ffiRequest: Record<string, Function>): Record<str
 	});
 }
 
-// const _callbacks: unknown[] = [];
+const _callbacks: unknown[] = [];
 
 // NOTE: Bun seems to hit limits on args or arg types. eg: trying to send 12 bools results
 // in only about 8 going through then params after that. I think it may be similar to
@@ -1932,11 +1944,42 @@ window.__electrobunBunBridge = window.__electrobunBunBridge || window.webkit?.me
 		requestScreenRecordingPermission: (): boolean => {
 			return native_.symbols.requestScreenRecordingPermission();
 		},
+		macPermissionStatus: (params: { kind: MacPermissionKind }): boolean => {
+			return native_.symbols.macPermissionStatus(toCString(params.kind));
+		},
+		requestMacPermissionDragGuide: (params: { kind: MacPermissionKind; appName: string; forceGuide?: boolean }): MacPermissionDragGuideResult => {
+			const code = native_.symbols.requestMacPermissionDragGuide(
+				toCString(params.kind),
+				toCString(params.appName),
+				params.forceGuide ?? false,
+			);
+			if (code === 1) return { ok: true, alreadyGranted: true };
+			if (code === 0) return { ok: true, alreadyGranted: false };
+			if (code === -2) {
+				return {
+					ok: false,
+					error: "Cachy must be running from a signed macOS app bundle before it can be dragged into System Settings.",
+				};
+			}
+			if (code === -3) {
+				return {
+					ok: false,
+					error: "Could not open System Settings. Open Privacy & Security manually and drag Cachy into the permission list.",
+				};
+			}
+			return {
+				ok: false,
+				error: "This macOS permission is not supported by the drag-to-Settings flow.",
+			};
+		},
+		closeMacPermissionDragGuide: (): void => {
+			native_.symbols.closeMacPermissionDragGuide();
+		},
 		captureScreenExcludingWindow: (params: { winId: number | null }): Uint8Array | null => {
 			const windowPtr = params.winId != null ? getWindowPtr(params.winId) : null;
 			const sizeBuffer = new BigUint64Array(1);
 			const dataPtr = native_.symbols.captureScreenExcludingWindow(
-				windowPtr ?? ptr(new Uint8Array(0)),
+				windowPtr ?? null,
 				ptr(sizeBuffer),
 			);
 			if (!dataPtr) return null;
@@ -2362,7 +2405,8 @@ if (native) native_.symbols.setJSUtils(getMimeType, getHTMLForWebviewSync);
 
 // Native-only init: URL scheme handlers, quit handler, global shortcuts.
 // Skipped when running without FFI (carrot mode).
-const globalShortcutHandlers = new Map<string, () => void>();
+const globalShortcutHandlers = new Map<number, () => void>();
+const globalShortcutIdsByAccelerator = new Map<string, number>();
 
 if (native) {
 	const urlOpenCallback = new JSCallback(
@@ -2374,6 +2418,7 @@ if (native) {
 		},
 		{ args: [FFIType.cstring], returns: "void", threadsafe: true },
 	);
+	_callbacks.push(urlOpenCallback);
 	if (process.platform === "darwin") {
 		native_.symbols.setURLOpenHandler(urlOpenCallback);
 	}
@@ -2389,6 +2434,7 @@ if (native) {
 		},
 		{ args: [], returns: "void", threadsafe: true },
 	);
+	_callbacks.push(appReopenCallback);
 	if (process.platform === "darwin") {
 		native_.symbols.setAppReopenHandler(appReopenCallback);
 	}
@@ -2400,16 +2446,18 @@ if (native) {
 		},
 		{ args: [], returns: "void", threadsafe: true },
 	);
+	_callbacks.push(quitRequestedCallback);
 	native_.symbols.setQuitRequestedHandler(quitRequestedCallback);
 
 	const globalShortcutCallback = new JSCallback(
-		(acceleratorPtr) => {
-			const accelerator = new CString(acceleratorPtr).toString();
-			const handler = globalShortcutHandlers.get(accelerator);
+		(shortcutId) => {
+			const handler = globalShortcutHandlers.get(shortcutId);
+			console.log(`[GlobalShortcut] JS callback received id=${shortcutId} handler=${handler ? "yes" : "no"}`);
 			if (handler) handler();
 		},
-		{ args: [FFIType.cstring], returns: "void", threadsafe: true },
+		{ args: [FFIType.int], returns: "void", threadsafe: true },
 	);
+	_callbacks.push(globalShortcutCallback);
 	native_.symbols.setGlobalShortcutCallback(globalShortcutCallback);
 
 	const themeChangedCallback = new JSCallback(
@@ -2421,6 +2469,7 @@ if (native) {
 		},
 		{ args: [FFIType.cstring], returns: "void", threadsafe: true },
 	);
+	_callbacks.push(themeChangedCallback);
 	native_.symbols.setThemeChangedCallback(themeChangedCallback);
 }
 
@@ -2442,20 +2491,31 @@ export const GlobalShortcut = {
 	 * @returns true if registered successfully, false otherwise
 	 */
 	register: (accelerator: string, callback: () => void): boolean => {
-		if (!native || globalShortcutHandlers.has(accelerator)) return false;
-		const result = native_.symbols.registerGlobalShortcut(toCString(accelerator));
-		if (result) globalShortcutHandlers.set(accelerator, callback);
-		return result;
+		if (!native || globalShortcutIdsByAccelerator.has(accelerator)) return false;
+		const shortcutId = native_.symbols.registerGlobalShortcut(toCString(accelerator));
+		console.log(`[GlobalShortcut] register("${accelerator}") => id=${shortcutId}`);
+		if (shortcutId > 0) {
+			globalShortcutHandlers.set(shortcutId, callback);
+			globalShortcutIdsByAccelerator.set(accelerator, shortcutId);
+			return true;
+		}
+		return false;
 	},
 	unregister: (accelerator: string): boolean => {
 		if (!native) return false;
 		const result = native_.symbols.unregisterGlobalShortcut(toCString(accelerator));
-		if (result) globalShortcutHandlers.delete(accelerator);
+		console.log(`[GlobalShortcut] unregister("${accelerator}") => ${result}`);
+		if (result) {
+			const shortcutId = globalShortcutIdsByAccelerator.get(accelerator);
+			if (shortcutId !== undefined) globalShortcutHandlers.delete(shortcutId);
+			globalShortcutIdsByAccelerator.delete(accelerator);
+		}
 		return result;
 	},
 	unregisterAll: (): void => {
 		if (native) native_.symbols.unregisterAllGlobalShortcuts();
 		globalShortcutHandlers.clear();
+		globalShortcutIdsByAccelerator.clear();
 	},
 	isRegistered: (accelerator: string): boolean => {
 		if (!native) return false;
@@ -2483,6 +2543,12 @@ export interface Point {
 	x: number;
 	y: number;
 }
+
+export type MacPermissionKind = "accessibility" | "screenRecording";
+
+export type MacPermissionDragGuideResult =
+	| { ok: true; alreadyGranted: boolean }
+	| { ok: false; error: string };
 
 // Screen module for display and cursor information
 export const Screen = {
@@ -2572,6 +2638,31 @@ export const Screen = {
 	 */
 	requestScreenRecordingPermission: (): boolean => {
 		return ffi.request.requestScreenRecordingPermission();
+	},
+
+	/**
+	 * Check a macOS permission used by onboarding.
+	 */
+	getMacPermissionStatus: (kind: MacPermissionKind): boolean => {
+		return ffi.request.macPermissionStatus({ kind });
+	},
+
+	/**
+	 * Open the matching System Settings pane and show a native draggable app guide.
+	 */
+	requestMacPermissionDragGuide: (
+		kind: MacPermissionKind,
+		appName = "Cachy",
+		forceGuide = false,
+	): MacPermissionDragGuideResult => {
+		return ffi.request.requestMacPermissionDragGuide({ kind, appName, forceGuide });
+	},
+
+	/**
+	 * Close the native draggable permission guide panel if it is visible.
+	 */
+	closeMacPermissionDragGuide: (): void => {
+		ffi.request.closeMacPermissionDragGuide();
 	},
 
 	/**

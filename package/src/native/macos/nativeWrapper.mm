@@ -61,6 +61,7 @@ static bool wgpuDebugEnabled() {
 #include <map>
 #include <mutex>
 #include <atomic>
+#include <string.h>
 
 // Shared cross-platform utilities
 #include "../shared/glob_match.h"
@@ -8742,6 +8743,417 @@ extern "C" void simulatePaste() {
     });
 }
 
+typedef NS_ENUM(NSInteger, EBMacPermissionKind) {
+    EBMacPermissionKindUnknown = 0,
+    EBMacPermissionKindAccessibility = 1,
+    EBMacPermissionKindScreenRecording = 2,
+};
+
+static NSPanel *g_macPermissionGuidePanel = nil;
+static NSWindow *g_macPermissionSourceWindow = nil;
+static NSRect g_macPermissionSourceFrame = NSZeroRect;
+static BOOL g_hasMacPermissionSourceFrame = NO;
+
+static EBMacPermissionKind macPermissionKindFromCString(const char *kind) {
+    if (!kind) return EBMacPermissionKindUnknown;
+    if (strcmp(kind, "accessibility") == 0) return EBMacPermissionKindAccessibility;
+    if (strcmp(kind, "screenRecording") == 0) return EBMacPermissionKindScreenRecording;
+    return EBMacPermissionKindUnknown;
+}
+
+static BOOL isMacPermissionGranted(EBMacPermissionKind kind) {
+    switch (kind) {
+        case EBMacPermissionKindAccessibility:
+            return AXIsProcessTrusted();
+        case EBMacPermissionKindScreenRecording:
+            return CGPreflightScreenCaptureAccess();
+        default:
+            return NO;
+    }
+}
+
+static NSString *macPermissionSettingsQuery(EBMacPermissionKind kind) {
+    switch (kind) {
+        case EBMacPermissionKindAccessibility:
+            return @"Privacy_Accessibility";
+        case EBMacPermissionKindScreenRecording:
+            return @"Privacy_ScreenCapture";
+        default:
+            return nil;
+    }
+}
+
+static NSString *macPermissionDisplayName(EBMacPermissionKind kind) {
+    switch (kind) {
+        case EBMacPermissionKindAccessibility:
+            return @"Accessibility";
+        case EBMacPermissionKindScreenRecording:
+            return @"Screen Recording";
+        default:
+            return @"Permission";
+    }
+}
+
+static BOOL openMacPermissionSettings(EBMacPermissionKind kind) {
+    NSString *query = macPermissionSettingsQuery(kind);
+    if (!query) return NO;
+
+    NSString *urlString = [NSString stringWithFormat:@"x-apple.systempreferences:com.apple.settings.PrivacySecurity.extension?%@", query];
+    NSURL *url = [NSURL URLWithString:urlString];
+    if (url && [[NSWorkspace sharedWorkspace] openURL:url]) return YES;
+
+    NSString *legacy = [NSString stringWithFormat:@"x-apple.systempreferences:com.apple.preference.security?%@", query];
+    NSURL *legacyURL = [NSURL URLWithString:legacy];
+    return legacyURL ? [[NSWorkspace sharedWorkspace] openURL:legacyURL] : NO;
+}
+
+static NSScreen *screenForPoint(NSPoint point) {
+    for (NSScreen *screen in [NSScreen screens]) {
+        if (NSPointInRect(point, screen.frame)) return screen;
+    }
+    return [NSScreen mainScreen];
+}
+
+static NSScreen *screenForRect(NSRect rect) {
+    NSPoint center = NSMakePoint(NSMidX(rect), NSMidY(rect));
+    return screenForPoint(center);
+}
+
+typedef CFArrayRef (*EBMacCGWindowListCopyWindowInfoFn)(uint32_t, uint32_t);
+
+static BOOL findSystemSettingsFrame(NSRect *outFrame) {
+    auto copyInfo = (EBMacCGWindowListCopyWindowInfoFn)dlsym(RTLD_DEFAULT, "CGWindowListCopyWindowInfo");
+    if (!copyInfo) return NO;
+
+    CFArrayRef list = copyInfo(kCGWindowListOptionOnScreenOnly | kCGWindowListExcludeDesktopElements, kCGNullWindowID);
+    if (!list) return NO;
+
+    BOOL found = NO;
+    CFIndex count = CFArrayGetCount(list);
+    for (CFIndex i = 0; i < count; i++) {
+        NSDictionary *info = (__bridge NSDictionary *)CFArrayGetValueAtIndex(list, i);
+        NSNumber *layer = info[(__bridge NSString *)kCGWindowLayer];
+        if (!layer || [layer intValue] != 0) continue;
+
+        NSString *owner = info[(__bridge NSString *)kCGWindowOwnerName];
+        if (![owner isEqualToString:@"System Settings"] && ![owner isEqualToString:@"System Preferences"]) continue;
+
+        NSDictionary *bounds = info[(__bridge NSString *)kCGWindowBounds];
+        CGRect cgBounds = CGRectZero;
+        if (!bounds || !CGRectMakeWithDictionaryRepresentation((__bridge CFDictionaryRef)bounds, &cgBounds)) continue;
+
+        NSScreen *mainScreen = [NSScreen mainScreen];
+        CGFloat screenHeight = mainScreen ? mainScreen.frame.size.height : 0;
+        if (screenHeight <= 0) continue;
+
+        *outFrame = NSMakeRect(cgBounds.origin.x, screenHeight - cgBounds.origin.y - cgBounds.size.height, cgBounds.size.width, cgBounds.size.height);
+        found = YES;
+        break;
+    }
+
+    CFRelease(list);
+    return found;
+}
+
+static NSWindow *currentPermissionSourceWindow() {
+    NSWindow *candidate = [NSApp keyWindow] ?: [NSApp mainWindow];
+    if (candidate && candidate != g_macPermissionGuidePanel && candidate.isVisible) {
+        return candidate;
+    }
+
+    for (NSWindow *window in [NSApp windows]) {
+        if (window == g_macPermissionGuidePanel) continue;
+        if (!window.isVisible) continue;
+        if ([window isKindOfClass:[NSPanel class]]) continue;
+        return window;
+    }
+    return nil;
+}
+
+static void capturePermissionSourceWindow() {
+    g_macPermissionSourceWindow = currentPermissionSourceWindow();
+    if (g_macPermissionSourceWindow) {
+        g_macPermissionSourceFrame = g_macPermissionSourceWindow.frame;
+        g_hasMacPermissionSourceFrame = YES;
+    } else {
+        g_macPermissionSourceFrame = NSZeroRect;
+        g_hasMacPermissionSourceFrame = NO;
+    }
+}
+
+static NSRect permissionGuidePanelFrame(CGFloat width, CGFloat height) {
+    if (g_hasMacPermissionSourceFrame) {
+        NSRect sourceFrame = g_macPermissionSourceWindow ? g_macPermissionSourceWindow.frame : g_macPermissionSourceFrame;
+        NSScreen *screen = screenForRect(sourceFrame);
+        NSRect visible = screen ? screen.visibleFrame : [[NSScreen mainScreen] visibleFrame];
+        CGFloat padding = 18;
+        CGFloat x = sourceFrame.origin.x + padding;
+        CGFloat y = sourceFrame.origin.y + padding;
+        x = MAX(NSMinX(visible) + padding, MIN(x, NSMaxX(visible) - width - padding));
+        y = MAX(NSMinY(visible) + padding, MIN(y, NSMaxY(visible) - height - padding));
+        return NSMakeRect(x, y, width, height);
+    }
+
+    NSRect settingsFrame = NSZeroRect;
+    if (findSystemSettingsFrame(&settingsFrame)) {
+        NSScreen *screen = screenForRect(settingsFrame);
+        NSRect visible = screen ? screen.visibleFrame : [[NSScreen mainScreen] visibleFrame];
+        CGFloat padding = 18;
+        CGFloat x = NSMaxX(settingsFrame) - width - padding;
+        CGFloat y = settingsFrame.origin.y + padding;
+        x = MAX(NSMinX(visible) + padding, MIN(x, NSMaxX(visible) - width - padding));
+        y = MAX(NSMinY(visible) + padding, MIN(y, NSMaxY(visible) - height - padding));
+        return NSMakeRect(x, y, width, height);
+    }
+
+    NSScreen *screen = screenForPoint([NSEvent mouseLocation]);
+    NSRect visible = screen ? screen.visibleFrame : [[NSScreen mainScreen] visibleFrame];
+    return NSMakeRect(NSMidX(visible) - width / 2, NSMidY(visible) - height / 2, width, height);
+}
+
+@interface EBMacPermissionDragView : NSView <NSDraggingSource>
+@property(nonatomic, strong) NSURL *bundleURL;
+@property(nonatomic, copy) NSString *appName;
+@property(nonatomic, strong) NSImage *appIcon;
+@property(nonatomic, strong) NSEvent *mouseDownEvent;
+@property(nonatomic) BOOL hasStartedDrag;
+@end
+
+@implementation EBMacPermissionDragView
+
+- (instancetype)initWithFrame:(NSRect)frame bundleURL:(NSURL *)bundleURL appName:(NSString *)appName {
+    self = [super initWithFrame:frame];
+    if (self) {
+        self.bundleURL = bundleURL;
+        self.appName = appName;
+        self.appIcon = [[NSWorkspace sharedWorkspace] iconForFile:bundleURL.path];
+        self.appIcon.size = NSMakeSize(32, 32);
+        self.wantsLayer = YES;
+    }
+    return self;
+}
+
+- (void)resetCursorRects {
+    [self addCursorRect:self.bounds cursor:[NSCursor openHandCursor]];
+}
+
+- (void)drawRect:(NSRect)dirtyRect {
+    [super drawRect:dirtyRect];
+
+    NSRect pillRect = NSInsetRect(self.bounds, 0, 0);
+    NSBezierPath *pill = [NSBezierPath bezierPathWithRoundedRect:pillRect xRadius:8 yRadius:8];
+    [[NSColor controlBackgroundColor] setFill];
+    [pill fill];
+    [[NSColor separatorColor] setStroke];
+    [pill stroke];
+
+    NSRect iconRect = NSMakeRect(12, NSMidY(self.bounds) - 16, 32, 32);
+    [self.appIcon drawInRect:iconRect];
+
+    NSDictionary *attrs = @{
+        NSFontAttributeName: [NSFont systemFontOfSize:13 weight:NSFontWeightSemibold],
+        NSForegroundColorAttributeName: [NSColor labelColor],
+    };
+    NSRect textRect = NSMakeRect(54, NSMidY(self.bounds) - 9, self.bounds.size.width - 66, 18);
+    [self.appName drawInRect:textRect withAttributes:attrs];
+}
+
+- (void)mouseDown:(NSEvent *)event {
+    self.mouseDownEvent = event;
+    self.hasStartedDrag = NO;
+}
+
+- (void)mouseDragged:(NSEvent *)event {
+    if (!self.mouseDownEvent || self.hasStartedDrag) {
+        [super mouseDragged:event];
+        return;
+    }
+
+    CGFloat dx = event.locationInWindow.x - self.mouseDownEvent.locationInWindow.x;
+    CGFloat dy = event.locationInWindow.y - self.mouseDownEvent.locationInWindow.y;
+    if (hypot(dx, dy) < 3) return;
+
+    self.hasStartedDrag = YES;
+    [self startDragWithEvent:self.mouseDownEvent];
+}
+
+- (void)mouseUp:(NSEvent *)event {
+    self.mouseDownEvent = nil;
+    self.hasStartedDrag = NO;
+    [super mouseUp:event];
+}
+
+- (void)startDragWithEvent:(NSEvent *)event {
+    NSDraggingItem *item = [[NSDraggingItem alloc] initWithPasteboardWriter:self.bundleURL];
+    NSImage *image = [self dragPreviewImage] ?: self.appIcon;
+    [item setDraggingFrame:self.bounds contents:image];
+
+    NSDraggingSession *session = [self beginDraggingSessionWithItems:@[item] event:event source:self];
+    session.animatesToStartingPositionsOnCancelOrFail = YES;
+    session.draggingFormation = NSDraggingFormationNone;
+}
+
+- (NSImage *)dragPreviewImage {
+    NSBitmapImageRep *rep = [self bitmapImageRepForCachingDisplayInRect:self.bounds];
+    if (!rep) return nil;
+    [self cacheDisplayInRect:self.bounds toBitmapImageRep:rep];
+    NSImage *image = [[NSImage alloc] initWithSize:self.bounds.size];
+    [image addRepresentation:rep];
+    return image;
+}
+
+- (NSDragOperation)draggingSession:(NSDraggingSession *)session sourceOperationMaskForDraggingContext:(NSDraggingContext)context {
+    return NSDragOperationCopy;
+}
+
+- (void)draggingSession:(NSDraggingSession *)session endedAtPoint:(NSPoint)screenPoint operation:(NSDragOperation)operation {
+    self.mouseDownEvent = nil;
+    self.hasStartedDrag = NO;
+}
+
+@end
+
+static NSString *fallbackAppName(NSString *appName) {
+    if (appName && appName.length > 0) return appName;
+    NSString *processName = [[NSProcessInfo processInfo] processName];
+    return processName.length > 0 ? processName : @"This app";
+}
+
+static void showMacPermissionGuidePanel(EBMacPermissionKind kind, NSURL *bundleURL, NSString *appName) {
+    CGFloat sourceWidth = g_hasMacPermissionSourceFrame ? g_macPermissionSourceFrame.size.width : 520;
+    CGFloat width = MIN(520, MAX(340, sourceWidth - 36));
+    CGFloat height = 116;
+
+    if (g_macPermissionGuidePanel) {
+        if (g_macPermissionSourceWindow) {
+            [g_macPermissionSourceWindow removeChildWindow:g_macPermissionGuidePanel];
+        }
+        [g_macPermissionGuidePanel close];
+        g_macPermissionGuidePanel = nil;
+    }
+
+    NSPanel *panel = [[NSPanel alloc] initWithContentRect:permissionGuidePanelFrame(width, height)
+                                                styleMask:NSWindowStyleMaskBorderless | NSWindowStyleMaskNonactivatingPanel
+                                                  backing:NSBackingStoreBuffered
+                                                    defer:NO];
+    panel.level = NSFloatingWindowLevel;
+    panel.collectionBehavior = NSWindowCollectionBehaviorCanJoinAllSpaces | NSWindowCollectionBehaviorFullScreenAuxiliary;
+    panel.releasedWhenClosed = NO;
+    panel.opaque = NO;
+    panel.backgroundColor = [NSColor clearColor];
+    panel.hasShadow = YES;
+
+    NSView *content = [[NSView alloc] initWithFrame:NSMakeRect(0, 0, width, height)];
+    content.wantsLayer = YES;
+    content.layer.cornerRadius = 16;
+    content.layer.masksToBounds = YES;
+
+    NSVisualEffectView *background = [[NSVisualEffectView alloc] initWithFrame:content.bounds];
+    background.autoresizingMask = NSViewWidthSizable | NSViewHeightSizable;
+    background.material = NSVisualEffectMaterialHUDWindow;
+    background.blendingMode = NSVisualEffectBlendingModeBehindWindow;
+    background.state = NSVisualEffectStateActive;
+    [content addSubview:background];
+
+    NSTextField *arrow = [NSTextField labelWithString:@"↑"];
+    arrow.font = [NSFont systemFontOfSize:30 weight:NSFontWeightMedium];
+    arrow.textColor = [NSColor systemBlueColor];
+    arrow.alignment = NSTextAlignmentCenter;
+    arrow.frame = NSMakeRect(24, 58, 28, 36);
+    [content addSubview:arrow];
+
+    NSTextField *title = [NSTextField labelWithString:[NSString stringWithFormat:@"Drag %@ to the list above to allow %@", fallbackAppName(appName), macPermissionDisplayName(kind)]];
+    title.font = [NSFont systemFontOfSize:13 weight:NSFontWeightSemibold];
+    title.textColor = [NSColor labelColor];
+    title.frame = NSMakeRect(70, 72, width - 92, 22);
+    title.lineBreakMode = NSLineBreakByTruncatingTail;
+    [content addSubview:title];
+
+    NSButton *backButton = [[NSButton alloc] initWithFrame:NSMakeRect(18, 18, 34, 34)];
+    backButton.title = @"‹";
+    backButton.font = [NSFont systemFontOfSize:24 weight:NSFontWeightRegular];
+    backButton.bezelStyle = NSBezelStyleCircular;
+    backButton.target = panel;
+    backButton.action = @selector(close);
+    [content addSubview:backButton];
+
+    EBMacPermissionDragView *dragView = [[EBMacPermissionDragView alloc] initWithFrame:NSMakeRect(70, 18, width - 92, 40)
+                                                                             bundleURL:bundleURL
+                                                                               appName:fallbackAppName(appName)];
+    [content addSubview:dragView];
+
+    panel.contentView = content;
+    [panel makeKeyAndOrderFront:nil];
+    if (g_macPermissionSourceWindow) {
+        [g_macPermissionSourceWindow addChildWindow:panel ordered:NSWindowAbove];
+    }
+    g_macPermissionGuidePanel = panel;
+}
+
+extern "C" BOOL macPermissionStatus(const char *kind) {
+    return isMacPermissionGranted(macPermissionKindFromCString(kind));
+}
+
+// requestMacPermissionDragGuide
+// Return codes:
+//   1  already granted
+//   0  guide shown
+//  -1  unsupported permission kind
+//  -2  current process is not running from a .app bundle
+//  -3  failed to open System Settings
+extern "C" int requestMacPermissionDragGuide(const char *kindCString, const char *appNameCString, BOOL forceGuide) {
+    __block int result = -1;
+    dispatch_sync(dispatch_get_main_queue(), ^{
+        EBMacPermissionKind kind = macPermissionKindFromCString(kindCString);
+        if (kind == EBMacPermissionKindUnknown) {
+            result = -1;
+            return;
+        }
+
+        if (!forceGuide && isMacPermissionGranted(kind)) {
+            result = 1;
+            return;
+        }
+
+        NSURL *bundleURL = [[NSBundle mainBundle] bundleURL];
+        if (!bundleURL || ![[bundleURL.pathExtension lowercaseString] isEqualToString:@"app"]) {
+            result = -2;
+            return;
+        }
+
+        capturePermissionSourceWindow();
+
+        if (!openMacPermissionSettings(kind)) {
+            result = -3;
+            return;
+        }
+
+        NSString *appName = appNameCString && strlen(appNameCString) > 0
+            ? [NSString stringWithUTF8String:appNameCString]
+            : nil;
+
+        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(650 * NSEC_PER_MSEC)), dispatch_get_main_queue(), ^{
+            showMacPermissionGuidePanel(kind, bundleURL, appName);
+        });
+        result = 0;
+    });
+    return result;
+}
+
+extern "C" void closeMacPermissionDragGuide(void) {
+    dispatch_async(dispatch_get_main_queue(), ^{
+        if (g_macPermissionGuidePanel) {
+            if (g_macPermissionSourceWindow) {
+                [g_macPermissionSourceWindow removeChildWindow:g_macPermissionGuidePanel];
+            }
+            [g_macPermissionGuidePanel close];
+            g_macPermissionGuidePanel = nil;
+        }
+        g_macPermissionSourceWindow = nil;
+        g_hasMacPermissionSourceFrame = NO;
+    });
+}
+
 // hasScreenRecordingPermission - Check whether the app has Screen Recording permission.
 // Returns YES if granted, NO otherwise. Available since macOS 10.15.
 extern "C" BOOL hasScreenRecordingPermission(void) {
@@ -9482,10 +9894,11 @@ const char* getWebviewHTMLContent(uint32_t webviewId) {
  */
 
 // Callback type for global shortcut triggers
-typedef void (*GlobalShortcutCallback)(const char* accelerator);
+typedef void (*GlobalShortcutCallback)(int shortcutId);
 static GlobalShortcutCallback g_globalShortcutCallback = nullptr;
 
 struct RegisteredShortcut {
+    int id;
     CGKeyCode keyCode;
     CGEventFlags modifierFlags;
     std::string accelerator;
@@ -9495,6 +9908,7 @@ static std::vector<RegisteredShortcut> g_registeredShortcuts;
 static NSLock *g_globalShortcutsLock = nil;
 static CFMachPortRef g_eventTap = nullptr;
 static CFRunLoopSourceRef g_eventTapSource = nullptr;
+static int g_nextGlobalShortcutId = 1;
 
 static CGEventFlags cgModifierFlagsFromAccelerator(const electrobun::AcceleratorParts& parts) {
     CGEventFlags flags = 0;
@@ -9546,6 +9960,7 @@ static unsigned short keyCodeFromString(NSString *key) {
 static CGEventRef globalShortcutTapCallback(CGEventTapProxy proxy, CGEventType type,
                                             CGEventRef event, void *userInfo) {
     if (type == kCGEventTapDisabledByTimeout || type == kCGEventTapDisabledByUserInput) {
+        NSLog(@"[GlobalShortcut] CGEventTap disabled (type=%u), re-enabling", type);
         if (g_eventTap) {
             CGEventTapEnable(g_eventTap, true);
         }
@@ -9565,10 +9980,19 @@ static CGEventRef globalShortcutTapCallback(CGEventTapProxy proxy, CGEventType t
     [g_globalShortcutsLock lock];
     for (const auto& shortcut : g_registeredShortcuts) {
         if (shortcut.keyCode == keyCode && shortcut.modifierFlags == eventMods) {
+            int shortcutId = shortcut.id;
+            std::string accelerator = shortcut.accelerator;
             [g_globalShortcutsLock unlock];
-            if (g_globalShortcutCallback) {
-                g_globalShortcutCallback(shortcut.accelerator.c_str());
-            }
+            NSLog(@"[GlobalShortcut] Matched: %s (keyCode: %d, eventMods: 0x%llX)",
+                  accelerator.c_str(), keyCode, (unsigned long long)eventMods);
+            dispatch_async(dispatch_get_main_queue(), ^{
+                if (g_globalShortcutCallback) {
+                    NSLog(@"[GlobalShortcut] Dispatching JS callback id=%d (%s)", shortcutId, accelerator.c_str());
+                    g_globalShortcutCallback(shortcutId);
+                } else {
+                    NSLog(@"[GlobalShortcut] Missing JS callback for matched shortcut");
+                }
+            });
             return nullptr;
         }
     }
@@ -9615,10 +10039,10 @@ extern "C" void setGlobalShortcutCallback(GlobalShortcutCallback callback) {
     }
 }
 
-extern "C" BOOL registerGlobalShortcut(const char* accelerator) {
+extern "C" int registerGlobalShortcut(const char* accelerator) {
     if (!accelerator || !g_globalShortcutCallback) {
         NSLog(@"[GlobalShortcut] Cannot register: invalid accelerator or no callback set");
-        return NO;
+        return 0;
     }
 
     std::string accelStr(accelerator);
@@ -9629,7 +10053,7 @@ extern "C" BOOL registerGlobalShortcut(const char* accelerator) {
 
     if (keyCode == 0xFFFF) {
         NSLog(@"[GlobalShortcut] Unknown key: %s", parts.key.c_str());
-        return NO;
+        return 0;
     }
 
     CGEventFlags modifiers = cgModifierFlagsFromAccelerator(parts);
@@ -9640,11 +10064,12 @@ extern "C" BOOL registerGlobalShortcut(const char* accelerator) {
         if (s.accelerator == accelStr) {
             [g_globalShortcutsLock unlock];
             NSLog(@"[GlobalShortcut] Already registered: %s", accelerator);
-            return NO;
+            return 0;
         }
     }
 
-    g_registeredShortcuts.push_back({(CGKeyCode)keyCode, modifiers, accelStr});
+    int shortcutId = g_nextGlobalShortcutId++;
+    g_registeredShortcuts.push_back({shortcutId, (CGKeyCode)keyCode, modifiers, accelStr});
     [g_globalShortcutsLock unlock];
 
     ensureEventTap();
@@ -9657,12 +10082,12 @@ extern "C" BOOL registerGlobalShortcut(const char* accelerator) {
         g_registeredShortcuts.erase(it, g_registeredShortcuts.end());
         [g_globalShortcutsLock unlock];
         NSLog(@"[GlobalShortcut] Failed to register %s — no event tap (accessibility denied)", accelerator);
-        return NO;
+        return 0;
     }
 
-    NSLog(@"[GlobalShortcut] Registered: %s (keyCode: %d, modifiers: 0x%llX)",
-          accelerator, keyCode, (unsigned long long)modifiers);
-    return YES;
+    NSLog(@"[GlobalShortcut] Registered: %s id=%d (keyCode: %d, modifiers: 0x%llX)",
+          accelerator, shortcutId, keyCode, (unsigned long long)modifiers);
+    return shortcutId;
 }
 
 extern "C" BOOL unregisterGlobalShortcut(const char* accelerator) {

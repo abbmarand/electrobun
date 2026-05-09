@@ -58,7 +58,9 @@ inline std::string describeCefPermissions(uint32_t mask) {
     if (mask & CEF_PERMISSION_TYPE_LOOPBACK_NETWORK) add("Loopback network");
 #endif
 #if CEF_API_ADDED(14700)
+#ifdef CEF_PERMISSION_TYPE_SENSORS
     if (mask & CEF_PERMISSION_TYPE_SENSORS) add("Sensors");
+#endif
 #endif
 
     if (out.empty()) {
