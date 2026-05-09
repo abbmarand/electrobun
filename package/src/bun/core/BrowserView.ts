@@ -76,7 +76,7 @@ const randomId = Math.random().toString(36).substring(7);
 
 export class BrowserView<T extends RPCWithTransport = RPCWithTransport> {
 	id: number = nextWebviewId++;
-	ptr!: Pointer;
+	ptr: Pointer | null = null;
 	hostWebviewId?: number;
 	windowId!: number;
 	renderer!: "cef" | "native";
@@ -232,17 +232,12 @@ export class BrowserView<T extends RPCWithTransport = RPCWithTransport> {
 	}
 
 	loadURL(url: string) {
-		console.log(`DEBUG: loadURL called for webview ${this.id}: ${url}`);
 		this.url = url;
 		native!.symbols.loadURLInWebView(this.ptr, toCString(this.url));
 	}
 
 	loadHTML(html: string) {
 		this.html = html;
-		console.log(
-			`DEBUG: Setting HTML content for webview ${this.id}:`,
-			html.substring(0, 50) + "...",
-		);
 
 		if (this.renderer === "cef") {
 			// For CEF, store HTML content in native map and use scheme handler
@@ -262,19 +257,19 @@ export class BrowserView<T extends RPCWithTransport = RPCWithTransport> {
 
 	setContentBlockerEnabled(enabled: boolean) {
 		this.contentBlocker = enabled;
-		native.symbols.setContentBlockerEnabled(this.ptr, enabled);
+		ffi.request.setContentBlockerEnabled({ id: this.id, enabled });
 	}
 
 	setUserAgent(userAgent: string) {
-		native.symbols.setWebviewUserAgent(this.ptr, toCString(userAgent));
+		native!.symbols.setWebviewUserAgent(this.ptr, toCString(userAgent));
 	}
 
 	static setAcceptLanguage(lang: string) {
-		native.symbols.setAcceptLanguage(toCString(lang));
+		native!.symbols.setAcceptLanguage(toCString(lang));
 	}
 
 	static setAppAppearance(mode: string) {
-		native.symbols.setAppAppearance(toCString(mode));
+		native!.symbols.setAppAppearance(toCString(mode));
 	}
 
 	findInPage(
@@ -376,23 +371,23 @@ export class BrowserView<T extends RPCWithTransport = RPCWithTransport> {
 	};
 
 	goBack() {
-		native.symbols.webviewGoBack(this.ptr);
+		native!.symbols.webviewGoBack(this.ptr);
 	}
 
 	goForward() {
-		native.symbols.webviewGoForward(this.ptr);
+		native!.symbols.webviewGoForward(this.ptr);
 	}
 
 	reload() {
-		native.symbols.webviewReload(this.ptr);
+		native!.symbols.webviewReload(this.ptr);
 	}
 
 	canGoBack(): boolean {
-		return native.symbols.webviewCanGoBack(this.ptr) as boolean;
+		return native!.symbols.webviewCanGoBack(this.ptr);
 	}
 
 	canGoForward(): boolean {
-		return native.symbols.webviewCanGoForward(this.ptr) as boolean;
+		return native!.symbols.webviewCanGoForward(this.ptr);
 	}
 
 	remove() {
@@ -410,8 +405,10 @@ export class BrowserView<T extends RPCWithTransport = RPCWithTransport> {
 			unregisterHandler() {},
 		});
 		this.rpcHandler = undefined;
-		this.ptr = null as any;
-		native!.symbols.webviewRemove(ptr);
+    
+    this.rpcHandler = undefined;
+    this.ptr = null;
+    native!.symbols.webviewRemove(ptr);
 	}
 
 	static getById(id: number) {

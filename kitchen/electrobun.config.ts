@@ -4,7 +4,7 @@ export default {
 	app: {
 		name: "Electrobun Kitchen Sink",
 		identifier: "sh.blackboard.electrobun-kitchen",
-		version: "1.17.1-beta.0",
+		version: "1.18.1",
 		urlSchemes: ["electrobun-playground"],
 	},
 	runtime: {
@@ -152,6 +152,8 @@ export default {
 				"views/playgrounds/webview-cleanup/assets/bunny.png",
 			"src/playgrounds/wgpu-tag/index.html":
 				"views/playgrounds/wgpu-tag/index.html",
+			"src/playgrounds/fullsize-frame-repro/index.html":
+				"views/playgrounds/fullsize-frame-repro/index.html",
 		},
 		mac: {
 			codesign: true,

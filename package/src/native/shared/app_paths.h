@@ -68,6 +68,43 @@ inline std::string buildPartitionPath(
     return base;
 }
 
+/**
+ * Build a CEF partition-specific path under the renderer root.
+ *
+ * Partitions live in a `partitions/` subdirectory of the renderer cache root
+ * rather than directly under it. The renderer root itself is CefSettings.cache_path,
+ * which Chromium populates with auto-created profile directories such as
+ * `Default`, `System Profile`, etc. On case-insensitive filesystems (Windows
+ * NTFS, macOS APFS in default config) a partition literally named `default`
+ * would collide with that auto-created `Default` folder; CEF then refuses to
+ * bind a CefRequestContext to the colliding path and CreateBrowserSync
+ * silently returns null. Nesting under `partitions/` keeps user partitions
+ * cleanly separated from Chromium's own profile state.
+ *
+ * @param basePath The base application support/data path
+ * @param identifier The app identifier
+ * @param channel The release channel
+ * @param renderer The renderer type (typically "CEF")
+ * @param partitionName The partition name
+ * @param pathSeparator The path separator to use
+ * @return The full path: basePath/identifier/channel/renderer/partitions/partitionName
+ */
+inline std::string buildCEFPartitionPath(
+    const std::string& basePath,
+    const std::string& identifier,
+    const std::string& channel,
+    const std::string& renderer,
+    const std::string& partitionName,
+    char pathSeparator = '/'
+) {
+    std::string base = buildAppDataPath(basePath, identifier, channel, renderer, pathSeparator);
+    base += pathSeparator;
+    base += "partitions";
+    base += pathSeparator;
+    base += partitionName;
+    return base;
+}
+
 } // namespace electrobun
 
 #endif // ELECTROBUN_APP_PATHS_H

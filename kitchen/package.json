@@ -2,8 +2,8 @@
 	"scripts": {
 		"start": "electrobun run",
 		"dev": "electrobun dev",
-		"build:canary": "electrobun build --env=canary",
-		"build:stable": "electrobun build --env=stable",
+		"build:canary": "cd ../package && bun build:release && cd ../kitchen && electrobun build --env=canary",
+		"build:stable": "cd ../package && bun build:release && cd ../kitchen && electrobun build --env=stable",
 		"start:canary": "electrobun dev --env=canary"
 	},
 	"dependencies": {

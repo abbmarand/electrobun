@@ -17,7 +17,8 @@ import {
 	writeSync,
 	closeSync,
 } from "fs";
-import { execSync, spawnSync } from "child_process";
+import { execFileSync, execSync, spawnSync } from "child_process";
+import { createRequire } from "module";
 import * as readline from "readline";
 import { OS, ARCH } from "../shared/platform";
 import { DEFAULT_CEF_VERSION_STRING } from "../shared/cef-version";
@@ -41,6 +42,7 @@ import { getTemplate, getTemplateNames } from "./templates/embedded";
 const _MAX_CHUNK_SIZE = 1024 * 2;
 
 // const binExt = OS === 'win' ? '.exe' : '';
+const require = createRequire(import.meta.url);
 
 // Create a tar file using system tar command (preserves file permissions unlike Bun.Archive)
 function createTar(tarPath: string, cwd: string, entries: string[]) {
@@ -57,6 +59,17 @@ function createTar(tarPath: string, cwd: string, entries: string[]) {
 			env: { ...process.env, COPYFILE_DISABLE: "1" },
 		},
 	);
+}
+
+function getRceditExe(): string {
+	const rceditPkgPath = require.resolve("rcedit/package.json");
+	const rceditDir = dirname(rceditPkgPath);
+	const rceditX64 = join(rceditDir, "bin", "rcedit-x64.exe");
+	return existsSync(rceditX64) ? rceditX64 : join(rceditDir, "bin", "rcedit.exe");
+}
+
+function runRcedit(targetPath: string, args: string[]): void {
+	execFileSync(getRceditExe(), [targetPath, ...args]);
 }
 
 /** Best-effort delete of a prior build tree (handles uchg / read-only / root-owned files, and Windows file locks). */
@@ -1518,6 +1531,13 @@ const _commandDefaults = {
 	},
 };
 
+type FileAssociation = {
+	ext: string[];
+	name: string;
+	role?: "Editor" | "Viewer" | "Shell" | "None";
+	icon?: string;
+};
+
 // Default values merged with user's electrobun.config.ts
 // For the user-facing type, see ElectrobunConfig in src/bun/ElectrobunConfig.ts
 const defaultConfig = {
@@ -1527,6 +1547,7 @@ const defaultConfig = {
 		version: "0.1.0",
 		description: "" as string | undefined,
 		urlSchemes: undefined as string[] | undefined,
+		fileAssociations: undefined as FileAssociation[] | undefined,
 	},
 	build: {
 		buildFolder: "build",
@@ -1585,7 +1606,17 @@ const defaultConfig = {
 			mode?: "window" | "background";
 			permissions?: Record<string, unknown>;
 			dependencies?: Record<string, string>;
-			remoteUIs?: Record<string, { entrypoint: string; [key: string]: unknown }>;
+			// Map of remote UI ID → config. Two flavors:
+			//   1. { name, entrypoint, ...bunBuildOpts } — electrobun builds it via Bun.build
+			//   2. { name, path } — point at an already-built HTML file (e.g. produced by postBuild)
+			// In both cases, the manifest gets a remoteUIs block that ears reads to expose
+			// the UIs for remote loading via Hop. `name` is the human-readable label shown in Farm.
+			remoteUIs?: Record<string, {
+				name?: string;
+				entrypoint?: string;
+				path?: string;
+				[key: string]: unknown;
+			}>;
 			carrotOnly?: boolean;
 		} | undefined,
 	},
@@ -1825,6 +1856,151 @@ ${schemesXml}
     </array>`;
 }
 
+// Generates CFBundleDocumentTypes and UTExportedTypeDeclarations for file associations.
+// Each association gets a UTI derived from the app identifier (e.g., com.example.app.myext).
+// LSItemContentTypes in CFBundleDocumentTypes references these UTIs so Launch Services
+// properly associates files with the app on modern macOS.
+function generateDocumentTypes(
+	fileAssociations: FileAssociation[] | undefined,
+	projectRoot: string,
+	appIdentifier: string,
+): string {
+	if (!fileAssociations || fileAssociations.length === 0) {
+		return "";
+	}
+
+	const validAssociations = fileAssociations.filter((assoc) => {
+		if (!assoc.ext || assoc.ext.length === 0) {
+			console.log(
+				`WARNING: fileAssociations entry "${assoc.name || "(unnamed)"}" has no extensions — skipping`,
+			);
+			return false;
+		}
+		if (!assoc.name) {
+			console.log(
+				`WARNING: fileAssociations entry with extensions [${assoc.ext.join(", ")}] has no name — skipping`,
+			);
+			return false;
+		}
+		return true;
+	});
+
+	if (validAssociations.length === 0) {
+		return "";
+	}
+
+	// Clean extensions and warn about leading dots
+	const cleaned = validAssociations.map((assoc) => ({
+		...assoc,
+		ext: assoc.ext.map((ext) => {
+			const clean = ext.replace(/^\./, "");
+			if (clean !== ext) {
+				console.log(
+					`WARNING: fileAssociations ext "${ext}" has a leading dot — stripping to "${clean}"`,
+				);
+			}
+			return clean;
+		}),
+	}));
+
+	// Generate CFBundleDocumentTypes with LSItemContentTypes
+	const docTypes = cleaned
+		.map((assoc) => {
+			const role = assoc.role || "Viewer";
+			// Resolve icon: only reference if file exists to avoid dangling plist entries
+			let iconName = "";
+			if (assoc.icon) {
+				const iconSourcePath = join(projectRoot, assoc.icon);
+				if (existsSync(iconSourcePath)) {
+					iconName = basename(assoc.icon).replace(/\.icns$/i, "");
+				} else {
+					console.log(
+						`WARNING: Document type icon not found: ${iconSourcePath} — skipping icon reference`,
+					);
+				}
+			}
+			const iconLine = iconName
+				? `            <key>CFBundleTypeIconFile</key>\n            <string>${escapeXml(iconName)}</string>\n`
+				: "";
+			// One UTI per extension, all listed under LSItemContentTypes
+			const utiXml = assoc.ext
+				.map(
+					(ext) =>
+						`                <string>${escapeXml(appIdentifier)}.${escapeXml(ext)}</string>`,
+				)
+				.join("\n");
+			const extsXml = assoc.ext
+				.map(
+					(ext) =>
+						`                <string>${escapeXml(ext)}</string>`,
+				)
+				.join("\n");
+
+			return `        <dict>
+            <key>CFBundleTypeName</key>
+            <string>${escapeXml(assoc.name)}</string>
+            <key>CFBundleTypeRole</key>
+            <string>${escapeXml(role)}</string>
+${iconLine}            <key>LSItemContentTypes</key>
+            <array>
+${utiXml}
+            </array>
+            <key>CFBundleTypeExtensions</key>
+            <array>
+${extsXml}
+            </array>
+        </dict>`;
+		})
+		.join("\n");
+
+	// Generate UTExportedTypeDeclarations — one per extension
+	const utiDecls = cleaned
+		.flatMap((assoc) => {
+			let iconName = "";
+			if (assoc.icon) {
+				const iconSourcePath = join(projectRoot, assoc.icon);
+				if (existsSync(iconSourcePath)) {
+					iconName = basename(assoc.icon).replace(/\.icns$/i, "");
+				}
+			}
+			const iconLine = iconName
+				? `            <key>UTTypeIconFiles</key>
+            <array>
+                <string>${escapeXml(iconName)}</string>
+            </array>\n`
+				: "";
+			return assoc.ext.map(
+				(ext) => `        <dict>
+            <key>UTTypeIdentifier</key>
+            <string>${escapeXml(appIdentifier)}.${escapeXml(ext)}</string>
+            <key>UTTypeDescription</key>
+            <string>${escapeXml(assoc.name)}</string>
+            <key>UTTypeConformsTo</key>
+            <array>
+                <string>public.data</string>
+            </array>
+${iconLine}            <key>UTTypeTagSpecification</key>
+            <dict>
+                <key>public.filename-extension</key>
+                <array>
+                    <string>${escapeXml(ext)}</string>
+                </array>
+            </dict>
+        </dict>`,
+			);
+		})
+		.join("\n");
+
+	return `    <key>CFBundleDocumentTypes</key>
+    <array>
+${docTypes}
+    </array>
+    <key>UTExportedTypeDeclarations</key>
+    <array>
+${utiDecls}
+    </array>`;
+}
+
 // Execute command handling
 (async () => {
 	if (commandArg === "init") {
@@ -1959,7 +2135,7 @@ ${schemesXml}
 			console.log(
 				"Different architecture, different APIs. Do not use Electron patterns.",
 			);
-			console.log("Docs: https://blackboard.sh/electrobun/llms.txt");
+			console.log("Docs: https://docs.electrobunny.ai/electrobun/llms.txt");
 			console.log(
 				"━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━",
 			);
@@ -1978,9 +2154,7 @@ ${schemesXml}
 		try {
 			await runBuild(config, buildEnvironment);
 		} catch (error) {
-			if (error instanceof Error) {
-				console.error(error.message);
-			}
+			console.error("Build failed:", error);
 			process.exit(1);
 		}
 	} else if (commandArg === "run") {
@@ -1996,9 +2170,7 @@ ${schemesXml}
 			try {
 				await runBuild(config, "dev");
 			} catch (error) {
-				if (error instanceof Error) {
-					console.error(error.message);
-				}
+				console.error("Build failed:", error);
 				process.exit(1);
 			}
 			await runAppWithSignalHandling(config);
@@ -2105,18 +2277,97 @@ ${schemesXml}
 				const iconDestPath = join(appBundleFolderResourcesPath, "AppIcon.icns");
 				if (existsSync(iconSourceFolder)) {
 					if (OS === "macos") {
-						// Use iconutil to convert .iconset folder to .icns
-						Bun.spawnSync(
-							["iconutil", "-c", "icns", "-o", iconDestPath, iconSourceFolder],
-							{
-								cwd: appBundleFolderResourcesPath,
-								stdio: ["ignore", "inherit", "inherit"],
-								env: {
-									...process.env,
-									ELECTROBUN_BUILD_ENV: buildEnvironment,
+						if (config.build.mac.icons.endsWith(".icon")) {
+							// .icon format (Icon Composer) — compile with actool
+							// Produces Assets.car (Liquid Glass on macOS 26+) and .icns fallback
+							const actoolCheck = Bun.spawnSync(
+								["xcrun", "--find", "actool"],
+								{ stdio: ["ignore", "pipe", "pipe"] },
+							);
+							if (actoolCheck.exitCode !== 0) {
+								throw new Error(
+									"Building .icon files requires Xcode (actool is not available from Command Line Tools alone). " +
+										"Install Xcode from the App Store, or set mac.icons to an .iconset folder instead.",
+								);
+							}
+
+							const iconStem = basename(config.build.mac.icons, ".icon");
+							const partialPlistPath = join(
+								buildFolder,
+								".actool-partial-info.plist",
+							);
+
+							console.log(
+								"Compiling .icon file with actool (requires Xcode)...",
+							);
+							const result = Bun.spawnSync(
+								[
+									"xcrun",
+									"actool",
+									"--compile",
+									appBundleFolderResourcesPath,
+									"--app-icon",
+									iconStem,
+									"--platform",
+									"macosx",
+									"--minimum-deployment-target",
+									"11.0",
+									"--output-partial-info-plist",
+									partialPlistPath,
+									iconSourceFolder,
+								],
+								{
+									cwd: projectRoot,
+									stdio: ["ignore", "inherit", "inherit"],
+									env: {
+										...process.env,
+										ELECTROBUN_BUILD_ENV: buildEnvironment,
+									},
 								},
-							},
-						);
+							);
+
+							if (result.exitCode !== 0) {
+								throw new Error(
+									`actool failed to compile ${config.build.mac.icons} (exit code ${result.exitCode})`,
+								);
+							}
+
+							// actool produces <stem>.icns — rename to AppIcon.icns so
+							// CFBundleIconFile ("AppIcon") resolves correctly
+							const actoolIcns = join(
+								appBundleFolderResourcesPath,
+								`${iconStem}.icns`,
+							);
+							if (existsSync(actoolIcns) && actoolIcns !== iconDestPath) {
+								renameSync(actoolIcns, iconDestPath);
+							}
+						} else {
+							// Use iconutil to convert .iconset folder to .icns
+							const result = Bun.spawnSync(
+								[
+									"iconutil",
+									"-c",
+									"icns",
+									"-o",
+									iconDestPath,
+									iconSourceFolder,
+								],
+								{
+									cwd: appBundleFolderResourcesPath,
+									stdio: ["ignore", "inherit", "inherit"],
+									env: {
+										...process.env,
+										ELECTROBUN_BUILD_ENV: buildEnvironment,
+									},
+								},
+							);
+
+							if (result.exitCode !== 0) {
+								throw new Error(
+									`iconutil failed to convert ${config.build.mac.icons} (exit code ${result.exitCode})`,
+								);
+							}
+						}
 					} else {
 						console.log(
 							`WARNING: Cannot build macOS icons on ${OS} - iconutil is only available on macOS`,
@@ -2181,6 +2432,26 @@ Categories=Utility;Application;
 				if (existsSync(iconPath)) {
 					const targetIconPath = join(appBundleFolderResourcesPath, "app.ico");
 					cpSync(iconPath, targetIconPath, { dereference: true });
+				}
+			}
+
+			// Copy document type icon files to the app bundle Resources folder
+			if (targetOS === "macos" && config.app.fileAssociations) {
+				for (const assoc of config.app.fileAssociations) {
+					if (assoc.icon) {
+						const iconSourcePath = join(projectRoot, assoc.icon);
+						if (existsSync(iconSourcePath)) {
+							const iconFileName = basename(iconSourcePath);
+							const iconDestPath = join(
+								appBundleFolderResourcesPath,
+								iconFileName,
+							);
+							cpSync(iconSourcePath, iconDestPath, {
+								dereference: true,
+							});
+						}
+						// Missing icon warning is handled by generateDocumentTypes
+					}
 				}
 			}
 		};
@@ -2258,8 +2529,20 @@ Categories=Utility;Application;
 			config.app.urlSchemes,
 			config.app.identifier,
 		);
+		// Generate document type associations
+		const documentTypes = generateDocumentTypes(
+			config.app.fileAssociations,
+			projectRoot,
+			config.app.identifier,
+		);
+
+		// When using .icon format, CFBundleIconName is needed for Assets.car lookup
+		const iconName = config.build.mac?.icons?.endsWith(".icon")
+			? basename(config.build.mac.icons, ".icon")
+			: null;
 
 		InfoPlistContents = `<?xml version="1.0" encoding="UTF-8"?>
+
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
 <dict>
@@ -2274,7 +2557,9 @@ Categories=Utility;Application;
     <key>CFBundlePackageType</key>
     <string>APPL</string>
     <key>CFBundleIconFile</key>
-    <string>AppIcon</string>${usageDescriptions ? "\n" + usageDescriptions : ""}${urlTypes ? "\n" + urlTypes : ""}
+    <string>AppIcon</string>${iconName ? `\n    <key>CFBundleIconName</key>\n <string>${iconName}</string>` : ""}${usageDescriptions ? "\n" +
+usageDescriptions : ""}${urlTypes ? "\n" + urlTypes : ""}${documentTypes ?
+"\n" + documentTypes : ""}
 </dict>
 </plist>`;
 
@@ -2374,19 +2659,29 @@ Categories=Utility;Application;
 					}
 
 					// Use rcedit to embed the icon and version info into launcher.exe
-					const rcedit = (await import("rcedit")).default;
-					await rcedit(bunCliLauncherDestination, {
-						icon: iconPath,
-						"file-version": config.app.version,
-						"product-version": config.app.version,
-						"version-string": {
-							ProductName: config.app.name,
-							FileDescription: config.app.name,
-							CompanyName: config.app.identifier,
-							InternalName: "launcher",
-							OriginalFilename: "launcher.exe",
-						},
-					});
+					runRcedit(bunCliLauncherDestination, [
+						"--set-icon",
+						iconPath,
+						"--set-file-version",
+						config.app.version,
+						"--set-product-version",
+						config.app.version,
+						"--set-version-string",
+						"ProductName",
+						config.app.name,
+						"--set-version-string",
+						"FileDescription",
+						config.app.name,
+						"--set-version-string",
+						"CompanyName",
+						config.app.identifier,
+						"--set-version-string",
+						"InternalName",
+						"launcher",
+						"--set-version-string",
+						"OriginalFilename",
+						"launcher.exe",
+					]);
 					console.log(`Successfully embedded icon into launcher.exe`);
 
 					// Clean up temp ICO file
@@ -2480,17 +2775,23 @@ Categories=Utility;Application;
 					}
 
 					// Use rcedit to embed the icon and version info into bun.exe
-					const rcedit = (await import("rcedit")).default;
-					await rcedit(bunBinaryDestInBundlePath, {
-						icon: iconPath,
-						"file-version": config.app.version,
-						"product-version": config.app.version,
-						"version-string": {
-							ProductName: config.app.name,
-							FileDescription: config.app.name,
-							CompanyName: config.app.identifier,
-						},
-					});
+					runRcedit(bunBinaryDestInBundlePath, [
+						"--set-icon",
+						iconPath,
+						"--set-file-version",
+						config.app.version,
+						"--set-product-version",
+						config.app.version,
+						"--set-version-string",
+						"ProductName",
+						config.app.name,
+						"--set-version-string",
+						"FileDescription",
+						config.app.name,
+						"--set-version-string",
+						"CompanyName",
+						config.app.identifier,
+					]);
 					console.log(`Successfully embedded icon into bun.exe`);
 
 					// Clean up temp ICO file
@@ -3044,8 +3345,8 @@ Categories=Utility;Application;
 		);
 		if (bunBuildProc.exitCode !== 0) {
 			console.error("failed to build", bunSource);
-			const stderr = new TextDecoder().decode(bunBuildProc.stderr as Uint8Array);
-			const stdout = new TextDecoder().decode(bunBuildProc.stdout as Uint8Array);
+			const stderr = Buffer.from(bunBuildProc.stderr).toString("utf8");
+			const stdout = Buffer.from(bunBuildProc.stdout).toString("utf8");
 			if (stderr) console.error(stderr);
 			if (stdout) console.error(stdout);
 			throw new Error("Build failed: bun build failed");
@@ -3169,29 +3470,55 @@ Categories=Utility;Application;
 				}
 			}
 
-			// Build remote UIs if configured
+			// Build remote UIs if configured.
+			// remoteUIs has two flavors:
+			//   1. entrypoint set → CLI runs Bun.build, output to remote-ui/{name}/
+			//   2. path set → already built (e.g. by postBuild), just record in manifest
+			// The resolved manifest entries are collected here and written below.
+			const resolvedRemoteUIs: Record<string, { name: string; path: string }> = {};
 			if (carrotConfig.remoteUIs) {
 				for (const remoteUIName in carrotConfig.remoteUIs) {
 					const remoteUIConfig = carrotConfig.remoteUIs[remoteUIName]!;
-					const remoteUISource = join(projectRoot, remoteUIConfig.entrypoint);
-					if (!existsSync(remoteUISource)) {
-						console.error(`Remote UI entrypoint not found: ${remoteUISource}`);
-						continue;
-					}
-					const remoteUIDestFolder = join(carrotBuildDir, "remote-ui", remoteUIName);
-					mkdirSync(remoteUIDestFolder, { recursive: true });
+					const label = remoteUIConfig.name || remoteUIName;
 
-					const { entrypoint: _entrypoint, ...remoteUIBuildOptions } = remoteUIConfig;
-					const remoteUIBuildResult = await Bun.build({
-						...remoteUIBuildOptions,
-						entrypoints: [remoteUISource],
-						outdir: remoteUIDestFolder,
-						target: "browser",
-					});
+					if (remoteUIConfig.entrypoint) {
+						const remoteUISource = join(projectRoot, remoteUIConfig.entrypoint);
+						if (!existsSync(remoteUISource)) {
+							console.error(`Remote UI entrypoint not found: ${remoteUISource}`);
+							continue;
+						}
+						const remoteUIDestFolder = join(carrotBuildDir, "remote-ui", remoteUIName);
+						mkdirSync(remoteUIDestFolder, { recursive: true });
 
-					if (!remoteUIBuildResult.success) {
-						console.error(`Failed to build remote UI: ${remoteUIName}`);
-						printBuildLogs(remoteUIBuildResult.logs);
+						const { entrypoint: _entrypoint, name: _name, path: _path, ...remoteUIBuildOptions } = remoteUIConfig;
+						const remoteUIBuildResult = await Bun.build({
+							...remoteUIBuildOptions,
+							entrypoints: [remoteUISource],
+							outdir: remoteUIDestFolder,
+							target: "browser",
+						});
+
+						if (!remoteUIBuildResult.success) {
+							console.error(`Failed to build remote UI: ${remoteUIName}`);
+							printBuildLogs(remoteUIBuildResult.logs);
+							continue;
+						}
+						// Bun.build produces a JS bundle; the entry HTML (if any) is up to the
+						// builder. We record the directory entry as index.html by convention.
+						resolvedRemoteUIs[remoteUIName] = {
+							name: label,
+							path: `remote-ui/${remoteUIName}/index.html`,
+						};
+					} else if (remoteUIConfig.path) {
+						// Pre-built path (e.g. produced by a postBuild script). Just record it.
+						resolvedRemoteUIs[remoteUIName] = {
+							name: label,
+							path: remoteUIConfig.path,
+						};
+					} else {
+						console.warn(
+							`Remote UI "${remoteUIName}" has neither entrypoint nor path; skipping.`,
+						);
 					}
 				}
 			}
@@ -3204,9 +3531,18 @@ Categories=Utility;Application;
 				description: carrotConfig.description || config.app.description || "",
 				mode: carrotConfig.mode || "window",
 				permissions: carrotConfig.permissions || {},
-				dependencies: carrotConfig.dependencies || {},
+				dependencies: Object.fromEntries(
+					Object.entries(carrotConfig.dependencies || {}).map(([id, spec]) => [
+						id,
+						// Strip file:/workspace: specifiers for artifact manifests — just keep the carrot ID
+						typeof spec === "string" && (spec.startsWith("file:") || spec.startsWith("workspace:"))
+							? "*"
+							: spec,
+					]),
+				),
 				worker: { relativePath: "worker.js" },
 				view: existsSync(viewsSrc) ? { relativePath: "views/index.html" } : undefined,
+				remoteUIs: Object.keys(resolvedRemoteUIs).length > 0 ? resolvedRemoteUIs : undefined,
 			};
 			writeFileSync(
 				join(carrotBuildDir, "carrot.json"),
@@ -4712,17 +5048,23 @@ Categories=Utility;Application;
 						console.log(`Converted PNG to ICO format: ${tempIcoPath}`);
 					}
 
-					const rcedit = (await import("rcedit")).default;
-					await rcedit(outputExePath, {
-						icon: iconPath,
-						"file-version": config.app.version,
-						"product-version": config.app.version,
-						"version-string": {
-							ProductName: config.app.name,
-							FileDescription: `${config.app.name} Setup`,
-							CompanyName: config.app.identifier,
-						},
-					});
+					runRcedit(outputExePath, [
+						"--set-icon",
+						iconPath,
+						"--set-file-version",
+						config.app.version,
+						"--set-product-version",
+						config.app.version,
+						"--set-version-string",
+						"ProductName",
+						config.app.name,
+						"--set-version-string",
+						"FileDescription",
+						`${config.app.name} Setup`,
+						"--set-version-string",
+						"CompanyName",
+						config.app.identifier,
+					]);
 					console.log(`Successfully embedded icon into ${setupFileName}`);
 
 					if (iconPath !== iconSourcePath && existsSync(iconPath)) {
@@ -4753,10 +5095,10 @@ Categories=Utility;Application;
 		// The extractor searches for the second occurrence of each marker
 		// (skipping the first which is embedded in the binary's own string literals)
 		const fd = openSync(outputExePath, "a");
-		writeSync(fd, Buffer.from(METADATA_MARKER, "utf-8"));
-		writeSync(fd, Buffer.from(metadataJson, "utf-8"));
-		writeSync(fd, Buffer.from(ARCHIVE_MARKER, "utf-8"));
-		writeSync(fd, archiveBytes);
+		writeSync(fd, new Uint8Array(Buffer.from(METADATA_MARKER, "utf-8")));
+		writeSync(fd, new Uint8Array(Buffer.from(metadataJson, "utf-8")));
+		writeSync(fd, new Uint8Array(Buffer.from(ARCHIVE_MARKER, "utf-8")));
+		writeSync(fd, new Uint8Array(archiveBytes));
 		closeSync(fd);
 
 		const totalSize = statSync(outputExePath).size;

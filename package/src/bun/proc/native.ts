@@ -97,6 +97,8 @@ export const native = (() => {
 					FFIType.cstring, // titleBarStyle
 					FFIType.bool, // transparent
 					FFIType.bool, // toolbar
+					FFIType.f64, // trafficLightOffsetX
+					FFIType.f64, // trafficLightOffsetY
 					FFIType.function, // closeHandler
 					FFIType.function, // moveHandler
 					FFIType.function, // resizeHandler
@@ -114,6 +116,13 @@ export const native = (() => {
 				returns: FFIType.void,
 			},
 			showWindow: {
+				args: [
+					FFIType.ptr, // window ptr
+					FFIType.bool, // activate
+				],
+				returns: FFIType.void,
+			},
+			activateWindow: {
 				args: [
 					FFIType.ptr, // window ptr
 				],
@@ -177,14 +186,18 @@ export const native = (() => {
 				args: [FFIType.ptr],
 				returns: FFIType.bool,
 			},
-			setWindowPosition: {
-				args: [FFIType.ptr, FFIType.f64, FFIType.f64],
-				returns: FFIType.void,
-			},
-			setWindowSize: {
-				args: [FFIType.ptr, FFIType.f64, FFIType.f64],
-				returns: FFIType.void,
-			},
+				setWindowPosition: {
+					args: [FFIType.ptr, FFIType.f64, FFIType.f64],
+					returns: FFIType.void,
+				},
+				setWindowButtonPosition: {
+					args: [FFIType.ptr, FFIType.f64, FFIType.f64],
+					returns: FFIType.void,
+				},
+				setWindowSize: {
+					args: [FFIType.ptr, FFIType.f64, FFIType.f64],
+					returns: FFIType.void,
+				},
 			setWindowFrame: {
 				args: [FFIType.ptr, FFIType.f64, FFIType.f64, FFIType.f64, FFIType.f64],
 				returns: FFIType.void,
@@ -985,6 +998,11 @@ const _ffiImpl = {
 			transparent: boolean;
 			toolbar: boolean;
 			hidden?: boolean;
+			activate?: boolean;
+			trafficLightOffset?: {
+				x: number;
+				y: number;
+			};
 		}): FFIType.ptr => {
 			const {
 				id,
@@ -1009,6 +1027,8 @@ const _ffiImpl = {
 				transparent,
 				toolbar,
 				hidden = false,
+				activate = true,
+				trafficLightOffset = { x: 0, y: 0 },
 			} = params;
 
 			const styleMask = native_.symbols.getWindowStyle(
@@ -1036,6 +1056,9 @@ const _ffiImpl = {
 				toCString(titleBarStyle),
 				transparent,
 				toolbar,
+				trafficLightOffset.x,
+				trafficLightOffset.y,
+				// callbacks
 				windowCloseCallback,
 				windowMoveCallback,
 				windowResizeCallback,
@@ -1050,7 +1073,7 @@ const _ffiImpl = {
 
 			native_.symbols.setWindowTitle(windowPtr, toCString(title));
 			if (!hidden) {
-				native_.symbols.showWindow(windowPtr);
+				native_.symbols.showWindow(windowPtr, activate);
 			}
 
 			return windowPtr;
@@ -1079,15 +1102,26 @@ const _ffiImpl = {
 			// Note: Cleanup of BrowserWindowMap happens in the windowCloseCallback
 		},
 
-		focusWindow: (params: { winId: number }) => {
+		showWindow: (params: { winId: number; activate?: boolean }) => {
 			const { winId } = params;
 			const windowPtr = getWindowPtr(winId);
 
 			if (!windowPtr) {
-				throw `Can't focus window. Window no longer exists`;
+				throw `Can't show window. Window no longer exists`;
 			}
 
-			native_.symbols.showWindow(windowPtr);
+			native_.symbols.showWindow(windowPtr, params.activate ?? true);
+		},
+
+		activateWindow: (params: { winId: number }) => {
+			const { winId } = params;
+			const windowPtr = getWindowPtr(winId);
+
+			if (!windowPtr) {
+				throw `Can't activate window. Window no longer exists`;
+			}
+
+			native_.symbols.activateWindow(windowPtr);
 		},
 
 		hideWindow: (params: { winId: number }) => {
@@ -1098,7 +1132,7 @@ const _ffiImpl = {
 				throw `Can't hide window. Window no longer exists`;
 			}
 
-			native.symbols.hideWindow(windowPtr);
+			native_.symbols.hideWindow(windowPtr);
 		},
 
 		minimizeWindow: (params: { winId: number }) => {
@@ -1248,21 +1282,32 @@ const _ffiImpl = {
 			return native_.symbols.isWindowVisibleOnAllWorkspaces(windowPtr);
 		},
 
-		setWindowPosition: (params: { winId: number; x: number; y: number }) => {
-			const { winId, x, y } = params;
-			const windowPtr = getWindowPtr(winId);
+			setWindowPosition: (params: { winId: number; x: number; y: number }) => {
+				const { winId, x, y } = params;
+				const windowPtr = getWindowPtr(winId);
 
-			if (!windowPtr) {
-				throw `Can't set window position. Window no longer exists`;
-			}
+				if (!windowPtr) {
+					throw `Can't set window position. Window no longer exists`;
+				}
 
-			native_.symbols.setWindowPosition(windowPtr, x, y);
-		},
+				native_.symbols.setWindowPosition(windowPtr, x, y);
+			},
 
-		setWindowSize: (params: {
-			winId: number;
-			width: number;
-			height: number;
+			setWindowButtonPosition: (params: { winId: number; x: number; y: number }) => {
+				const { winId, x, y } = params;
+				const windowPtr = getWindowPtr(winId);
+
+				if (!windowPtr) {
+					throw `Can't set window button position. Window no longer exists`;
+				}
+
+				native_.symbols.setWindowButtonPosition(windowPtr, x, y);
+			},
+
+			setWindowSize: (params: {
+				winId: number;
+				width: number;
+				height: number;
 		}) => {
 			const { winId, width, height } = params;
 			const windowPtr = getWindowPtr(winId);
@@ -1327,14 +1372,14 @@ const _ffiImpl = {
 			const { winId } = params;
 			const windowPtr = getWindowPtr(winId);
 			if (!windowPtr) return;
-			native.symbols.webviewShowFindBar(windowPtr);
+			native_.symbols.webviewShowFindBar(windowPtr);
 		},
 
 		hideFindBar: (params: { winId: number }) => {
 			const { winId } = params;
 			const windowPtr = getWindowPtr(winId);
 			if (!windowPtr) return;
-			native.symbols.webviewHideFindBar(windowPtr);
+			native_.symbols.webviewHideFindBar(windowPtr);
 		},
 
 		createWebview: (params: {
@@ -1465,7 +1510,7 @@ window.__electrobunBunBridge = window.__electrobunBunBridge || window.webkit?.me
 			}
 
 			if (navigationRules) {
-				native.symbols.setWebviewNavigationRules(webviewPtr, toCString(navigationRules));
+				native_.symbols.setWebviewNavigationRules(webviewPtr, toCString(navigationRules));
 			}
 
 			if (contentBlocker && contentBlockerNative) {
@@ -1628,7 +1673,7 @@ window.__electrobunBunBridge = window.__electrobunBunBridge || window.webkit?.me
 		evaluateJavascriptSync: (params: { id: number; js: string }): string | null => {
 			const webview = BrowserView.getById(params.id);
 			if (!webview?.ptr) return null;
-			const result = native.symbols.evaluateJavascriptSync(webview.ptr, toCString(params.js));
+			const result = native_.symbols.evaluateJavascriptSync(webview.ptr, toCString(params.js));
 			if (!result) return null;
 			return result.toString();
 		},
@@ -1768,7 +1813,7 @@ window.__electrobunBunBridge = window.__electrobunBunBridge || window.webkit?.me
 			);
 		},
 		setDockIcon: (params: { imagePath: string }): void => {
-			native.symbols.setDockIcon(toCString(params.imagePath));
+			native_.symbols.setDockIcon(toCString(params.imagePath));
 		},
 		setDockIconVisible: (params: { visible: boolean }): void => {
 			native_.symbols.setDockIconVisible(params.visible);
@@ -1841,7 +1886,7 @@ window.__electrobunBunBridge = window.__electrobunBunBridge || window.webkit?.me
 			native_.symbols.clipboardWriteText(toCString(params.text));
 		},
 		clipboardGetChangeCount: (): number => {
-			return Number(native.symbols.clipboardGetChangeCount());
+			return Number(native_.symbols.clipboardGetChangeCount());
 		},
 		clipboardReadImage: (): Uint8Array | null => {
 			// Allocate a buffer for the size output
@@ -2120,6 +2165,7 @@ export const WGPUBridge = {
 		return native_.symbols.wgpuCreateSurfaceForView(instancePtr as any, viewPtr as any) as Pointer;
 	},
 };
+
 
 // Worker management. Move to a different file
 process.on("uncaughtException", (err) => {
@@ -2567,7 +2613,7 @@ export const Screen = {
 	 * @returns Array of Display objects with bounds, workArea, scaleFactor
 	 */
 	listScreens: (): Display[] => {
-		const jsonStr = native.symbols.getAllDisplays();
+		const jsonStr = native_.symbols.getAllDisplays();
 		if (!jsonStr) return [];
 		try {
 			return JSON.parse(jsonStr.toString());

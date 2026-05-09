@@ -239,6 +239,7 @@ export {
 	Screen,
 	Session,
 	WGPUBridge,
+
 	BuildConfig,
 	ContentBlocker,
 };
@@ -259,6 +260,7 @@ const Electrobun = {
 	Screen,
 	Session,
 	WGPUBridge,
+
 	BuildConfig,
 	ContentBlocker,
 	events: electobunEventEmmitter,

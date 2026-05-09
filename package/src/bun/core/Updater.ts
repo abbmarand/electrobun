@@ -10,7 +10,7 @@ import {
 } from "fs";
 import { execSync } from "child_process";
 import { OS as currentOS, ARCH as currentArch } from "../../shared/platform";
-import { getPlatformPrefix, getTarballFileName, getAppFileName } from "../../shared/naming";
+import { getPlatformPrefix, getTarballFileName } from "../../shared/naming";
 import { quit } from "./Utils";
 
 // Update status types for granular progress tracking
@@ -124,6 +124,22 @@ let localInfo: {
 	identifier: string;
 };
 
+async function getLocalInfo() {
+	if (localInfo) {
+		return localInfo;
+	}
+
+	try {
+		const resourcesDir = "Resources"; // Always use capitalized Resources
+		localInfo = await Bun.file(`../${resourcesDir}/version.json`).json();
+		return localInfo;
+	} catch (error) {
+		console.error("Failed to read version.json", error);
+		localInfo = { identifier: "", channel: "", version: "", hash: "", baseUrl: "", name: "" };
+		return localInfo;
+	}
+}
+
 let updateInfo: {
 	version: string;
 	hash: string;
@@ -179,7 +195,7 @@ const Updater = {
 	// todo: allow switching channels, by default will check the current channel
 	checkForUpdate: async () => {
 		emitStatus("checking", "Checking for updates...");
-		const localInfo = await Updater.getLocallocalInfo();
+		const localInfo = await Updater.getLocalInfo();
 
 		if (localInfo.channel === "dev") {
 			emitStatus("no-update", "Dev channel - updates disabled", {
@@ -283,7 +299,7 @@ const Updater = {
 		await Updater.channelBucketUrl(); // Ensure localInfo is loaded
 		const appFileName = localInfo.name;
 
-		let currentHash = (await Updater.getLocallocalInfo()).hash;
+		let currentHash = (await Updater.getLocalInfo()).hash;
 		let latestHash = (await Updater.checkForUpdate()).hash;
 
 		const extractionFolder = join(appDataFolder, "self-extraction");
@@ -853,10 +869,11 @@ const Updater = {
 						return;
 					}
 				} else if (currentOS === "win") {
-					// On Windows, the actual app is inside a subdirectory
-					// Use same naming logic as CLI and extractor
-					const appBundleName = getAppFileName(localInfo.name, localInfo.channel);
-					newAppBundlePath = join(extractionDir, appBundleName);
+					// On Windows, the actual app is inside a subdirectory.
+					// version.json's `name` field already contains the formatted app
+					// file name (e.g. "MyApp-canary" for non-stable, "MyApp" for stable),
+					// so don't re-apply getAppFileName or it doubles the channel suffix.
+					newAppBundlePath = join(extractionDir, localInfo.name);
 
 					// Verify the extracted app exists
 					if (!statSync(newAppBundlePath, { throwIfNoEntry: false })) {
@@ -962,32 +979,57 @@ const Updater = {
 						const launcherPathWin = launcherPath.replace(/\//g, "\\");
 
 						// Create a batch script that will:
-						// 1. Wait for the current app to exit
-						// 2. Remove current app folder
-						// 3. Move new app to current location
+						// 1. Wait for the current app and its helper processes to exit
+						// 2. Remove current app folder (with retries — CEF helpers may briefly
+						//    keep libcef.dll locked after launcher.exe exits)
+						// 3. Move new app to current location (only if old folder is fully gone,
+						//    otherwise `move` would put it inside as a subdirectory)
 						// 4. Launch the new app
 						// 5. Clean up
 						const updateScript = `@echo off
 setlocal
 
-:: Wait for the app to fully exit (check if launcher.exe is still running)
+:: Wait for the app and any CEF helper processes to fully exit.
+:: launcher.exe spawns bun.exe which spawns "bun Helper*.exe" processes that
+:: keep libcef.dll locked; if we proceed too early, rmdir partially fails.
 :waitloop
-tasklist /FI "IMAGENAME eq launcher.exe" 2>NUL | find /I /N "launcher.exe">NUL
-if "%ERRORLEVEL%"=="0" (
-    timeout /t 1 /nobreak >nul
-    goto waitloop
-)
+tasklist /FI "IMAGENAME eq launcher.exe" 2>NUL | find /I /N "launcher.exe">NUL && goto waitsleep
+tasklist /FI "IMAGENAME eq bun.exe" 2>NUL | find /I /N "bun.exe">NUL && goto waitsleep
+tasklist /FI "IMAGENAME eq bun Helper.exe" 2>NUL | find /I /N "bun Helper.exe">NUL && goto waitsleep
+tasklist 2>NUL | find /I "bun Helper">NUL && goto waitsleep
+goto waitdone
+:waitsleep
+timeout /t 1 /nobreak >nul
+goto waitloop
+:waitdone
 
 :: Small extra delay to ensure all file handles are released
 timeout /t 2 /nobreak >nul
 
-:: Remove current app folder
-if exist "${runningAppWin}" (
-    rmdir /s /q "${runningAppWin}"
-)
+:: Remove current app folder, retrying if rmdir fails (locked files etc.)
+set rmRetry=0
+:rmloop
+if not exist "${runningAppWin}" goto rmdone
+rmdir /s /q "${runningAppWin}" 2>nul
+if not exist "${runningAppWin}" goto rmdone
+set /a rmRetry=rmRetry+1
+if %rmRetry% GEQ 10 goto rmfailed
+timeout /t 2 /nobreak >nul
+goto rmloop
+:rmfailed
+echo Update failed: could not remove "${runningAppWin}" after retries.
+echo Files may still be locked by a helper process.
+pause
+exit /b 1
+:rmdone
 
-:: Move new app to current location
+:: Move new app to current location (safe now that destination is gone)
 move "${newAppWin}" "${runningAppWin}"
+if not exist "${launcherPathWin}" (
+    echo Update failed: launcher not found at "${launcherPathWin}" after move.
+    pause
+    exit /b 1
+)
 
 :: Clean up extraction directory
 rmdir /s /q "${extractionDirWin}" 2>nul
@@ -1074,14 +1116,14 @@ del "%~f0"
 	},
 
 	channelBucketUrl: async () => {
-		await Updater.getLocallocalInfo();
+		await Updater.getLocalInfo();
 		// With flat prefix-based naming, channelBucketUrl is just the baseUrl
 		// Users can also use Updater.localInfo.baseUrl() directly
 		return localInfo.baseUrl;
 	},
 
 	appDataFolder: async () => {
-		await Updater.getLocallocalInfo();
+		await Updater.getLocalInfo();
 		// Use identifier + channel for the app data folder
 		// e.g., ~/Library/Application Support/sh.blackboard.myapp/canary/
 		const appDataFolder = join(
@@ -1096,33 +1138,26 @@ del "%~f0"
 	// TODO: consider moving this from "Updater.localInfo" to "BuildVars"
 	localInfo: {
 		version: async () => {
-			return (await Updater.getLocallocalInfo()).version;
+			return (await Updater.getLocalInfo()).version;
 		},
 		hash: async () => {
-			return (await Updater.getLocallocalInfo()).hash;
+			return (await Updater.getLocalInfo()).hash;
 		},
 		channel: async () => {
-			return (await Updater.getLocallocalInfo()).channel;
+			return (await Updater.getLocalInfo()).channel;
 		},
 		baseUrl: async () => {
-			return (await Updater.getLocallocalInfo()).baseUrl;
+			return (await Updater.getLocalInfo()).baseUrl;
 		},
 	},
 
+	getLocalInfo,
 	getLocallocalInfo: async () => {
-		if (localInfo) {
-			return localInfo;
-		}
+		console.error(
+			"[Electrobun] Updater.getLocallocalInfo() is deprecated. Use Updater.getLocalInfo() instead.",
+		);
 
-		try {
-			const resourcesDir = "Resources"; // Always use capitalized Resources
-			localInfo = await Bun.file(`../${resourcesDir}/version.json`).json();
-			return localInfo;
-		} catch (error) {
-			console.error("Failed to read version.json", error);
-			localInfo = { identifier: "", channel: "", version: "", hash: "", baseUrl: "", name: "" };
-			return localInfo;
-		}
+		return getLocalInfo();
 	},
 };
 

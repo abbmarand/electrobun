@@ -66,6 +66,8 @@ static bool wgpuDebugEnabled() {
 #include "../shared/glob_match.h"
 #include "../shared/callbacks.h"
 #include "../shared/permissions.h"
+#include "../shared/permissions_cef.h"
+#include "../shared/partition_context.h"
 #include "../shared/mime_types.h"
 #include "../shared/asar.h"
 #include "../shared/config.h"
@@ -80,6 +82,7 @@ static bool wgpuDebugEnabled() {
 #include "../shared/app_paths.h"
 #include "../shared/accelerator_parser.h"
 #include "../shared/chromium_flags.h"
+#include "../shared/cache_migration.h"
 
 using namespace electrobun;
 
@@ -504,13 +507,123 @@ typedef struct {
     uint32_t styleMask;
     const char *titleBarStyle;
     bool toolbar;
+    double trafficLightOffsetX;
+    double trafficLightOffsetY;
 } createNSWindowWithFrameAndStyleParams;
+
+static const void *kTrafficLightOffsetXKey = &kTrafficLightOffsetXKey;
+static const void *kTrafficLightOffsetYKey = &kTrafficLightOffsetYKey;
+static const void *kTrafficLightAppliedOffsetXKey = &kTrafficLightAppliedOffsetXKey;
+static const void *kTrafficLightAppliedOffsetYKey = &kTrafficLightAppliedOffsetYKey;
+
+static const void *kTrafficLightTitleBarStyleKey = &kTrafficLightTitleBarStyleKey;
+
+static bool shouldManageTrafficLights(NSWindow *window) {
+    if (!window) {
+        return false;
+    }
+
+    NSString *titleBarStyle = objc_getAssociatedObject(window, kTrafficLightTitleBarStyleKey);
+    return [titleBarStyle isEqualToString:@"hiddenInset"];
+}
+
+static void applyTrafficLightOffset(NSWindow *window) {
+    if (!shouldManageTrafficLights(window)) {
+        return;
+    }
+
+    NSNumber *offsetXValue = objc_getAssociatedObject(window, kTrafficLightOffsetXKey);
+    NSNumber *offsetYValue = objc_getAssociatedObject(window, kTrafficLightOffsetYKey);
+    const double offsetX = offsetXValue ? offsetXValue.doubleValue : 0;
+    const double offsetY = offsetYValue ? offsetYValue.doubleValue : 0;
+
+    if (offsetX == 0 && offsetY == 0) {
+        return;
+    }
+
+    NSNumber *appliedOffsetXValue = objc_getAssociatedObject(window, kTrafficLightAppliedOffsetXKey);
+    NSNumber *appliedOffsetYValue = objc_getAssociatedObject(window, kTrafficLightAppliedOffsetYKey);
+    const double appliedOffsetX = appliedOffsetXValue ? appliedOffsetXValue.doubleValue : 0;
+    const double appliedOffsetY = appliedOffsetYValue ? appliedOffsetYValue.doubleValue : 0;
+
+    NSButton *closeButton = [window standardWindowButton:NSWindowCloseButton];
+    NSButton *minimizeButton = [window standardWindowButton:NSWindowMiniaturizeButton];
+    NSButton *zoomButton = [window standardWindowButton:NSWindowZoomButton];
+
+    for (NSButton *button in @[closeButton, minimizeButton, zoomButton]) {
+        if (button == nil) {
+            continue;
+        }
+
+        NSPoint origin = button.frame.origin;
+        NSView *superview = button.superview;
+        origin.x = origin.x - appliedOffsetX + offsetX;
+        origin.y = origin.y + appliedOffsetY - offsetY;
+
+        if (superview != nil) {
+            CGFloat maxX = NSWidth(superview.bounds) - NSWidth(button.frame);
+            CGFloat maxY = NSHeight(superview.bounds) - NSHeight(button.frame);
+            origin.x = MAX(0, MIN(origin.x, maxX));
+            origin.y = MAX(0, MIN(origin.y, maxY));
+        }
+
+        [button setFrameOrigin:origin];
+    }
+
+    objc_setAssociatedObject(window, kTrafficLightAppliedOffsetXKey, @(offsetX), OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+    objc_setAssociatedObject(window, kTrafficLightAppliedOffsetYKey, @(offsetY), OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+}
+
+static void applyTrafficLightOffsetFromDefault(NSWindow *window) {
+    objc_setAssociatedObject(window, kTrafficLightAppliedOffsetXKey, @(0), OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+    objc_setAssociatedObject(window, kTrafficLightAppliedOffsetYKey, @(0), OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+    applyTrafficLightOffset(window);
+}
+
+static void applyWindowButtonPosition(NSWindow *window, double x, double y) {
+    NSButton *closeBtn = [window standardWindowButton:NSWindowCloseButton];
+    NSButton *minimizeBtn = [window standardWindowButton:NSWindowMiniaturizeButton];
+    NSButton *zoomBtn = [window standardWindowButton:NSWindowZoomButton];
+
+    if (!closeBtn || !minimizeBtn || !zoomBtn) return;
+
+    NSView *titlebarView = [closeBtn superview];
+    if (!titlebarView) return;
+
+    NSView *titlebarContainerView = [titlebarView superview];
+    if (!titlebarContainerView) return;
+
+    CGFloat buttonSpacing = 20.0;
+    CGFloat buttonHeight = closeBtn.frame.size.height;
+    CGFloat requiredHeight = y + buttonHeight;
+
+    NSRect containerFrame = titlebarContainerView.frame;
+    containerFrame.size.height = requiredHeight;
+    containerFrame.origin.y = NSHeight(window.frame) - requiredHeight;
+    [titlebarContainerView setFrame:containerFrame];
+
+    NSRect titlebarFrame = titlebarView.frame;
+    titlebarFrame.size.height = requiredHeight;
+    titlebarFrame.origin.y = 0;
+    [titlebarView setFrame:titlebarFrame];
+
+    CGFloat adjustedY = requiredHeight - y - buttonHeight;
+    [closeBtn setFrameOrigin:NSMakePoint(x, adjustedY)];
+    [minimizeBtn setFrameOrigin:NSMakePoint(x + buttonSpacing, adjustedY)];
+    [zoomBtn setFrameOrigin:NSMakePoint(x + 2 * buttonSpacing, adjustedY)];
+}
 
 // Window, tray, menu, and snapshot callbacks are defined in shared/callbacks.h
 // Platform-specific aliases
 typedef SnapshotCallback zigSnapshotCallback;
 typedef StatusItemHandler ZigStatusItemHandler;
 static URLOpenHandler g_urlOpenHandler = nullptr;
+// Buffer for URLs received before the handler is registered (cold-launch race).
+// The NSApp delegate fires on the main thread as soon as the event loop starts,
+// but the Bun Worker thread may not have registered its handler yet.
+// NOTE: This buffering fixes a pre-existing race in URL handling (not just file handling).
+static std::vector<std::string> g_pendingUrlOpenPaths;
+static std::mutex g_urlOpenMutex;
 static AppReopenHandler g_appReopenHandler = nullptr;
 static QuitRequestedHandler g_quitRequestedHandler = nullptr;
 static std::atomic<bool> g_shutdownComplete{false};
@@ -628,6 +741,10 @@ static NSString* normalizeViewsRelativePath(NSString *urlString) {
     NSString *relativePath = [urlString substringFromIndex:8];
     while ([relativePath hasPrefix:@"/"]) {
         relativePath = [relativePath substringFromIndex:1];
+    }
+    // Strip trailing slashes - WebView may normalize URLs without folder components
+    while ([relativePath hasSuffix:@"/"] && [relativePath length] > 0) {
+        relativePath = [relativePath substringToIndex:[relativePath length] - 1];
     }
 
     return relativePath;
@@ -922,6 +1039,9 @@ static NSMutableDictionary<NSNumber *, AbstractView *> *globalAbstractViews = ni
     @property (nonatomic, assign) WindowKeyHandler keyHandler;
     @property (nonatomic, assign) uint32_t windowId;
     @property (nonatomic, strong) NSWindow *window;
+    @property (nonatomic, assign) BOOL hasCustomButtonPosition;
+    @property (nonatomic, assign) double buttonPositionX;
+    @property (nonatomic, assign) double buttonPositionY;
 @end
 
 // ----------------------- Navigation Toolbar -----------------------
@@ -2609,9 +2729,15 @@ runOpenPanelWithParameters:(WKOpenPanelParameters *)parameters
         
         NSString *originString = [NSString stringWithFormat:@"%@://%@", origin.protocol, origin.host];
         std::string originStd = [originString UTF8String];
-        
+
         NSLog(@"WKWebView: Media capture permission requested for %@ (type: %ld)", originString, (long)type);
-        
+
+        // views:// is the app's own bundled-asset shell — always trusted, never prompt.
+        if ([origin.protocol isEqualToString:@"views"]) {
+            decisionHandler(WKPermissionDecisionGrant);
+            return;
+        }
+
         // Check cache first
         PermissionStatus cachedStatus = getPermissionFromCache(originStd, PermissionType::USER_MEDIA);
         
@@ -2679,9 +2805,15 @@ runOpenPanelWithParameters:(WKOpenPanelParameters *)parameters
         
         NSString *originString = [NSString stringWithFormat:@"%@://%@", origin.protocol, origin.host];
         std::string originStd = [originString UTF8String];
-        
+
         NSLog(@"WKWebView: Geolocation permission requested for %@", originString);
-        
+
+        // views:// is the app's own bundled-asset shell — always trusted, never prompt.
+        if ([origin.protocol isEqualToString:@"views"]) {
+            decisionHandler(WKPermissionDecisionGrant);
+            return;
+        }
+
         // Check cache first
         PermissionStatus cachedStatus = getPermissionFromCache(originStd, PermissionType::GEOLOCATION);
         
@@ -5595,7 +5727,13 @@ public:
         
         std::string origin = requesting_origin.ToString();
         NSLog(@"CEF: Media access permission requested for %s (permissions: %u)", origin.c_str(), requested_permissions);
-        
+
+        // views:// is the app's own bundled-asset shell — always trusted, never prompt.
+        if (origin.find("views://") == 0) {
+            callback->Continue(requested_permissions);
+            return true;
+        }
+
         // Check cache first
         PermissionStatus cachedStatus = getPermissionFromCache(origin, PermissionType::USER_MEDIA);
         
@@ -5648,12 +5786,20 @@ public:
         
         std::string origin = requesting_origin.ToString();
         NSLog(@"CEF: Permission prompt requested for %s (permissions: %u)", origin.c_str(), requested_permissions);
-        
+
+        // views:// is the app's own bundled-asset shell — always trusted, never prompt.
+        // This also covers Chromium's new Loopback/Local Network Access gate triggered
+        // by the per-webview RPC websocket to ws://localhost:<port>.
+        if (origin.find("views://") == 0) {
+            callback->Continue(CEF_PERMISSION_RESULT_ACCEPT);
+            return true;
+        }
+
         // Handle different permission types
         PermissionType permType = PermissionType::OTHER;
-        NSString *message = @"This page is requesting additional permissions.\n\nDo you want to allow this?";
-        NSString *title = @"Permission Request";
-        
+        NSString *message = nil;
+        NSString *title = nil;
+
         // Check for specific permission types
         if (requested_permissions & CEF_PERMISSION_TYPE_CAMERA_STREAM ||
             requested_permissions & CEF_PERMISSION_TYPE_MIC_STREAM) {
@@ -5668,8 +5814,16 @@ public:
             permType = PermissionType::NOTIFICATIONS;
             message = @"This page wants to show notifications.\n\nDo you want to allow this?";
             title = @"Notification Permission";
+        } else {
+            // Unrecognized permission type — name what's being requested instead of
+            // a generic "additional permissions" dialog so the user can decide.
+            std::string names = electrobun::describeCefPermissions(requested_permissions);
+            message = [NSString stringWithFormat:
+                @"This page is requesting permission for: %s.\n\nDo you want to allow this?",
+                names.c_str()];
+            title = @"Permission Request";
         }
-        
+
         // Check cache first
         PermissionStatus cachedStatus = getPermissionFromCache(origin, permType);
         
@@ -6040,6 +6194,11 @@ bool initializeCEF() {
     );
     NSString* cachePath = [NSString stringWithUTF8String:cachePathStr.c_str()];
     NSLog(@"[CEF] Using path: %s", cachePathStr.c_str());
+
+    // One-shot wipe if Electrobun's cache format version has been bumped
+    // since the user's last launch. See cache_migration.h.
+    electrobun::migrateCacheFolderIfNeeded(cachePathStr);
+
     CefString(&settings.root_cache_path) = [cachePath UTF8String];
 
     // Set log file path for debugging
@@ -6109,6 +6268,10 @@ public:
                 NSLog(@"DEBUG CEF: Processing views:// URL: %s", urlStr.c_str());
                 // Remove the prefix (8 characters for "views://") - FIXED VERSION v2
                 std::string relativePath = urlStr.substr(8);
+                // Strip trailing slashes - WebView may normalize URLs without folder components
+                while (!relativePath.empty() && (relativePath.back() == '/' || relativePath.back() == '\\')) {
+                    relativePath.pop_back();
+                }
                 NSLog(@"DEBUG CEF FIXED: relativePath = '%s'", relativePath.c_str());
                 
                 // Check if this is the internal HTML request.
@@ -6269,50 +6432,40 @@ public:
 
 
 
+// Platform implementation for partition_context.h — builds the on-disk
+// cache_path for a persistent partition under the macOS Application Support
+// directory, ensuring the directory exists.
+namespace electrobun {
+std::string buildAndEnsurePartitionCachePath(const std::string& partitionName) {
+    NSString* appSupportPath = [NSSearchPathForDirectoriesInDomains(
+        NSApplicationSupportDirectory, NSUserDomainMask, YES) firstObject];
+    if (!appSupportPath) return "";
+
+    std::string cachePathStr = buildCEFPartitionPath(
+        [appSupportPath UTF8String],
+        g_electrobunIdentifier,
+        g_electrobunChannel,
+        "CEF",
+        partitionName);
+
+    NSString* cachePath = [NSString stringWithUTF8String:cachePathStr.c_str()];
+    NSFileManager* fileManager = [NSFileManager defaultManager];
+    if (![fileManager fileExistsAtPath:cachePath]) {
+        [fileManager createDirectoryAtPath:cachePath
+               withIntermediateDirectories:YES
+                                attributes:nil
+                                     error:nil];
+    }
+    return cachePathStr;
+}
+} // namespace electrobun
+
 CefRefPtr<CefRequestContext> CreateRequestContextForPartition(const char* partitionIdentifier,
                                                                uint32_t webviewId) {
-  NSLog(@"DEBUG CEF: CreateRequestContextForPartition called for webview %u, partition: %s", webviewId, partitionIdentifier ? partitionIdentifier : "null");
-  CefRequestContextSettings settings;
-  if (!partitionIdentifier || !partitionIdentifier[0]) {
-    settings.persist_session_cookies = false;
-  } else {
-    std::string identifier(partitionIdentifier);
-    bool isPersistent = identifier.substr(0, 8) == "persist:";
-
-    if (isPersistent) {
-      std::string partitionName = identifier.substr(8);
-      NSString* appSupportPath = [NSSearchPathForDirectoriesInDomains(NSApplicationSupportDirectory, NSUserDomainMask, YES) firstObject];
-
-      // Build path with identifier/channel structure to match root_cache_path logic
-      std::string cachePathStr = buildPartitionPath(
-          [appSupportPath UTF8String],
-          g_electrobunIdentifier,
-          g_electrobunChannel,
-          "CEF",
-          partitionName
-      );
-      NSString* cachePath = [NSString stringWithUTF8String:cachePathStr.c_str()];
-      NSFileManager *fileManager = [NSFileManager defaultManager];
-      if (![fileManager fileExistsAtPath:cachePath]) {
-        [fileManager createDirectoryAtPath:cachePath withIntermediateDirectories:YES attributes:nil error:nil];
-      }
-      settings.persist_session_cookies = true;
-      CefString(&settings.cache_path).FromString([cachePath UTF8String]);
-    } else {
-      settings.persist_session_cookies = false;
-    }
-  }
-
-  CefRefPtr<CefRequestContext> context = CefRequestContext::CreateContext(settings, nullptr);
-
-  // Register scheme handler factory for this request context
-  // Note: Each CefRequestContext needs its own registration - it's not global
-  static CefRefPtr<ElectrobunSchemeHandlerFactory> schemeFactory = new ElectrobunSchemeHandlerFactory();
-  bool registered = context->RegisterSchemeHandlerFactory("views", "", schemeFactory);
-  NSLog(@"DEBUG CEF: Registered scheme handler factory for partition '%s' - success: %s",
-        partitionIdentifier ? partitionIdentifier : "(default)", registered ? "yes" : "no");
-
-  return context;
+    static CefRefPtr<ElectrobunSchemeHandlerFactory> schemeFactory =
+        new ElectrobunSchemeHandlerFactory();
+    return electrobun::getOrCreateRequestContextForPartition(
+        partitionIdentifier, webviewId, schemeFactory);
 }
 
 // ----------------------- CEFWebViewImpl -----------------------
@@ -6479,8 +6632,11 @@ CefRefPtr<CefRequestContext> CreateRequestContextForPartition(const char* partit
                     [self setPassthrough:YES];
                 }
 
-                if (url && url[0] != '\0') {
+                if (self.browser && url && url[0] != '\0') {
                     self.browser->GetMainFrame()->LoadURL(CefString(url));
+                } else if (!self.browser) {
+                    NSLog(@"ERROR CEF: CreateBrowserSync returned null for webview %u (partition: %s) — initial URL not loaded",
+                          webviewId, partitionIdentifier ? partitionIdentifier : "(default)");
                 }
             };
             
@@ -6772,11 +6928,13 @@ CefRefPtr<CefRequestContext> CreateRequestContextForPartition(const char* partit
 
     // Handle URLs opened via custom URL schemes (deep linking)
     - (void)application:(NSApplication *)application openURLs:(NSArray<NSURL *> *)urls {
+        std::lock_guard<std::mutex> lock(g_urlOpenMutex);
         for (NSURL *url in urls) {
             if (g_urlOpenHandler) {
                 g_urlOpenHandler([[url absoluteString] UTF8String]);
             } else {
-                NSLog(@"[URL Handler] Received URL but no handler registered: %@", url);
+                // Buffer the URL — the Bun Worker hasn't registered its handler yet.
+                g_pendingUrlOpenPaths.push_back(std::string([[url absoluteString] UTF8String]));
             }
         }
     }
@@ -6829,7 +6987,7 @@ CefRefPtr<CefRequestContext> CreateRequestContextForPartition(const char* partit
             self.closeHandler(self.windowId);
         }
     }
-   - (void)windowDidResize:(NSNotification *)notification {
+    - (void)windowDidResize:(NSNotification *)notification {
         NSWindow *window = [notification object];
         NSRect windowFrame = [window frame];
         ContainerView *containerView = [window contentView];
@@ -6850,6 +7008,31 @@ CefRefPtr<CefRequestContext> CreateRequestContextForPartition(const char* partit
             NSRect contentRect = [window contentRectForFrameRect:windowFrame];
             self.resizeHandler(self.windowId, windowFrame.origin.x, windowFrame.origin.y,
                                contentRect.size.width, contentRect.size.height);
+        }
+
+        if (self.hasCustomButtonPosition) {
+            applyWindowButtonPosition(window, self.buttonPositionX, self.buttonPositionY);
+        } else {
+            applyTrafficLightOffsetFromDefault(window);
+        }
+    }
+    - (void)windowWillExitFullScreen:(NSNotification *)notification {
+        if (self.hasCustomButtonPosition) {
+            NSWindow *window = [notification object];
+            [[window standardWindowButton:NSWindowCloseButton] setHidden:YES];
+            [[window standardWindowButton:NSWindowMiniaturizeButton] setHidden:YES];
+            [[window standardWindowButton:NSWindowZoomButton] setHidden:YES];
+        }
+    }
+    - (void)windowDidExitFullScreen:(NSNotification *)notification {
+        NSWindow *window = [notification object];
+        if (self.hasCustomButtonPosition) {
+            applyWindowButtonPosition(window, self.buttonPositionX, self.buttonPositionY);
+            [[window standardWindowButton:NSWindowCloseButton] setHidden:NO];
+            [[window standardWindowButton:NSWindowMiniaturizeButton] setHidden:NO];
+            [[window standardWindowButton:NSWindowZoomButton] setHidden:NO];
+        } else {
+            applyTrafficLightOffsetFromDefault(window);
         }
     }
     - (void)windowDidMove:(NSNotification *)notification {
@@ -7722,12 +7905,19 @@ NSWindow *createNSWindowWithFrameAndStyle(uint32_t windowId,
     }
     
     [window setFrameTopLeftPoint:config.frame.origin];
+    // Allow hidden titlebar windows to participate in native fullscreen.
+    [window setCollectionBehavior:
+        [window collectionBehavior] | NSWindowCollectionBehaviorFullScreenPrimary];
     if (strcmp(config.titleBarStyle, "hiddenInset") == 0 ||
         strcmp(config.titleBarStyle, "hidden") == 0) {
         window.titlebarAppearsTransparent = YES;
         window.titleVisibility = NSWindowTitleHidden;
     }
-
+    objc_setAssociatedObject(window, kTrafficLightTitleBarStyleKey, [NSString stringWithUTF8String:config.titleBarStyle ?: "default"], OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+    objc_setAssociatedObject(window, kTrafficLightOffsetXKey, @(config.trafficLightOffsetX), OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+    objc_setAssociatedObject(window, kTrafficLightOffsetYKey, @(config.trafficLightOffsetY), OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+    objc_setAssociatedObject(window, kTrafficLightAppliedOffsetXKey, @(0), OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+    objc_setAssociatedObject(window, kTrafficLightAppliedOffsetYKey, @(0), OBJC_ASSOCIATION_RETAIN_NONATOMIC);
     WindowDelegate *delegate = [[WindowDelegate alloc] init];
     delegate.closeHandler = zigCloseHandler;
     delegate.resizeHandler = zigResizeHandler;
@@ -7781,6 +7971,8 @@ extern "C" NSWindow *createWindowWithFrameAndStyleFromWorker(
   const char* titleBarStyle,
   bool transparent,
   bool toolbar,
+  double trafficLightOffsetX,
+  double trafficLightOffsetY,
   WindowCloseHandler zigCloseHandler,
   WindowMoveHandler zigMoveHandler,
   WindowResizeHandler zigResizeHandler,
@@ -7802,6 +7994,8 @@ extern "C" NSWindow *createWindowWithFrameAndStyleFromWorker(
         .styleMask = styleMask,
         .titleBarStyle = titleBarStyle,
         .toolbar = toolbar,
+        .trafficLightOffsetX = trafficLightOffsetX,
+        .trafficLightOffsetY = trafficLightOffsetY
     };
 
     // Use a dispatch semaphore to wait for the window creation to complete
@@ -7836,16 +8030,40 @@ extern "C" NSWindow *createWindowWithFrameAndStyleFromWorker(
     return window;
 }
 
-extern "C" void showWindow(NSWindow *window) {
+extern "C" void showWindow(NSWindow *window, bool activate) {
     dispatch_sync(dispatch_get_main_queue(), ^{
-        if ([window isKindOfClass:[NSPanel class]]) {
-            [window orderFrontRegardless];
-            [window makeKeyWindow];
+        if (activate) {
+            if ([window isKindOfClass:[NSPanel class]]) {
+                [window orderFrontRegardless];
+                [window makeKeyWindow];
+            } else {
+                [window orderFront:nil];
+                [window makeKeyAndOrderFront:nil];
+                [[NSApplication sharedApplication] activateIgnoringOtherApps:YES];
+            }
         } else {
-            [window orderFront:nil];
-            [window makeKeyAndOrderFront:nil];
-            [[NSApplication sharedApplication] activateIgnoringOtherApps:YES];
+            [window orderFrontRegardless];
         }
+
+        dispatch_async(dispatch_get_main_queue(), ^{
+            WindowDelegate *delegate = (WindowDelegate *)[window delegate];
+            if (delegate && delegate.hasCustomButtonPosition) {
+                applyWindowButtonPosition(window, delegate.buttonPositionX, delegate.buttonPositionY);
+            } else {
+                applyTrafficLightOffset(window);
+            }
+        });
+    });
+}
+
+extern "C" void activateWindow(NSWindow *window) {
+    dispatch_sync(dispatch_get_main_queue(), ^{
+        if (![window isVisible]) {
+            return;
+        }
+
+        [window makeKeyAndOrderFront:nil];
+        [[NSApplication sharedApplication] activateIgnoringOtherApps:YES];
     });
 }
 
@@ -7960,6 +8178,21 @@ extern "C" void setWindowPosition(NSWindow *window, double x, double y) {
         // Convert from top-left origin (what users expect) to bottom-left origin (what macOS uses)
         CGFloat adjustedY = screenHeight - y - windowHeight;
         [window setFrameOrigin:NSMakePoint(x, adjustedY)];
+    });
+}
+
+extern "C" void setWindowButtonPosition(NSWindow *window, double x, double y) {
+    dispatch_async(dispatch_get_main_queue(), ^{
+        if (!window) return;
+
+        WindowDelegate *delegate = (WindowDelegate *)[window delegate];
+        if (delegate) {
+            delegate.hasCustomButtonPosition = YES;
+            delegate.buttonPositionX = x;
+            delegate.buttonPositionY = y;
+        }
+
+        applyWindowButtonPosition(window, x, y);
     });
 }
 
@@ -8872,9 +9105,19 @@ extern "C" bool getAppIconToPath(const char* appPath, const char* outputPath, in
 // URL Scheme / Deep Linking API
 // ============================================================================
 
-// setURLOpenHandler - Set the callback for handling URLs opened via custom URL schemes
+// setURLOpenHandler - Set the callback for handling URLs opened via custom URL schemes.
+// Flushes any URLs that arrived before the handler was registered (cold-launch).
 extern "C" void setURLOpenHandler(URLOpenHandler handler) {
-    g_urlOpenHandler = handler;
+    std::vector<std::string> pending;
+    {
+        std::lock_guard<std::mutex> lock(g_urlOpenMutex);
+        g_urlOpenHandler = handler;
+        pending = std::move(g_pendingUrlOpenPaths);
+    }
+    // Deliver outside the lock to avoid holding it during the FFI call into Bun
+    for (const auto& url : pending) {
+        handler(url.c_str());
+    }
 }
 
 extern "C" void setAppReopenHandler(AppReopenHandler handler) {
