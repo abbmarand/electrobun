@@ -623,10 +623,17 @@ async function copyToDist() {
 	}
 	// Electrobun cli and npm launcher
 	await $`cp src/npmbin/index.js dist/npmbin.js`;
-	await $`cp src/cli/build/electrobun${binExt} dist/electrobun${binExt}`;
-	// Also copy to bin/ so the npm bin shim (bin/electrobun.cjs) can find it
-	// during local dev (kitchen uses "electrobun": "file:../package")
-	await $`mkdir -p bin && cp src/cli/build/electrobun${binExt} bin/electrobun${binExt}`;
+	const builtCliPath = join("src", "cli", "build", `electrobun${binExt}`);
+	if (existsSync(builtCliPath)) {
+		await $`cp ${builtCliPath} dist/electrobun${binExt}`;
+		// Also copy to bin/ so the npm bin shim (bin/electrobun.cjs) can find it
+		// during local dev (kitchen uses "electrobun": "file:../package")
+		await $`mkdir -p bin && cp ${builtCliPath} bin/electrobun${binExt}`;
+	} else if (OS === "win") {
+		console.warn("Skipping compiled Windows CLI copy; workspace bin shim will run src/cli/index.ts");
+	} else {
+		throw new Error(`Electrobun CLI was not built at ${builtCliPath}`);
+	}
 	// Electrobun's Typescript bun and browser apis
 	await copyApiFiles();
 	// Native code and frameworks
@@ -816,7 +823,7 @@ async function createDistFolder() {
 
 async function BunInstall() {
 	// Use vendored Bun for consistency with CI
-	await $`${PATH.bun.RUNTIME} install`;
+	await $`${PATH.bun.RUNTIME} install --ignore-scripts`;
 }
 
 async function vendorBun() {
@@ -2085,7 +2092,11 @@ async function buildLauncher() {
 		}
 	}
 
-	if (CHANNEL === "debug") {
+	if (OS === "win") {
+		// Packaged Windows apps must never be console-subsystem binaries.
+		// Dev console output can still be forced at runtime with ELECTROBUN_CONSOLE=1.
+		await $`cd src/launcher && ../../vendors/zig/zig build -Doptimize=ReleaseSmall ${zigArgs}`;
+	} else if (CHANNEL === "debug") {
 		await $`cd src/launcher && ../../vendors/zig/zig build ${zigArgs}`;
 	} else if (CHANNEL === "release") {
 		await $`cd src/launcher && ../../vendors/zig/zig build -Doptimize=ReleaseSmall ${zigArgs}`;
@@ -2136,21 +2147,47 @@ async function buildCli() {
 		process.platform === "win32"
 			? ["--target=bun-windows-x64-baseline"]
 			: [];
+	const cliSourceDir = join(process.cwd(), "src", "cli");
+	const cliOutfile = join(cliSourceDir, "build", "electrobun");
+	const cliExe = `${cliOutfile}${binExt}`;
+
+	const newestCliSourceMtime = (dir: string): number => {
+		let newest = statSync(dir).mtimeMs;
+		for (const entry of readdirSync(dir, { withFileTypes: true })) {
+			if (entry.name === "build") continue;
+			const entryPath = join(dir, entry.name);
+			if (entry.isDirectory()) {
+				newest = Math.max(newest, newestCliSourceMtime(entryPath));
+			} else {
+				newest = Math.max(newest, statSync(entryPath).mtimeMs);
+			}
+		}
+		return newest;
+	};
 
 	// On Windows, bun's bundler can't follow SYMLINKD directory symlinks in the bun
-	// link-farm (node_modules/.bun/...) when running as a subprocess, causing EACCES.
-	// Skip the rebuild if the CLI exe already exists — it can be built manually with:
+	// link-farm (node_modules/.bun/...) when running as a subprocess, causing EACCES
+	// in some setups. Reuse the existing exe only when it is newer than CLI sources.
 	//   bun build src/cli/index.ts --compile --target=bun-windows-x64-baseline --outfile src/cli/build/electrobun
 	if (isWindows) {
-		const cliExe = join(process.cwd(), "src", "cli", "build", "electrobun.exe");
-		if (existsSync(cliExe)) {
-			console.log("CLI already built at", cliExe, "— skipping rebuild on Windows");
+		if (
+			existsSync(cliExe) &&
+			statSync(cliExe).mtimeMs >= newestCliSourceMtime(cliSourceDir)
+		) {
+			console.log("CLI already built at", cliExe, "- skipping rebuild on Windows");
 			return;
 		}
-		await $`${PATH.bun.RUNTIME} build src/cli/index.ts --compile ${compileTarget} --outfile src/cli/build/electrobun`;
+		try {
+			await $`${PATH.bun.RUNTIME} build src/cli/index.ts --compile ${compileTarget} --outfile ${cliOutfile}`;
+		} catch (error) {
+			console.warn(
+				"Skipping compiled Windows CLI rebuild; workspace bin shim can run src/cli/index.ts directly.",
+			);
+			console.warn(error);
+		}
 	} else {
 		// Use vendored Bun for building CLI to ensure consistency with CI and proper code signing
-		await $`BUN_INSTALL_CACHE_DIR=/tmp/bun-cache ${PATH.bun.RUNTIME} build src/cli/index.ts --compile ${compileTarget} --outfile src/cli/build/electrobun`;
+		await $`BUN_INSTALL_CACHE_DIR=/tmp/bun-cache ${PATH.bun.RUNTIME} build src/cli/index.ts --compile ${compileTarget} --outfile ${cliOutfile}`;
 	}
 }
 

@@ -103,6 +103,36 @@ fn isDevBuild(allocator: std.mem.Allocator, exe_dir: []const u8) bool {
     return false;
 }
 
+fn getWindowsRuntimeName(allocator: std.mem.Allocator, exe_dir: []const u8) []const u8 {
+    const fallback = "bun.exe";
+    const version_path = std.fs.path.join(allocator, &.{ exe_dir, "..", "Resources", "version.json" }) catch return fallback;
+
+    const file = std.fs.openFileAbsolute(version_path, .{}) catch return fallback;
+    defer file.close();
+
+    const content = file.readToEndAlloc(allocator, 1024 * 10) catch return fallback;
+    const parsed = std.json.parseFromSlice(std.json.Value, allocator, content, .{}) catch return fallback;
+    defer parsed.deinit();
+
+    const name_value = parsed.value.object.get("name") orelse return fallback;
+    if (name_value != .string or name_value.string.len == 0) return fallback;
+
+    var runtime_name = std.ArrayList(u8).init(allocator);
+    for (name_value.string) |ch| {
+        switch (ch) {
+            '<', '>', ':', '"', '/', '\\', '|', '?', '*' => runtime_name.append('_') catch return fallback,
+            else => runtime_name.append(ch) catch return fallback,
+        }
+    }
+    runtime_name.appendSlice(".exe") catch return fallback;
+    const runtime_name_slice = runtime_name.toOwnedSlice() catch return fallback;
+
+    const runtime_path = std.fs.path.join(allocator, &.{ exe_dir, runtime_name_slice }) catch return fallback;
+    std.fs.accessAbsolute(runtime_path, .{}) catch return fallback;
+
+    return runtime_name_slice;
+}
+
 // SIGALRM handler - safety net timeout for hung shutdowns
 fn alarmHandler(_: c_int) callconv(.C) void {
     // Timeout expired - app hung during shutdown. Kill entire process group.
@@ -169,7 +199,7 @@ pub fn main() !void {
         .linux, .windows => {
             // Linux/Windows: launcher is in bin/, resources in Resources/
             resources_path = try std.fs.path.join(arena_alloc, &.{ exe_dir, "..", "Resources", "main.js" });
-            const bun_name = if (builtin.os.tag == .windows) "bun.exe" else "bun";
+            const bun_name = if (builtin.os.tag == .windows) getWindowsRuntimeName(arena_alloc, exe_dir) else "bun";
             argv = &[_][]const u8{ try std.fs.path.join(arena_alloc, &.{ exe_dir, bun_name }), resources_path };
         },
         else => @panic("Unsupported platform"),

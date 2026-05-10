@@ -13,9 +13,6 @@ import {
 	symlinkSync,
 	statSync,
 	renameSync,
-	openSync,
-	writeSync,
-	closeSync,
 } from "fs";
 import { execFileSync, execSync, spawnSync } from "child_process";
 import { createRequire } from "module";
@@ -1683,6 +1680,195 @@ function escapePathForTerminal(path: string): string {
 	}
 }
 
+function escapeNsisString(value: string): string {
+	return value
+		.replace(/\$/g, "$$")
+		.replace(/"/g, '$\\"')
+		.replace(/\r?\n/g, " ");
+}
+
+function escapeNsisPath(value: string): string {
+	return escapeNsisString(value.replace(/\//g, "\\"));
+}
+
+function getWindowsIconPath(
+	projectRoot: string,
+	icon: string | undefined,
+): string {
+	if (!icon) return "";
+	const iconSourcePath =
+		icon.startsWith("/") || icon.match(/^[a-zA-Z]:/)
+			? icon
+			: join(projectRoot, icon);
+
+	if (!existsSync(iconSourcePath)) {
+		console.warn(`Warning: Windows icon not found at ${iconSourcePath}`);
+		return "";
+	}
+
+	if (iconSourcePath.toLowerCase().endsWith(".ico")) {
+		return iconSourcePath;
+	}
+
+	console.warn(
+		`Warning: NSIS installer icon must be an .ico file. Skipping ${iconSourcePath}`,
+	);
+	return "";
+}
+
+function resolveMakensisPath(): string {
+	const candidates = [
+		process.env["MAKENSIS_PATH"],
+		process.env["ProgramFiles(x86)"]
+			? join(process.env["ProgramFiles(x86)"], "NSIS", "makensis.exe")
+			: undefined,
+		process.env["ProgramFiles"]
+			? join(process.env["ProgramFiles"], "NSIS", "makensis.exe")
+			: undefined,
+	].filter((candidate): candidate is string => Boolean(candidate));
+
+	for (const candidate of candidates) {
+		if (existsSync(candidate)) {
+			return candidate;
+		}
+	}
+
+	return "makensis";
+}
+
+async function createWindowsNsisInstaller(options: {
+	buildFolder: string;
+	appBundleFolderPath: string;
+	appName: string;
+	appIdentifier: string;
+	appVersion: string;
+	buildEnvironment: string;
+	projectRoot: string;
+	icon?: string;
+}): Promise<string> {
+	const {
+		buildFolder,
+		appBundleFolderPath,
+		appName,
+		appIdentifier,
+		appVersion,
+		buildEnvironment,
+		projectRoot,
+		icon,
+	} = options;
+
+	if (!existsSync(appBundleFolderPath)) {
+		throw new Error(`Windows app bundle not found: ${appBundleFolderPath}`);
+	}
+
+	const setupFileName = getWindowsSetupFileName(appName, buildEnvironment);
+	const outputExePath = join(buildFolder, setupFileName);
+	const nsisScriptPath = join(buildFolder, `${setupFileName}.nsi`);
+	const installRoot = `$LOCALAPPDATA\\${appIdentifier}\\${buildEnvironment}`;
+	const appInstallDir = "$INSTDIR\\app";
+	const shortcutName =
+		buildEnvironment === "stable" ? appName : `${appName} ${buildEnvironment}`;
+	const uninstallKey = `${appIdentifier}.${buildEnvironment}`;
+	const iconPath = getWindowsIconPath(projectRoot, icon);
+	const iconLines = iconPath
+		? `Icon "${escapeNsisPath(iconPath)}"\nUninstallIcon "${escapeNsisPath(iconPath)}"\n`
+		: "";
+
+	const nsisScript = `Unicode true
+!include MUI2.nsh
+RequestExecutionLevel user
+SetCompressor /SOLID lzma
+Name "${escapeNsisString(shortcutName)}"
+OutFile "${escapeNsisPath(outputExePath)}"
+InstallDir "${installRoot}"
+${iconLines}!define MUI_ABORTWARNING
+!define MUI_FINISHPAGE_NOAUTOCLOSE
+!insertmacro MUI_PAGE_INSTFILES
+!insertmacro MUI_UNPAGE_INSTFILES
+!insertmacro MUI_LANGUAGE "English"
+
+ShowInstDetails hide
+ShowUninstDetails hide
+AutoCloseWindow true
+
+Function CloseRunningApp
+	nsExec::ExecToLog 'powershell -NoProfile -ExecutionPolicy Bypass -Command "$$ErrorActionPreference = ''SilentlyContinue''; Get-Process | Where-Object { $$_.Path -and $$_.Path.StartsWith(''$INSTDIR\\app\\'', [System.StringComparison]::OrdinalIgnoreCase) } | Stop-Process -Force"'
+	Sleep 1000
+FunctionEnd
+
+Section "Install"
+	SetShellVarContext current
+	SetOutPath "$INSTDIR"
+	Call CloseRunningApp
+	CreateDirectory "$INSTDIR"
+	CreateDirectory "${appInstallDir}"
+	RMDir /r "${appInstallDir}"
+	CreateDirectory "${appInstallDir}"
+	SetOutPath "${appInstallDir}"
+	File /r "${escapeNsisPath(appBundleFolderPath)}\\*.*"
+
+	WriteUninstaller "$INSTDIR\\Uninstall.exe"
+
+	CreateDirectory "$SMPROGRAMS\\${escapeNsisString(shortcutName)}"
+	CreateShortcut "$SMPROGRAMS\\${escapeNsisString(shortcutName)}\\${escapeNsisString(shortcutName)}.lnk" "${appInstallDir}\\bin\\launcher.exe" "" "${appInstallDir}\\bin\\launcher.exe" 0
+	CreateShortcut "$DESKTOP\\${escapeNsisString(shortcutName)}.lnk" "${appInstallDir}\\bin\\launcher.exe" "" "${appInstallDir}\\bin\\launcher.exe" 0
+
+	WriteRegStr HKCU "Software\\Microsoft\\Windows\\CurrentVersion\\Uninstall\\${escapeNsisString(uninstallKey)}" "DisplayName" "${escapeNsisString(shortcutName)}"
+	WriteRegStr HKCU "Software\\Microsoft\\Windows\\CurrentVersion\\Uninstall\\${escapeNsisString(uninstallKey)}" "DisplayVersion" "${escapeNsisString(appVersion)}"
+	WriteRegStr HKCU "Software\\Microsoft\\Windows\\CurrentVersion\\Uninstall\\${escapeNsisString(uninstallKey)}" "Publisher" "${escapeNsisString(appName)}"
+	WriteRegStr HKCU "Software\\Microsoft\\Windows\\CurrentVersion\\Uninstall\\${escapeNsisString(uninstallKey)}" "InstallLocation" "$INSTDIR"
+	WriteRegStr HKCU "Software\\Microsoft\\Windows\\CurrentVersion\\Uninstall\\${escapeNsisString(uninstallKey)}" "DisplayIcon" "${appInstallDir}\\bin\\launcher.exe"
+	WriteRegStr HKCU "Software\\Microsoft\\Windows\\CurrentVersion\\Uninstall\\${escapeNsisString(uninstallKey)}" "UninstallString" "$\\"$INSTDIR\\Uninstall.exe$\\""
+	WriteRegDWORD HKCU "Software\\Microsoft\\Windows\\CurrentVersion\\Uninstall\\${escapeNsisString(uninstallKey)}" "NoModify" 1
+	WriteRegDWORD HKCU "Software\\Microsoft\\Windows\\CurrentVersion\\Uninstall\\${escapeNsisString(uninstallKey)}" "NoRepair" 1
+
+	IfSilent +2 0
+	Exec '"${appInstallDir}\\bin\\launcher.exe"'
+SectionEnd
+
+Section "Uninstall"
+	SetShellVarContext current
+	Call un.CloseRunningApp
+	Delete "$DESKTOP\\${escapeNsisString(shortcutName)}.lnk"
+	Delete "$SMPROGRAMS\\${escapeNsisString(shortcutName)}\\${escapeNsisString(shortcutName)}.lnk"
+	RMDir "$SMPROGRAMS\\${escapeNsisString(shortcutName)}"
+
+	RMDir /r "$INSTDIR\\app"
+	RMDir /r "$INSTDIR\\self-extraction"
+	Delete "$INSTDIR\\update.bat"
+	Delete "$INSTDIR\\Uninstall.exe"
+	DeleteRegKey HKCU "Software\\Microsoft\\Windows\\CurrentVersion\\Uninstall\\${escapeNsisString(uninstallKey)}"
+	RMDir "$INSTDIR"
+SectionEnd
+
+Function un.CloseRunningApp
+	nsExec::ExecToLog 'powershell -NoProfile -ExecutionPolicy Bypass -Command "$$ErrorActionPreference = ''SilentlyContinue''; Get-Process | Where-Object { $$_.Path -and $$_.Path.StartsWith(''$INSTDIR\\app\\'', [System.StringComparison]::OrdinalIgnoreCase) } | Stop-Process -Force"'
+	Sleep 1000
+FunctionEnd
+`;
+
+	writeFileSync(nsisScriptPath, nsisScript);
+	console.log(`Creating NSIS Windows installer: ${outputExePath}`);
+
+	const result = spawnSync(resolveMakensisPath(), [nsisScriptPath], {
+		cwd: buildFolder,
+		stdio: "inherit",
+	});
+	if (result.error) {
+		throw new Error(
+			`Failed to run makensis. Install NSIS and ensure makensis is on PATH. ${result.error.message}`,
+		);
+	}
+	if (result.status !== 0) {
+		throw new Error(`makensis failed with exit code ${result.status}`);
+	}
+	if (!existsSync(outputExePath)) {
+		throw new Error(`NSIS installer was not created: ${outputExePath}`);
+	}
+
+	return outputExePath;
+}
+
 /**
  * Creates a Linux installer tar.gz containing:
  * - Self-extracting installer executable (with embedded app archive)
@@ -2608,6 +2794,11 @@ usageDescriptions : ""}${urlTypes ? "\n" + urlTypes : ""}${documentTypes ?
 			mkdirSync(destLauncherFolder, { recursive: true });
 		}
 
+		if (targetOS === "win") {
+			rmSync(join(appBundleMacOSPath, "launcher"), { force: true });
+			rmSync(bunCliLauncherDestination, { force: true });
+		}
+
 		cpSync(bunCliLauncherBinarySource, bunCliLauncherDestination, {
 			recursive: true,
 			dereference: true,
@@ -2621,10 +2812,12 @@ usageDescriptions : ""}${urlTypes ? "\n" + urlTypes : ""}${documentTypes ?
 			// Use PowerShell to force rename and add .exe extension
 			// This bypasses Bun's PATHEXT behavior that treats launcher and launcher.exe as the same
 			try {
-				execSync(
-					`powershell -Command "if (Test-Path '${launcherWithoutExt}') { Rename-Item -Path '${launcherWithoutExt}' -NewName 'launcher.exe' -Force }"`,
-					{ stdio: "pipe" },
-				);
+				if (!existsSync(bunCliLauncherDestination) && existsSync(launcherWithoutExt)) {
+					execSync(
+						`powershell -Command "Rename-Item -Path '${launcherWithoutExt}' -NewName 'launcher.exe' -Force"`,
+						{ stdio: "pipe" },
+					);
+				}
 				console.log(`Ensured launcher has .exe extension on Windows`);
 			} catch (error) {
 				console.warn(
@@ -2710,8 +2903,10 @@ usageDescriptions : ""}${urlTypes ? "\n" + urlTypes : ""}${documentTypes ?
 		);
 		// Note: .bin/bun binary in node_modules is a symlink to the versioned one in another place
 		// in node_modules, so we have to dereference here to get the actual binary in the bundle.
+		const windowsRuntimeFileName = `${config.app.name.replace(/[<>:"/\\|?*]/g, "_")}.exe`;
+		const runtimeFileName = targetOS === "win" ? windowsRuntimeFileName : "bun";
 		const bunBinaryDestInBundlePath =
-			join(appBundleMacOSPath, "bun") + targetBinExt;
+			join(appBundleMacOSPath, runtimeFileName) + (targetOS === "win" ? "" : targetBinExt);
 		const destFolder2 = dirname(bunBinaryDestInBundlePath);
 		if (!existsSync(destFolder2)) {
 			// console.info('creating folder: ', destFolder);
@@ -2749,7 +2944,8 @@ usageDescriptions : ""}${urlTypes ? "\n" + urlTypes : ""}${documentTypes ?
 			}
 		}
 
-		// Embed icon into bun.exe on Windows
+		// Embed icon into the app runtime on Windows so Task Manager and crash dialogs
+		// show the application identity rather than Bun's.
 		if (targetOS === "win" && config.build.win?.icon) {
 			const iconSourcePath =
 				config.build.win.icon.startsWith("/") ||
@@ -2758,7 +2954,7 @@ usageDescriptions : ""}${urlTypes ? "\n" + urlTypes : ""}${documentTypes ?
 					: join(projectRoot, config.build.win.icon);
 
 			if (existsSync(iconSourcePath)) {
-				console.log(`Embedding icon into bun.exe: ${iconSourcePath}`);
+				console.log(`Embedding icon into ${windowsRuntimeFileName}: ${iconSourcePath}`);
 				try {
 					let iconPath = iconSourcePath;
 
@@ -2770,11 +2966,11 @@ usageDescriptions : ""}${urlTypes ? "\n" + urlTypes : ""}${documentTypes ?
 						writeFileSync(tempIcoPath, new Uint8Array(icoBuffer));
 						iconPath = tempIcoPath;
 						console.log(
-							`Converted PNG to ICO format for bun.exe: ${tempIcoPath}`,
+							`Converted PNG to ICO format for ${windowsRuntimeFileName}: ${tempIcoPath}`,
 						);
 					}
 
-					// Use rcedit to embed the icon and version info into bun.exe
+					// Use rcedit to embed the icon and version info into the app runtime.
 					runRcedit(bunBinaryDestInBundlePath, [
 						"--set-icon",
 						iconPath,
@@ -2791,15 +2987,21 @@ usageDescriptions : ""}${urlTypes ? "\n" + urlTypes : ""}${documentTypes ?
 						"--set-version-string",
 						"CompanyName",
 						config.app.identifier,
+						"--set-version-string",
+						"InternalName",
+						config.app.name,
+						"--set-version-string",
+						"OriginalFilename",
+						windowsRuntimeFileName,
 					]);
-					console.log(`Successfully embedded icon into bun.exe`);
+					console.log(`Successfully embedded icon into ${windowsRuntimeFileName}`);
 
 					// Clean up temp ICO file
 					if (iconPath !== iconSourcePath && existsSync(iconPath)) {
 						unlinkSync(iconPath);
 					}
 				} catch (error) {
-					console.warn(`Warning: Failed to embed icon into bun.exe: ${error}`);
+					console.warn(`Warning: Failed to embed icon into ${windowsRuntimeFileName}: ${error}`);
 				}
 			}
 		}
@@ -3881,8 +4083,9 @@ usageDescriptions : ""}${urlTypes ? "\n" + urlTypes : ""}${documentTypes ?
 			// Tar the app bundle for all platforms
 			createTar(tarPath, buildFolder, [basename(appBundleFolderPath)]);
 
-			// Remove the app bundle folder after tarring (except on Linux where it might be needed for dev)
-			if (targetOS !== "linux" || buildEnvironment !== "dev") {
+			// Keep the Windows app folder available so NSIS can package the
+			// actual installed directory. Other platforms package from the tar.
+			if (targetOS !== "win" && (targetOS !== "linux" || buildEnvironment !== "dev")) {
 				rmSync(appBundleFolderPath, { recursive: true });
 			}
 
@@ -4113,214 +4316,209 @@ usageDescriptions : ""}${urlTypes ? "\n" + urlTypes : ""}${documentTypes ?
 				unlinkSync(tarPath);
 			}
 
-			const selfExtractingBundle = createAppBundle(
-				bundleName,
-				buildFolder,
-				targetOS,
-			);
-			const compressedTarballInExtractingBundlePath = join(
-				selfExtractingBundle.appBundleFolderResourcesPath,
-				`${hash}.tar.zst`,
-			);
-
-			// copy the zstd tarball to the self-extracting app bundle
-			cpSync(compressedTarPath, compressedTarballInExtractingBundlePath, {
-				dereference: true,
-			});
-
-			const selfExtractorBinSourcePath = targetPaths.EXTRACTOR;
-			const selfExtractorBinDestinationPath = join(
-				selfExtractingBundle.appBundleMacOSPath,
-				"launcher",
-			);
-
-			cpSync(selfExtractorBinSourcePath, selfExtractorBinDestinationPath, {
-				dereference: true,
-			});
-
-			buildIcons(
-				selfExtractingBundle.appBundleFolderResourcesPath,
-				selfExtractingBundle.appBundleFolderPath,
-			);
-			await Bun.write(
-				join(selfExtractingBundle.appBundleFolderContentsPath, "Info.plist"),
-				InfoPlistContents,
-			);
-
-			// Write metadata.json to outer bundle (consistent with Windows/Linux)
-			const extractorMetadata = {
-				identifier: config.app.identifier,
-				name: config.app.name,
-				channel: buildEnvironment,
-				hash: hash,
-			};
-			await Bun.write(
-				join(
-					selfExtractingBundle.appBundleFolderResourcesPath,
-					"metadata.json",
-				),
-				JSON.stringify(extractorMetadata, null, 2),
-			);
-
-			// Run postWrap hook after self-extracting bundle is created, before code signing
-			// This is where you can add files to the wrapper (e.g., for liquid glass support)
-			runHook("postWrap", {
-				ELECTROBUN_WRAPPER_BUNDLE_PATH:
-					selfExtractingBundle.appBundleFolderPath,
-			});
-
-			if (shouldCodesign) {
-				codesignAppBundle(
-					selfExtractingBundle.appBundleFolderPath,
-					join(buildFolder, "entitlements.plist"),
-					config,
-				);
-			} else {
-				console.log("skipping codesign");
-			}
-
-			// Note: we need to notarize the original app bundle, the self-extracting app bundle, and the dmg
-			if (shouldNotarize) {
-				notarizeAndStaple(selfExtractingBundle.appBundleFolderPath, config);
-			} else {
-				console.log("skipping notarization");
-			}
-
-			// DMG creation for macOS only
-			if (targetOS === "macos" && config.build.mac?.createDmg !== false) {
-				console.log("creating dmg...");
-				const finalDmgPath = join(buildFolder, `${appFileName}.dmg`);
-				// NOTE: For some ungodly reason using the bare name in CI can conflict with some mysterious
-				// already mounted volume. I suspect the sanitized appFileName can match your github repo
-				// or some other tool is mounting something somewhere. Either way, as a workaround
-				// while creating the dmg for a stable build we temporarily give it a -stable suffix
-				// to match the behaviour of -canary builds.
-				const dmgCreationPath =
-					buildEnvironment === "stable"
-						? join(buildFolder, `${appFileName}-stable.dmg`)
-						: finalDmgPath;
-				const dmgVolumeName = getDmgVolumeName(
-					config.app.name,
+			if (targetOS === "win") {
+				const nsisInstallerPath = await createWindowsNsisInstaller({
+					buildFolder,
+					appBundleFolderPath,
+					appName: config.app.name,
+					appIdentifier: config.app.identifier,
+					appVersion: config.app.version,
 					buildEnvironment,
+					projectRoot,
+					icon: config.build.win?.icon,
+				});
+				artifactsToUpload.push(nsisInstallerPath);
+
+				if (existsSync(appBundleFolderPath)) {
+					rmSync(appBundleFolderPath, { recursive: true });
+				}
+			} else {
+				const selfExtractingBundle = createAppBundle(
+					bundleName,
+					buildFolder,
+					targetOS,
+				);
+				const compressedTarballInExtractingBundlePath = join(
+					selfExtractingBundle.appBundleFolderResourcesPath,
+					`${hash}.tar.zst`,
 				);
 
-				// Create a staging directory for DMG contents (app + Applications shortcut)
-				const dmgStagingDir = join(buildFolder, ".dmg-staging");
-				if (existsSync(dmgStagingDir)) {
-					rmSync(dmgStagingDir, { recursive: true });
-				}
-				mkdirSync(dmgStagingDir, { recursive: true });
-				try {
-					// Copy the app bundle to the staging directory
-					const stagedAppPath = join(
-						dmgStagingDir,
-						basename(selfExtractingBundle.appBundleFolderPath),
-					);
-					execSync(
-						`cp -R ${escapePathForTerminal(selfExtractingBundle.appBundleFolderPath)} ${escapePathForTerminal(stagedAppPath)}`,
-					);
+				// copy the zstd tarball to the self-extracting app bundle
+				cpSync(compressedTarPath, compressedTarballInExtractingBundlePath, {
+					dereference: true,
+				});
 
-					// Create a symlink to /Applications for easy drag-and-drop installation
-					const applicationsLink = join(dmgStagingDir, "Applications");
-					symlinkSync("/Applications", applicationsLink);
+				const selfExtractorBinSourcePath = targetPaths.EXTRACTOR;
+				const selfExtractorBinDestinationPath = join(
+					selfExtractingBundle.appBundleMacOSPath,
+					"launcher",
+				);
 
-					// Set the volume icon from the app's .icns
-					const appIconPath = join(
+				cpSync(selfExtractorBinSourcePath, selfExtractorBinDestinationPath, {
+					dereference: true,
+				});
+
+				buildIcons(
+					selfExtractingBundle.appBundleFolderResourcesPath,
+					selfExtractingBundle.appBundleFolderPath,
+				);
+				await Bun.write(
+					join(selfExtractingBundle.appBundleFolderContentsPath, "Info.plist"),
+					InfoPlistContents,
+				);
+
+				// Write metadata.json to outer bundle (consistent with Windows/Linux)
+				const extractorMetadata = {
+					identifier: config.app.identifier,
+					name: config.app.name,
+					channel: buildEnvironment,
+					hash: hash,
+				};
+				await Bun.write(
+					join(
 						selfExtractingBundle.appBundleFolderResourcesPath,
-						"AppIcon.icns",
+						"metadata.json",
+					),
+					JSON.stringify(extractorMetadata, null, 2),
+				);
+
+				// Run postWrap hook after self-extracting bundle is created, before code signing
+				// This is where you can add files to the wrapper (e.g., for liquid glass support)
+				runHook("postWrap", {
+					ELECTROBUN_WRAPPER_BUNDLE_PATH:
+						selfExtractingBundle.appBundleFolderPath,
+				});
+
+				if (shouldCodesign) {
+					codesignAppBundle(
+						selfExtractingBundle.appBundleFolderPath,
+						join(buildFolder, "entitlements.plist"),
+						config,
 					);
-					if (existsSync(appIconPath)) {
-						const volumeIconPath = join(dmgStagingDir, ".VolumeIcon.icns");
-						cpSync(appIconPath, volumeIconPath);
-						try {
-							execSync(`SetFile -a C ${escapePathForTerminal(dmgStagingDir)}`);
-						} catch {
-							// SetFile may not be available in all environments
-						}
-					}
+				} else {
+					console.log("skipping codesign");
+				}
 
-					// hdiutil create -volname "YourAppName" -srcfolder /path/to/staging -ov -format UDZO YourAppName.dmg
-					// Note: use ULFO (lzfse) for better compatibility with large CEF frameworks and modern macOS
-					execSync(
-						`hdiutil create -volname "${dmgVolumeName}" -srcfolder ${escapePathForTerminal(
-							dmgStagingDir,
-						)} -ov -format ULFO ${escapePathForTerminal(dmgCreationPath)}`,
+				// Note: we need to notarize the original app bundle, the self-extracting app bundle, and the dmg
+				if (shouldNotarize) {
+					notarizeAndStaple(selfExtractingBundle.appBundleFolderPath, config);
+				} else {
+					console.log("skipping notarization");
+				}
+
+				// DMG creation for macOS only
+				if (targetOS === "macos" && config.build.mac?.createDmg !== false) {
+					console.log("creating dmg...");
+					const finalDmgPath = join(buildFolder, `${appFileName}.dmg`);
+					// NOTE: For some ungodly reason using the bare name in CI can conflict with some mysterious
+					// already mounted volume. I suspect the sanitized appFileName can match your github repo
+					// or some other tool is mounting something somewhere. Either way, as a workaround
+					// while creating the dmg for a stable build we temporarily give it a -stable suffix
+					// to match the behaviour of -canary builds.
+					const dmgCreationPath =
+						buildEnvironment === "stable"
+							? join(buildFolder, `${appFileName}-stable.dmg`)
+							: finalDmgPath;
+					const dmgVolumeName = getDmgVolumeName(
+						config.app.name,
+						buildEnvironment,
 					);
 
-					if (
-						buildEnvironment === "stable" &&
-						dmgCreationPath !== finalDmgPath
-					) {
-						renameSync(dmgCreationPath, finalDmgPath);
-					}
-					artifactsToUpload.push(finalDmgPath);
-
-					if (shouldCodesign) {
-						codesignAppBundle(finalDmgPath, undefined, config);
-					} else {
-						console.log("skipping codesign");
-					}
-
-					if (shouldNotarize) {
-						notarizeAndStaple(finalDmgPath, config);
-					} else {
-						console.log("skipping notarization");
-					}
-				} finally {
+					// Create a staging directory for DMG contents (app + Applications shortcut)
+					const dmgStagingDir = join(buildFolder, ".dmg-staging");
 					if (existsSync(dmgStagingDir)) {
 						rmSync(dmgStagingDir, { recursive: true });
 					}
-				}
-			} else {
-				if (targetOS === "macos") {
-					console.log("skipping dmg");
-				}
-				// For Windows and Linux, add the self-extracting bundle directly
-				// @ts-expect-error - reserved for future use
-				const _platformBundlePath = join(
-					buildFolder,
-					`${appFileName}${platformSuffix}${targetOS === "win" ? ".exe" : ""}`,
-				);
-				// Copy the self-extracting bundle to platform-specific filename
-				if (targetOS === "win") {
-					// On Windows, create a self-extracting exe
-					const selfExtractingExePath = await createWindowsSelfExtractingExe(
-						buildFolder,
-						compressedTarPath,
-						appFileName,
-						targetPaths,
-						buildEnvironment,
-						hash,
-						config,
-						projectRoot,
-					);
+					mkdirSync(dmgStagingDir, { recursive: true });
+					try {
+						// Copy the app bundle to the staging directory
+						const stagedAppPath = join(
+							dmgStagingDir,
+							basename(selfExtractingBundle.appBundleFolderPath),
+						);
+						execSync(
+							`cp -R ${escapePathForTerminal(selfExtractingBundle.appBundleFolderPath)} ${escapePathForTerminal(stagedAppPath)}`,
+						);
 
-					// Wrap Windows installer files in zip for distribution
-					const wrappedExePath = await wrapWindowsInstallerInZip(
-						selfExtractingExePath,
-						buildFolder,
-					);
-					artifactsToUpload.push(wrappedExePath);
+						// Create a symlink to /Applications for easy drag-and-drop installation
+						const applicationsLink = join(dmgStagingDir, "Applications");
+						symlinkSync("/Applications", applicationsLink);
 
-					// Also keep the raw exe for backwards compatibility (optional)
-					// artifactsToUpload.push(selfExtractingExePath);
-				} else if (targetOS === "linux") {
-					// On Linux, create a self-extracting installer archive
-					// Use the Linux-specific compressed tar path
-					const linuxCompressedTarPath = join(
+						// Set the volume icon from the app's .icns
+						const appIconPath = join(
+							selfExtractingBundle.appBundleFolderResourcesPath,
+							"AppIcon.icns",
+						);
+						if (existsSync(appIconPath)) {
+							const volumeIconPath = join(dmgStagingDir, ".VolumeIcon.icns");
+							cpSync(appIconPath, volumeIconPath);
+							try {
+								execSync(`SetFile -a C ${escapePathForTerminal(dmgStagingDir)}`);
+							} catch {
+								// SetFile may not be available in all environments
+							}
+						}
+
+						// hdiutil create -volname "YourAppName" -srcfolder /path/to/staging -ov -format UDZO YourAppName.dmg
+						// Note: use ULFO (lzfse) for better compatibility with large CEF frameworks and modern macOS
+						execSync(
+							`hdiutil create -volname "${dmgVolumeName}" -srcfolder ${escapePathForTerminal(
+								dmgStagingDir,
+							)} -ov -format ULFO ${escapePathForTerminal(dmgCreationPath)}`,
+						);
+
+						if (
+							buildEnvironment === "stable" &&
+							dmgCreationPath !== finalDmgPath
+						) {
+							renameSync(dmgCreationPath, finalDmgPath);
+						}
+						artifactsToUpload.push(finalDmgPath);
+
+						if (shouldCodesign) {
+							codesignAppBundle(finalDmgPath, undefined, config);
+						} else {
+							console.log("skipping codesign");
+						}
+
+						if (shouldNotarize) {
+							notarizeAndStaple(finalDmgPath, config);
+						} else {
+							console.log("skipping notarization");
+						}
+					} finally {
+						if (existsSync(dmgStagingDir)) {
+							rmSync(dmgStagingDir, { recursive: true });
+						}
+					}
+				} else {
+					if (targetOS === "macos") {
+						console.log("skipping dmg");
+					}
+					// For Linux, add the self-extracting bundle directly.
+					// @ts-expect-error - reserved for future use
+					const _platformBundlePath = join(
 						buildFolder,
-						`${appFileName}.tar.zst`,
+						`${appFileName}${platformSuffix}`,
 					);
-					const installerArchivePath = await createLinuxInstallerArchive(
-						buildFolder,
-						linuxCompressedTarPath,
-						appFileName,
-						config,
-						buildEnvironment,
-						hash,
-						targetPaths,
-					);
-					artifactsToUpload.push(installerArchivePath);
+					if (targetOS === "linux") {
+						// On Linux, create a self-extracting installer archive
+						// Use the Linux-specific compressed tar path
+						const linuxCompressedTarPath = join(
+							buildFolder,
+							`${appFileName}.tar.zst`,
+						);
+						const installerArchivePath = await createLinuxInstallerArchive(
+							buildFolder,
+							linuxCompressedTarPath,
+							appFileName,
+							config,
+							buildEnvironment,
+							hash,
+							targetPaths,
+						);
+						artifactsToUpload.push(installerArchivePath);
+					}
 				}
 			}
 
@@ -4997,146 +5195,6 @@ usageDescriptions : ""}${urlTypes ? "\n" + urlTypes : ""}${documentTypes ?
 			return `<array>\n${value.map((v) => `        <string>${v}</string>`).join("\n")}\n    </array>`;
 		} else {
 			return `<string>${value}</string>`;
-		}
-	}
-
-	async function createWindowsSelfExtractingExe(
-		buildFolder: string,
-		compressedTarPath: string,
-		_appFileName: string,
-		targetPaths: any,
-		buildEnvironment: string,
-		hash: string,
-		config: any,
-		projectRoot: string,
-	): Promise<string> {
-		console.log("Creating single-file Windows self-extracting installer...");
-
-		const METADATA_MARKER = "ELECTROBUN_METADATA_V1";
-		const ARCHIVE_MARKER = "ELECTROBUN_ARCHIVE_V1";
-
-		const setupFileName = getWindowsSetupFileName(
-			config.app.name,
-			buildEnvironment,
-		);
-		const outputExePath = join(buildFolder, setupFileName);
-
-		// Start with the extractor exe bytes
-		const extractorExe = readFileSync(targetPaths.EXTRACTOR);
-		writeFileSync(outputExePath, new Uint8Array(extractorExe));
-
-		// Embed icon into the wrapper EXE if provided (must happen before
-		// appending archive data since rcedit modifies the PE structure)
-		if (config.build.win?.icon) {
-			const iconSourcePath =
-				config.build.win.icon.startsWith("/") ||
-				config.build.win.icon.match(/^[a-zA-Z]:/)
-					? config.build.win.icon
-					: join(projectRoot, config.build.win.icon);
-
-			if (existsSync(iconSourcePath)) {
-				console.log(`Embedding icon into Windows installer: ${iconSourcePath}`);
-				try {
-					let iconPath = iconSourcePath;
-
-					if (iconSourcePath.toLowerCase().endsWith(".png")) {
-						const pngToIco = (await import("png-to-ico")).default;
-						const tempIcoPath = join(buildFolder, "temp-icon.ico");
-						const icoBuffer = await pngToIco(iconSourcePath);
-						writeFileSync(tempIcoPath, new Uint8Array(icoBuffer));
-						iconPath = tempIcoPath;
-						console.log(`Converted PNG to ICO format: ${tempIcoPath}`);
-					}
-
-					runRcedit(outputExePath, [
-						"--set-icon",
-						iconPath,
-						"--set-file-version",
-						config.app.version,
-						"--set-product-version",
-						config.app.version,
-						"--set-version-string",
-						"ProductName",
-						config.app.name,
-						"--set-version-string",
-						"FileDescription",
-						`${config.app.name} Setup`,
-						"--set-version-string",
-						"CompanyName",
-						config.app.identifier,
-					]);
-					console.log(`Successfully embedded icon into ${setupFileName}`);
-
-					if (iconPath !== iconSourcePath && existsSync(iconPath)) {
-						unlinkSync(iconPath);
-					}
-				} catch (error) {
-					console.warn(
-						`Warning: Failed to embed icon into Windows installer: ${error}`,
-					);
-				}
-			} else {
-				console.warn(`Warning: Windows icon not found at ${iconSourcePath}`);
-			}
-		}
-
-		// Build metadata
-		const metadataJson = JSON.stringify({
-			identifier: config.app.identifier,
-			name: config.app.name,
-			channel: buildEnvironment,
-			hash: hash,
-		});
-
-		// Read the compressed archive
-		const archiveBytes = readFileSync(compressedTarPath);
-
-		// Append: METADATA_MARKER + metadata_json + ARCHIVE_MARKER + archive_bytes
-		// The extractor searches for the second occurrence of each marker
-		// (skipping the first which is embedded in the binary's own string literals)
-		const fd = openSync(outputExePath, "a");
-		writeSync(fd, new Uint8Array(Buffer.from(METADATA_MARKER, "utf-8")));
-		writeSync(fd, new Uint8Array(Buffer.from(metadataJson, "utf-8")));
-		writeSync(fd, new Uint8Array(Buffer.from(ARCHIVE_MARKER, "utf-8")));
-		writeSync(fd, new Uint8Array(archiveBytes));
-		closeSync(fd);
-
-		const totalSize = statSync(outputExePath).size;
-		console.log(`Created single-file Windows installer:`);
-		console.log(`  - ${outputExePath}`);
-		console.log(`  - Size: ${(totalSize / 1024 / 1024).toFixed(2)} MB`);
-
-		return outputExePath;
-	}
-
-	async function wrapWindowsInstallerInZip(
-		exePath: string,
-		buildFolder: string,
-	): Promise<string> {
-		const exeName = basename(exePath);
-		const exeStem = exeName.replace(".exe", "");
-		const zipPath = join(buildFolder, `${exeStem.replace(/ /g, "")}.zip`);
-
-		if (!existsSync(exePath)) {
-			throw new Error(`Installer exe not found: ${exePath}`);
-		}
-
-		try {
-			execSync(
-				`powershell -command "Compress-Archive -Path '${exePath}' -DestinationPath '${zipPath}' -Force"`,
-				{ stdio: "inherit" },
-			);
-
-			const zipSizeMb = existsSync(zipPath)
-				? (statSync(zipPath).size / 1024 / 1024).toFixed(2)
-				: "0.00";
-			console.log(
-				`Created Windows installer package: ${zipPath} (${zipSizeMb} MB)`,
-			);
-			return zipPath;
-		} catch (error) {
-			console.warn(`Warning: Failed to create zip: ${error}`);
-			return exePath;
 		}
 	}
 

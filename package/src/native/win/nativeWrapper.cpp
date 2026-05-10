@@ -10665,6 +10665,14 @@ ELECTROBUN_EXPORT bool macPermissionStatus(const char* kind) {
     return false;
 }
 
+ELECTROBUN_EXPORT bool hasScreenRecordingPermission() {
+    return false;
+}
+
+ELECTROBUN_EXPORT bool requestScreenRecordingPermission() {
+    return false;
+}
+
 ELECTROBUN_EXPORT int requestMacPermissionDragGuide(const char* kind, const char* appName, bool forceGuide) {
     return -1;
 }
@@ -13241,7 +13249,7 @@ extern "C" ELECTROBUN_EXPORT void setContentBlockerEnabled(AbstractView* abstrac
 
 // ----------------------- System Appearance -----------------------
 
-ELECTROBUN_EXPORT const char* getSystemAppearance() {
+extern "C" ELECTROBUN_EXPORT const char* getSystemAppearance() {
     HKEY hKey;
     DWORD value = 1;
     DWORD size = sizeof(value);
@@ -13296,7 +13304,7 @@ static DWORD WINAPI themeWatcherProc(LPVOID) {
     return 0;
 }
 
-ELECTROBUN_EXPORT void setThemeChangedCallback(ThemeChangedCallback callback) {
+extern "C" ELECTROBUN_EXPORT void setThemeChangedCallback(ThemeChangedCallback callback) {
     g_themeChangedCallback = callback;
 
     if (g_themeWatcherThread) {
@@ -13314,7 +13322,7 @@ ELECTROBUN_EXPORT void setThemeChangedCallback(ThemeChangedCallback callback) {
     }
 }
 
-ELECTROBUN_EXPORT void activateAppByBundleId(const char* bundleId) {
+extern "C" ELECTROBUN_EXPORT void activateAppByBundleId(const char* bundleId) {
     (void)bundleId;
 }
 

@@ -2,7 +2,7 @@
 
 const { execSync, spawn } = require('child_process');
 const { existsSync, mkdirSync, unlinkSync, chmodSync, copyFileSync, createWriteStream } = require('fs');
-const { join, dirname } = require('path');
+const { join, dirname, sep } = require('path');
 const https = require('https');
 let agent;
 try {
@@ -50,6 +50,11 @@ function getTarCommand() {
 const electrobunDir = join(__dirname, '..');
 const cacheDir = join(electrobunDir, '.cache');
 const cliBinary = join(cacheDir, `electrobun${binExt}`);
+const sourceCli = join(electrobunDir, 'src', 'cli', 'index.ts');
+
+function shouldUseSourceCli() {
+  return existsSync(sourceCli) && !electrobunDir.includes(`${sep}node_modules${sep}`);
+}
 
 async function downloadFile(url, filePath) {
   return new Promise((resolve, reject) => {
@@ -147,6 +152,23 @@ async function ensureCliBinary() {
 async function main() {
   try {
     const args = process.argv.slice(2);
+    if (shouldUseSourceCli()) {
+      const child = spawn('bun', [sourceCli, ...args], {
+        stdio: 'inherit',
+        cwd: process.cwd()
+      });
+
+      child.on('exit', (code) => {
+        process.exit(code || 0);
+      });
+
+      child.on('error', (error) => {
+        console.error('Failed to start electrobun source CLI:', error.message);
+        process.exit(1);
+      });
+      return;
+    }
+
     const cliPath = await ensureCliBinary();
 
     // Replace this process with the actual CLI
