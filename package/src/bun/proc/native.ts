@@ -2406,7 +2406,8 @@ if (native) native_.symbols.setJSUtils(getMimeType, getHTMLForWebviewSync);
 
 // Native-only init: URL scheme handlers, quit handler, global shortcuts.
 // Skipped when running without FFI (carrot mode).
-const globalShortcutHandlers = new Map<string, () => void>();
+const globalShortcutHandlers = new Map<number, () => void>();
+const globalShortcutIdsByAccelerator = new Map<string, number>();
 
 if (native) {
 	const urlOpenCallback = new JSCallback(
@@ -2450,13 +2451,12 @@ if (native) {
 	native_.symbols.setQuitRequestedHandler(quitRequestedCallback);
 
 	const globalShortcutCallback = new JSCallback(
-		(acceleratorPtr) => {
-			const accelerator = new CString(acceleratorPtr).toString();
-			const handler = globalShortcutHandlers.get(accelerator);
-			console.log(`[GlobalShortcut] JS callback received accelerator=${accelerator} handler=${handler ? "yes" : "no"}`);
+		(shortcutId) => {
+			const handler = globalShortcutHandlers.get(shortcutId);
+			console.log(`[GlobalShortcut] JS callback received id=${shortcutId} handler=${handler ? "yes" : "no"}`);
 			if (handler) handler();
 		},
-		{ args: [FFIType.cstring], returns: "void", threadsafe: true },
+		{ args: [FFIType.int], returns: "void", threadsafe: true },
 	);
 	_callbacks.push(globalShortcutCallback);
 	native_.symbols.setGlobalShortcutCallback(globalShortcutCallback);
@@ -2492,11 +2492,12 @@ export const GlobalShortcut = {
 	 * @returns true if registered successfully, false otherwise
 	 */
 	register: (accelerator: string, callback: () => void): boolean => {
-		if (!native || globalShortcutHandlers.has(accelerator)) return false;
-		const registered = native_.symbols.registerGlobalShortcut(toCString(accelerator));
-		console.log(`[GlobalShortcut] register("${accelerator}") => ${registered}`);
-		if (registered) {
-			globalShortcutHandlers.set(accelerator, callback);
+		if (!native || globalShortcutIdsByAccelerator.has(accelerator)) return false;
+		const shortcutId = native_.symbols.registerGlobalShortcut(toCString(accelerator));
+		console.log(`[GlobalShortcut] register("${accelerator}") => id=${shortcutId}`);
+		if (shortcutId > 0) {
+			globalShortcutHandlers.set(shortcutId, callback);
+			globalShortcutIdsByAccelerator.set(accelerator, shortcutId);
 			return true;
 		}
 		return false;
@@ -2506,13 +2507,16 @@ export const GlobalShortcut = {
 		const result = native_.symbols.unregisterGlobalShortcut(toCString(accelerator));
 		console.log(`[GlobalShortcut] unregister("${accelerator}") => ${result}`);
 		if (result) {
-			globalShortcutHandlers.delete(accelerator);
+			const shortcutId = globalShortcutIdsByAccelerator.get(accelerator);
+			if (shortcutId !== undefined) globalShortcutHandlers.delete(shortcutId);
+			globalShortcutIdsByAccelerator.delete(accelerator);
 		}
 		return result;
 	},
 	unregisterAll: (): void => {
 		if (native) native_.symbols.unregisterAllGlobalShortcuts();
 		globalShortcutHandlers.clear();
+		globalShortcutIdsByAccelerator.clear();
 	},
 	isRegistered: (accelerator: string): boolean => {
 		if (!native) return false;
