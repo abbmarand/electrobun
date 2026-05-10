@@ -512,6 +512,8 @@ typedef struct {
     double trafficLightOffsetY;
 } createNSWindowWithFrameAndStyleParams;
 
+static NSString *g_appAppearanceName = nil;
+
 static const void *kTrafficLightOffsetXKey = &kTrafficLightOffsetXKey;
 static const void *kTrafficLightOffsetYKey = &kTrafficLightOffsetYKey;
 static const void *kTrafficLightAppliedOffsetXKey = &kTrafficLightAppliedOffsetXKey;
@@ -2468,9 +2470,11 @@ static NSMutableURLRequest *addChromeClientHints(NSURLRequest *original) {
 
             dispatch_async(dispatch_get_main_queue(), ^{
                 window.backgroundColor = color;
-                CGFloat luminance = 0.299 * r + 0.587 * g + 0.114 * b;
-                window.appearance = [NSAppearance appearanceNamed:
-                    (luminance > 0.5) ? NSAppearanceNameAqua : NSAppearanceNameDarkAqua];
+                if (!g_appAppearanceName) {
+                    CGFloat luminance = 0.299 * r + 0.587 * g + 0.114 * b;
+                    window.appearance = [NSAppearance appearanceNamed:
+                        (luminance > 0.5) ? NSAppearanceNameAqua : NSAppearanceNameDarkAqua];
+                }
             });
         }];
     }
@@ -7746,18 +7750,39 @@ extern "C" void setAcceptLanguage(const char *lang) {
     }
 }
 
+static void applyAppearanceToViewTree(NSView *view, NSAppearance *appearance) {
+    if (!view) return;
+    view.appearance = appearance;
+    for (NSView *subview in view.subviews) {
+        applyAppearanceToViewTree(subview, appearance);
+    }
+}
+
+static void applyAppearanceToWindow(NSWindow *window, NSAppearance *appearance) {
+    if (!window) return;
+    window.appearance = appearance;
+    applyAppearanceToViewTree(window.contentView, appearance);
+}
+
 extern "C" void setAppAppearance(const char *mode) {
-    NSAppearance *appearance = nil;
+    NSString *appearanceName = nil;
     if (mode) {
         NSString *m = [NSString stringWithUTF8String:mode];
         if ([m isEqualToString:@"dark"]) {
-            appearance = [NSAppearance appearanceNamed:NSAppearanceNameDarkAqua];
+            appearanceName = NSAppearanceNameDarkAqua;
         } else if ([m isEqualToString:@"light"]) {
-            appearance = [NSAppearance appearanceNamed:NSAppearanceNameAqua];
+            appearanceName = NSAppearanceNameAqua;
         }
     }
     dispatch_async(dispatch_get_main_queue(), ^{
+        g_appAppearanceName = appearanceName;
+        NSAppearance *appearance = g_appAppearanceName
+            ? [NSAppearance appearanceNamed:g_appAppearanceName]
+            : nil;
         [NSApp setAppearance:appearance];
+        for (NSWindow *window in [NSApp windows]) {
+            applyAppearanceToWindow(window, appearance);
+        }
     });
 }
 
