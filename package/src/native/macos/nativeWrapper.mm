@@ -9985,14 +9985,12 @@ static CGEventRef globalShortcutTapCallback(CGEventTapProxy proxy, CGEventType t
             [g_globalShortcutsLock unlock];
             NSLog(@"[GlobalShortcut] Matched: %s (keyCode: %d, eventMods: 0x%llX)",
                   accelerator.c_str(), keyCode, (unsigned long long)eventMods);
-            dispatch_async(dispatch_get_main_queue(), ^{
-                if (g_globalShortcutCallback) {
-                    NSLog(@"[GlobalShortcut] Dispatching JS callback id=%d (%s)", shortcutId, accelerator.c_str());
-                    g_globalShortcutCallback(shortcutId);
-                } else {
-                    NSLog(@"[GlobalShortcut] Missing JS callback for matched shortcut");
-                }
-            });
+            if (g_globalShortcutCallback) {
+                NSLog(@"[GlobalShortcut] Dispatching JS callback id=%d (%s)", shortcutId, accelerator.c_str());
+                g_globalShortcutCallback(shortcutId);
+            } else {
+                NSLog(@"[GlobalShortcut] Missing JS callback for matched shortcut");
+            }
             return nullptr;
         }
     }
