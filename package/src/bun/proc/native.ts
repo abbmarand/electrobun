@@ -99,6 +99,7 @@ export const native = (() => {
 					FFIType.bool, // toolbar
 					FFIType.f64, // trafficLightOffsetX
 					FFIType.f64, // trafficLightOffsetY
+					FFIType.f64, // cornerRadius
 					FFIType.function, // closeHandler
 					FFIType.function, // moveHandler
 					FFIType.function, // resizeHandler
@@ -1009,6 +1010,7 @@ const _ffiImpl = {
 			};
 			titleBarStyle: string;
 			transparent: boolean;
+			cornerRadius?: number;
 			toolbar: boolean;
 			hidden?: boolean;
 			activate?: boolean;
@@ -1038,6 +1040,7 @@ const _ffiImpl = {
 				},
 				titleBarStyle,
 				transparent,
+				cornerRadius = 0,
 				toolbar,
 				hidden = false,
 				activate = true,
@@ -1071,6 +1074,7 @@ const _ffiImpl = {
 				toolbar,
 				trafficLightOffset.x,
 				trafficLightOffset.y,
+				cornerRadius,
 				// callbacks
 				windowCloseCallback,
 				windowMoveCallback,

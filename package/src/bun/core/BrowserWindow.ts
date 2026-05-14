@@ -40,6 +40,8 @@ export type WindowOptionsType<T = undefined> = {
 	transparent: boolean;
 	// passthrough: when true, mouse events pass through transparent regions
 	passthrough: boolean;
+	// cornerRadius: when greater than 0, applies native continuous window corner clipping where supported
+	cornerRadius?: number;
 	hidden?: boolean;
 	navigationRules: string | null;
 	// Sandbox mode: when true, disables RPC and only allows event emission
@@ -69,6 +71,7 @@ const defaultOptions: WindowOptionsType = {
 	titleBarStyle: "default",
 	transparent: false,
 	passthrough: false,
+	cornerRadius: 0,
 	hidden: false,
 	navigationRules: null,
 	sandbox: false,
@@ -132,6 +135,7 @@ export class BrowserWindow<T extends RPCWithTransport = RPCWithTransport> {
 	renderer: "native" | "cef" = "native";
 	transparent: boolean = false;
 	passthrough: boolean = false;
+	cornerRadius: number = 0;
 	hidden: boolean = false;
 	trafficLightOffset: { x: number; y: number } = { x: 0, y: 0 };
 	navigationRules: string | null = null;
@@ -163,6 +167,7 @@ export class BrowserWindow<T extends RPCWithTransport = RPCWithTransport> {
 		this.renderer = options.renderer || defaultOptions.renderer;
 		this.transparent = options.transparent ?? false;
 		this.passthrough = options.passthrough ?? false;
+		this.cornerRadius = options.cornerRadius ?? 0;
 		this.hidden = options.hidden ?? false;
 		this.trafficLightOffset = {
 			x: options.trafficLightOffset?.x ?? 0,
@@ -179,6 +184,7 @@ export class BrowserWindow<T extends RPCWithTransport = RPCWithTransport> {
 		styleMask,
 		titleBarStyle,
 		transparent,
+		cornerRadius,
 		toolbar,
 		hidden,
 		contentBlocker,
@@ -224,6 +230,7 @@ export class BrowserWindow<T extends RPCWithTransport = RPCWithTransport> {
 			},
 			titleBarStyle: titleBarStyle || "default",
 			transparent: transparent ?? false,
+			cornerRadius: cornerRadius ?? 0,
 			toolbar: toolbar ?? false,
 			hidden: hidden ?? false,
 			activate: activate ?? true,

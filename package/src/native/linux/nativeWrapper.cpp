@@ -6721,10 +6721,12 @@ ELECTROBUN_EXPORT void* createWindowWithFrameAndStyleFromWorker(uint32_t windowI
                                              uint32_t styleMask, const char* titleBarStyle, bool transparent,
                                              bool toolbar,
                                              double trafficLightOffsetX, double trafficLightOffsetY,
+                                             double cornerRadius,
                                              WindowCloseCallback closeCallback, WindowMoveCallback moveCallback, WindowResizeCallback resizeCallback, WindowFocusCallback focusCallback, WindowBlurCallback blurCallback, WindowKeyHandler keyCallback) {
     (void)toolbar;
     (void)trafficLightOffsetX;
     (void)trafficLightOffsetY;
+    (void)cornerRadius;
 
     // CEF supports custom frames and transparency, GTK doesn't
     if (isCEFAvailable()) {

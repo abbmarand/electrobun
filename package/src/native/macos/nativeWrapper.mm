@@ -510,6 +510,7 @@ typedef struct {
     bool toolbar;
     double trafficLightOffsetX;
     double trafficLightOffsetY;
+    double cornerRadius;
 } createNSWindowWithFrameAndStyleParams;
 
 static NSString *g_appAppearanceName = nil;
@@ -520,6 +521,38 @@ static const void *kTrafficLightAppliedOffsetXKey = &kTrafficLightAppliedOffsetX
 static const void *kTrafficLightAppliedOffsetYKey = &kTrafficLightAppliedOffsetYKey;
 
 static const void *kTrafficLightTitleBarStyleKey = &kTrafficLightTitleBarStyleKey;
+static const void *kWindowCornerRadiusKey = &kWindowCornerRadiusKey;
+
+static void applyContinuousCornerRadiusToView(NSView *view, CGFloat radius) {
+    if (!view) return;
+    view.wantsLayer = YES;
+    view.layer.cornerRadius = MAX(radius, 0);
+    if (radius > 0) {
+        view.layer.cornerCurve = kCACornerCurveContinuous;
+        view.layer.masksToBounds = YES;
+    } else {
+        view.layer.masksToBounds = NO;
+    }
+}
+
+static void applyWindowCornerRadius(NSWindow *window, double cornerRadius) {
+    if (!window) return;
+    CGFloat radius = (CGFloat)cornerRadius;
+    NSView *contentView = window.contentView;
+    applyContinuousCornerRadiusToView(contentView.superview, radius);
+    applyContinuousCornerRadiusToView(contentView, radius);
+}
+
+static void setConfiguredWindowCornerRadius(NSWindow *window, double cornerRadius) {
+    if (!window) return;
+    objc_setAssociatedObject(window, kWindowCornerRadiusKey, @(cornerRadius), OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+    applyWindowCornerRadius(window, cornerRadius);
+}
+
+static double getConfiguredWindowCornerRadius(NSWindow *window) {
+    NSNumber *radius = objc_getAssociatedObject(window, kWindowCornerRadiusKey);
+    return radius ? radius.doubleValue : 0;
+}
 
 static bool shouldManageTrafficLights(NSWindow *window) {
     if (!window) {
@@ -7029,8 +7062,18 @@ CefRefPtr<CefRequestContext> CreateRequestContextForPartition(const char* partit
             [[window standardWindowButton:NSWindowZoomButton] setHidden:YES];
         }
     }
+    - (void)windowWillEnterFullScreen:(NSNotification *)notification {
+        NSWindow *window = [notification object];
+        if (getConfiguredWindowCornerRadius(window) > 0) {
+            applyWindowCornerRadius(window, 0);
+        }
+    }
     - (void)windowDidExitFullScreen:(NSNotification *)notification {
         NSWindow *window = [notification object];
+        double cornerRadius = getConfiguredWindowCornerRadius(window);
+        if (cornerRadius > 0) {
+            applyWindowCornerRadius(window, cornerRadius);
+        }
         if (self.hasCustomButtonPosition) {
             applyWindowButtonPosition(window, self.buttonPositionX, self.buttonPositionY);
             [[window standardWindowButton:NSWindowCloseButton] setHidden:NO];
@@ -7999,6 +8042,7 @@ extern "C" NSWindow *createWindowWithFrameAndStyleFromWorker(
   bool toolbar,
   double trafficLightOffsetX,
   double trafficLightOffsetY,
+  double cornerRadius,
   WindowCloseHandler zigCloseHandler,
   WindowMoveHandler zigMoveHandler,
   WindowResizeHandler zigResizeHandler,
@@ -8021,7 +8065,8 @@ extern "C" NSWindow *createWindowWithFrameAndStyleFromWorker(
         .titleBarStyle = titleBarStyle,
         .toolbar = toolbar,
         .trafficLightOffsetX = trafficLightOffsetX,
-        .trafficLightOffsetY = trafficLightOffsetY
+        .trafficLightOffsetY = trafficLightOffsetY,
+        .cornerRadius = cornerRadius
     };
 
     // Use a dispatch semaphore to wait for the window creation to complete
@@ -8049,6 +8094,10 @@ extern "C" NSWindow *createWindowWithFrameAndStyleFromWorker(
             contentView.wantsLayer = YES;
             contentView.layer.backgroundColor = [[NSColor clearColor] CGColor];
             contentView.layer.opaque = NO;
+        }
+
+        if (config.cornerRadius > 0) {
+            setConfiguredWindowCornerRadius(window, config.cornerRadius);
         }
 
     });

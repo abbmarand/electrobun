@@ -9350,6 +9350,7 @@ ELECTROBUN_EXPORT HWND createWindowWithFrameAndStyleFromWorker(
     bool toolbar,
     double trafficLightOffsetX,
     double trafficLightOffsetY,
+    double cornerRadius,
     WindowCloseHandler zigCloseHandler,
     WindowMoveHandler zigMoveHandler,
     WindowResizeHandler zigResizeHandler,
@@ -9360,6 +9361,7 @@ ELECTROBUN_EXPORT HWND createWindowWithFrameAndStyleFromWorker(
     (void)toolbar;
     (void)trafficLightOffsetX;
     (void)trafficLightOffsetY;
+    (void)cornerRadius;
 
     // Everything GUI-related needs to be dispatched to main thread
     HWND hwnd = MainThreadDispatcher::dispatch_sync([=]() -> HWND {
