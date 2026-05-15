@@ -8422,6 +8422,26 @@ extern "C" void showItemInFolder(char *path) {
     [[NSWorkspace sharedWorkspace] activateFileViewerSelectingURLs:@[fileURL]];
 }
 
+static void activateDefaultApplicationForURL(NSURL *url) {
+    NSURL *appURL = [[NSWorkspace sharedWorkspace] URLForApplicationToOpenURL:url];
+    if (!appURL) return;
+
+    NSString *bundleIdentifier = [NSBundle bundleWithURL:appURL].bundleIdentifier;
+    if (bundleIdentifier.length == 0) return;
+
+    void (^activate)(void) = ^{
+        NSArray<NSRunningApplication *> *apps =
+            [NSRunningApplication runningApplicationsWithBundleIdentifier:bundleIdentifier];
+        NSRunningApplication *app = apps.firstObject;
+        if (!app) return;
+        [app activateWithOptions:NSApplicationActivateAllWindows];
+    };
+
+    dispatch_async(dispatch_get_main_queue(), activate);
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, 250 * NSEC_PER_MSEC), dispatch_get_main_queue(), activate);
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, 1000 * NSEC_PER_MSEC), dispatch_get_main_queue(), activate);
+}
+
 // Open a URL in the default browser or appropriate application
 extern "C" BOOL openExternal(const char *urlString) {
     NSString *urlStr = [NSString stringWithUTF8String:urlString ?: ""];
@@ -8432,7 +8452,11 @@ extern "C" BOOL openExternal(const char *urlString) {
         return NO;
     }
 
-    return [[NSWorkspace sharedWorkspace] openURL:url];
+    BOOL success = [[NSWorkspace sharedWorkspace] openURL:url];
+    if (success) {
+        activateDefaultApplicationForURL(url);
+    }
+    return success;
 }
 
 // Open a file or folder with the default application
