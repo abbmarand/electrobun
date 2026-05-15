@@ -13328,6 +13328,75 @@ extern "C" ELECTROBUN_EXPORT void activateAppByBundleId(const char* bundleId) {
     (void)bundleId;
 }
 
+extern "C" ELECTROBUN_EXPORT bool activateWindowById(uint32_t windowId) {
+    HWND hwnd = (HWND)(uintptr_t)windowId;
+    if (!hwnd || !IsWindow(hwnd)) return false;
+    if (IsIconic(hwnd)) ShowWindow(hwnd, SW_RESTORE);
+    return SetForegroundWindow(hwnd) != 0;
+}
+
+extern "C" ELECTROBUN_EXPORT const char* getFrontmostWindowInfo() {
+    HWND hwnd = GetForegroundWindow();
+    if (!hwnd) return NULL;
+
+    char titleBuf[512] = {0};
+    GetWindowTextA(hwnd, titleBuf, sizeof(titleBuf));
+
+    DWORD pid = 0;
+    GetWindowThreadProcessId(hwnd, &pid);
+
+    char pathBuf[MAX_PATH] = {0};
+    char ownerName[256] = {0};
+    if (pid) {
+        HANDLE hProc = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, FALSE, pid);
+        if (hProc) {
+            DWORD pathLen = MAX_PATH;
+            if (QueryFullProcessImageNameA(hProc, 0, pathBuf, &pathLen) && pathLen > 0) {
+                const char* lastSlash = strrchr(pathBuf, '\\');
+                const char* name = lastSlash ? lastSlash + 1 : pathBuf;
+                const char* dot = strrchr(name, '.');
+                size_t len = dot ? (size_t)(dot - name) : strlen(name);
+                if (len >= sizeof(ownerName)) len = sizeof(ownerName) - 1;
+                memcpy(ownerName, name, len);
+                ownerName[len] = '\0';
+            }
+            CloseHandle(hProc);
+        }
+    }
+
+    std::string json = "{\"bundleId\":\"";
+    for (const char* p = ownerName; *p; ++p) {
+        if (*p == '"') json += "\\\"";
+        else if (*p == '\\') json += "\\\\";
+        else json += *p;
+    }
+    json += "\",\"name\":\"";
+    for (const char* p = ownerName; *p; ++p) {
+        if (*p == '"') json += "\\\"";
+        else if (*p == '\\') json += "\\\\";
+        else json += *p;
+    }
+    json += "\",\"path\":\"";
+    for (const char* p = pathBuf; *p; ++p) {
+        if (*p == '"') json += "\\\"";
+        else if (*p == '\\') json += "\\\\";
+        else json += *p;
+    }
+    json += "\",\"windowId\":";
+    json += std::to_string((uintptr_t)hwnd);
+    json += ",\"windowTitle\":\"";
+    for (const char* p = titleBuf; *p; ++p) {
+        if (*p == '"') json += "\\\"";
+        else if (*p == '\\') json += "\\\\";
+        else json += *p;
+    }
+    json += "\",\"ownerPid\":";
+    json += std::to_string(pid);
+    json += "}";
+
+    return strdup(json.c_str());
+}
+
 // DComp exported API removed — zero-copy bridge is now an internal
 // implementation detail of the WGPU surface lifecycle (see
 // wgpuSurfaceConfigureMainThread, wgpuSurfaceGetCurrentTextureMainThread,

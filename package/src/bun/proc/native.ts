@@ -598,6 +598,10 @@ export const native = (() => {
 				args: [FFIType.cstring],
 				returns: FFIType.void,
 			},
+			activateWindowById: {
+				args: [FFIType.u32],
+				returns: FFIType.bool,
+			},
 
 			// Screen API
 			getAllDisplays: {
@@ -706,6 +710,10 @@ export const native = (() => {
 				returns: FFIType.ptr, // pointer to PNG data
 			},
 			getFrontmostAppInfo: {
+				args: [],
+				returns: FFIType.cstring,
+			},
+			getFrontmostWindowInfo: {
 				args: [],
 				returns: FFIType.cstring,
 			},
@@ -2024,8 +2032,16 @@ window.__electrobunBunBridge = window.__electrobunBunBridge || window.webkit?.me
 		activateAppByBundleId: (bundleId: string): void => {
 			native_.symbols.activateAppByBundleId(toCString(bundleId));
 		},
+		activateWindowById: (params: { windowId: number }): boolean => {
+			return !!native_.symbols.activateWindowById(params.windowId);
+		},
 		getFrontmostWindowBounds: (): string | null => {
 			const result = native_.symbols.getFrontmostWindowBounds();
+			if (!result) return null;
+			return result.toString();
+		},
+		getFrontmostWindowInfo: (): string | null => {
+			const result = native_.symbols.getFrontmostWindowInfo();
 			if (!result) return null;
 			return result.toString();
 		},

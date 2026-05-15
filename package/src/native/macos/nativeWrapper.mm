@@ -9415,6 +9415,19 @@ extern "C" const uint8_t* captureWindowById(uint32_t windowId, size_t *outSize) 
     return result;
 }
 
+static const char* copyJsonCStringFromDictionary(NSDictionary *dict) {
+    if (!dict) return NULL;
+
+    NSError *error = nil;
+    NSData *data = [NSJSONSerialization dataWithJSONObject:dict options:0 error:&error];
+    if (!data || error) return NULL;
+
+    NSString *json = [[NSString alloc] initWithData:data encoding:NSUTF8StringEncoding];
+    if (!json) return NULL;
+
+    return strdup([json UTF8String]);
+}
+
 // getFrontmostAppInfo - Get info about the currently frontmost application
 // Returns: JSON string with bundleId, name, path (caller must free), or NULL
 extern "C" const char* getFrontmostAppInfo() {
@@ -9424,16 +9437,162 @@ extern "C" const char* getFrontmostAppInfo() {
         NSRunningApplication *app = [[NSWorkspace sharedWorkspace] frontmostApplication];
         if (!app) return;
 
-        NSString *bundleId = app.bundleIdentifier ?: @"";
-        NSString *name = app.localizedName ?: @"";
-        NSString *path = app.bundleURL.path ?: @"";
-
-        NSString *json = [NSString stringWithFormat:@"{\"bundleId\":\"%@\",\"name\":\"%@\",\"path\":\"%@\"}",
-            bundleId, name, path];
-        result = strdup([json UTF8String]);
+        NSDictionary *payload = @{
+            @"bundleId": app.bundleIdentifier ?: @"",
+            @"name": app.localizedName ?: @"",
+            @"path": app.bundleURL.path ?: @""
+        };
+        result = copyJsonCStringFromDictionary(payload);
     });
 
     return result;
+}
+
+// getFrontmostWindowInfo - Get the exact frontmost window for the active app.
+// Returns: JSON string with app info plus windowId/windowTitle/ownerPid, or NULL.
+extern "C" const char* getFrontmostWindowInfo() {
+    __block const char* result = NULL;
+
+    dispatch_sync(dispatch_get_main_queue(), ^{
+        NSRunningApplication *app = [[NSWorkspace sharedWorkspace] frontmostApplication];
+        if (!app) return;
+
+        auto copyInfo = (CGWindowListCopyWindowInfoFn)dlsym(RTLD_DEFAULT, "CGWindowListCopyWindowInfo");
+        if (!copyInfo) return;
+
+        pid_t pid = app.processIdentifier;
+        CFArrayRef list = copyInfo(kCGWindowListOptionOnScreenOnly | kCGWindowListExcludeDesktopElements, kCGNullWindowID);
+        if (!list) return;
+
+        NSDictionary *matchedInfo = nil;
+        CFIndex count = CFArrayGetCount(list);
+        for (CFIndex i = 0; i < count; i++) {
+            NSDictionary *info = (__bridge NSDictionary *)CFArrayGetValueAtIndex(list, i);
+            NSNumber *layer = info[(__bridge NSString *)kCGWindowLayer];
+            NSNumber *ownerPid = info[(__bridge NSString *)kCGWindowOwnerPID];
+            NSNumber *windowNumber = info[(__bridge NSString *)kCGWindowNumber];
+            if (!layer || !ownerPid || !windowNumber) continue;
+            if ([layer intValue] != 0) continue;
+            if ([ownerPid intValue] != pid) continue;
+            matchedInfo = info;
+            break;
+        }
+
+        if (matchedInfo) {
+            NSNumber *windowNumber = matchedInfo[(__bridge NSString *)kCGWindowNumber];
+            NSString *windowTitle = matchedInfo[(__bridge NSString *)kCGWindowName] ?: @"";
+            NSDictionary *payload = @{
+                @"bundleId": app.bundleIdentifier ?: @"",
+                @"name": app.localizedName ?: @"",
+                @"path": app.bundleURL.path ?: @"",
+                @"windowId": windowNumber,
+                @"windowTitle": windowTitle,
+                @"ownerPid": @(pid)
+            };
+            result = copyJsonCStringFromDictionary(payload);
+        }
+
+        CFRelease(list);
+    });
+
+    return result;
+}
+
+typedef AXError (*AXUIElementGetWindowFn)(AXUIElementRef, CGWindowID *);
+
+static bool getOwnerPidForWindowId(CGWindowID windowId, pid_t *outPid) {
+    auto copyInfo = (CGWindowListCopyWindowInfoFn)dlsym(RTLD_DEFAULT, "CGWindowListCopyWindowInfo");
+    if (!copyInfo) return false;
+
+    CFArrayRef list = copyInfo(kCGWindowListOptionIncludingWindow, windowId);
+    if (!list) return false;
+
+    bool found = false;
+    if (CFArrayGetCount(list) > 0) {
+        NSDictionary *info = (__bridge NSDictionary *)CFArrayGetValueAtIndex(list, 0);
+        NSNumber *ownerPid = info[(__bridge NSString *)kCGWindowOwnerPID];
+        if (ownerPid) {
+            *outPid = (pid_t)[ownerPid intValue];
+            found = true;
+        }
+    }
+
+    CFRelease(list);
+    return found;
+}
+
+static bool copyAXWindowForCGWindowId(pid_t pid, CGWindowID targetWindowId, AXUIElementRef *outApp, AXUIElementRef *outWindow) {
+    AXUIElementGetWindowFn getAXWindow = (AXUIElementGetWindowFn)dlsym(RTLD_DEFAULT, "_AXUIElementGetWindow");
+    if (!getAXWindow) return false;
+
+    AXUIElementRef appRef = AXUIElementCreateApplication(pid);
+    if (!appRef) return false;
+
+    CFTypeRef windowsRef = NULL;
+    AXError err = AXUIElementCopyAttributeValue(appRef, kAXWindowsAttribute, &windowsRef);
+    if (err != kAXErrorSuccess || !windowsRef) {
+        CFRelease(appRef);
+        return false;
+    }
+
+    CFArrayRef windows = (CFArrayRef)windowsRef;
+    AXUIElementRef matchedWindow = NULL;
+    CFIndex count = CFArrayGetCount(windows);
+    for (CFIndex i = 0; i < count; i++) {
+        AXUIElementRef winRef = (AXUIElementRef)CFArrayGetValueAtIndex(windows, i);
+        CGWindowID currentWindowId = 0;
+        if (getAXWindow(winRef, &currentWindowId) == kAXErrorSuccess && currentWindowId == targetWindowId) {
+            matchedWindow = winRef;
+            CFRetain(matchedWindow);
+            break;
+        }
+    }
+
+    CFRelease(windows);
+
+    if (!matchedWindow) {
+        CFRelease(appRef);
+        return false;
+    }
+
+    *outApp = appRef;
+    *outWindow = matchedWindow;
+    return true;
+}
+
+extern "C" bool activateWindowById(uint32_t windowId) {
+    if (windowId == 0) return false;
+
+    __block bool success = false;
+
+    dispatch_sync(dispatch_get_main_queue(), ^{
+        pid_t pid = 0;
+        if (!getOwnerPidForWindowId((CGWindowID)windowId, &pid)) return;
+
+        NSRunningApplication *app = [NSRunningApplication runningApplicationWithProcessIdentifier:pid];
+        if (!app) return;
+
+        AXUIElementRef appRef = NULL;
+        AXUIElementRef winRef = NULL;
+        if (!copyAXWindowForCGWindowId(pid, (CGWindowID)windowId, &appRef, &winRef)) return;
+
+        [app activateWithOptions:0];
+        AXUIElementSetAttributeValue(winRef, kAXMinimizedAttribute, kCFBooleanFalse);
+        AXError focusedErr = AXUIElementSetAttributeValue(appRef, kAXFocusedWindowAttribute, winRef);
+        AXError windowFocusedErr = AXUIElementSetAttributeValue(winRef, kAXFocusedAttribute, kCFBooleanTrue);
+        AXError mainErr = AXUIElementSetAttributeValue(winRef, kAXMainAttribute, kCFBooleanTrue);
+        AXError raiseErr = AXUIElementPerformAction(winRef, kAXRaiseAction);
+
+        success = focusedErr == kAXErrorSuccess
+            || windowFocusedErr == kAXErrorSuccess
+            || mainErr == kAXErrorSuccess
+            || raiseErr == kAXErrorSuccess;
+
+        CFRelease(winRef);
+        CFRelease(appRef);
+    });
+
+    return success;
 }
 
 // Helper: get AXUIElementRef for the frontmost application's first window.

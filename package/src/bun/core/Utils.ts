@@ -343,12 +343,32 @@ export type FrontmostAppInfo = {
 	path: string;
 };
 
+export type FrontmostWindowInfo = FrontmostAppInfo & {
+	windowId: number;
+	windowTitle: string;
+	ownerPid: number;
+};
+
 /**
  * Get info about the currently frontmost (active) application.
  * @returns Object with bundleId, name, and path, or null if unavailable
  */
 export const getFrontmostAppInfo = (): FrontmostAppInfo | null => {
 	const json = ffi.request.getFrontmostAppInfo();
+	if (!json) return null;
+	try {
+		return JSON.parse(json);
+	} catch {
+		return null;
+	}
+};
+
+/**
+ * Get info about the exact frontmost window of the active application.
+ * @returns Object with app info and native window id, or null if unavailable
+ */
+export const getFrontmostWindowInfo = (): FrontmostWindowInfo | null => {
+	const json = ffi.request.getFrontmostWindowInfo();
 	if (!json) return null;
 	try {
 		return JSON.parse(json);
@@ -371,6 +391,14 @@ export const getSystemAppearance = (): "light" | "dark" => {
  */
 export const activateApp = (bundleId: string): void => {
 	ffi.request.activateAppByBundleId(bundleId);
+};
+
+/**
+ * Activate a specific native window by id.
+ * macOS only; returns false on other platforms or when the window is gone.
+ */
+export const activateWindowById = (windowId: number): boolean => {
+	return ffi.request.activateWindowById({ windowId });
 };
 
 export type WindowBounds = {

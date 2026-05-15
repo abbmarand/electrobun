@@ -12035,4 +12035,13 @@ ELECTROBUN_EXPORT void activateAppByBundleId(const char* bundleId) {
     (void)bundleId;
 }
 
+ELECTROBUN_EXPORT bool activateWindowById(uint32_t windowId) {
+    (void)windowId;
+    return false;
+}
+
+ELECTROBUN_EXPORT const char* getFrontmostWindowInfo() {
+    return NULL;
+}
+
 }
