@@ -8404,9 +8404,14 @@ extern "C" BOOL moveToTrash(char *pathString) {
     NSFileManager *fileManager = [NSFileManager defaultManager];
     BOOL success = [fileManager trashItemAtURL:fileURL resultingItemURL:&resultingURL error:&error];
     if (success) {
-        NSLog(@"Moved to Trash: %@", resultingURL);
+        NSLog(@"moveToTrash succeeded source=%@ result=%@", path, resultingURL.path);
     } else {
-        NSLog(@"Error: %@", error);
+        NSLog(@"moveToTrash failed source=%@ domain=%@ code=%ld description=%@ recovery=%@",
+              path,
+              error.domain,
+              (long)error.code,
+              error.localizedDescription,
+              error.localizedRecoverySuggestion);
     }
     return success;
 }
