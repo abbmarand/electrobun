@@ -8243,14 +8243,18 @@ extern "C" bool isWindowAlwaysOnTop(NSWindow *window) {
     return result;
 }
 
+static CGFloat topLeftCoordinateReferenceHeight() {
+    NSScreen *screen = [[NSScreen screens] firstObject] ?: [NSScreen mainScreen];
+    return screen ? screen.frame.size.height : 0;
+}
+
 extern "C" void setWindowPosition(NSWindow *window, double x, double y) {
     dispatch_async(dispatch_get_main_queue(), ^{
         if (!window) return;
-        // macOS uses bottom-left origin, so we need to convert from top-left
-        NSScreen *screen = [window screen] ?: [NSScreen mainScreen];
-        CGFloat screenHeight = screen.frame.size.height;
+        // macOS uses bottom-left origin, so convert from Electrobun's global
+        // top-left coordinate space. This must match Screen.getAllDisplays().
+        CGFloat screenHeight = topLeftCoordinateReferenceHeight();
         CGFloat windowHeight = window.frame.size.height;
-        // Convert from top-left origin (what users expect) to bottom-left origin (what macOS uses)
         CGFloat adjustedY = screenHeight - y - windowHeight;
         [window setFrameOrigin:NSMakePoint(x, adjustedY)];
     });
@@ -8288,9 +8292,11 @@ extern "C" void setWindowSize(NSWindow *window, double width, double height) {
 extern "C" void setWindowFrame(NSWindow *window, double x, double y, double width, double height) {
     dispatch_async(dispatch_get_main_queue(), ^{
         if (!window) return;
-        // macOS uses bottom-left origin, convert from top-left
-        NSScreen *screen = [window screen] ?: [NSScreen mainScreen];
-        CGFloat screenHeight = screen.frame.size.height;
+        // macOS uses bottom-left origin, so convert from Electrobun's global
+        // top-left coordinate space. Do not use [window screen] here: hidden
+        // or offscreen windows can have no screen, and panels may otherwise
+        // be restored using the focused app's display height.
+        CGFloat screenHeight = topLeftCoordinateReferenceHeight();
         CGFloat adjustedY = screenHeight - y - height;
         NSRect frame = NSMakeRect(x, adjustedY, width, height);
         [window setFrame:frame display:YES animate:NO];
@@ -8303,8 +8309,7 @@ extern "C" void getWindowFrame(NSWindow *window, double *outX, double *outY, dou
     dispatch_sync(dispatch_get_main_queue(), ^{
         if (!window) return;
         frame = window.frame;
-        NSScreen *screen = [window screen] ?: [NSScreen mainScreen];
-        screenHeight = screen.frame.size.height;
+        screenHeight = topLeftCoordinateReferenceHeight();
     });
     // Convert from bottom-left origin to top-left origin
     *outX = frame.origin.x;
