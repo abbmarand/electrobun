@@ -2513,11 +2513,9 @@ static NSMutableURLRequest *addChromeClientHints(NSURLRequest *original) {
 
             dispatch_async(dispatch_get_main_queue(), ^{
                 window.backgroundColor = color;
-                if (!g_appAppearanceName) {
-                    CGFloat luminance = 0.299 * r + 0.587 * g + 0.114 * b;
-                    window.appearance = [NSAppearance appearanceNamed:
-                        (luminance > 0.5) ? NSAppearanceNameAqua : NSAppearanceNameDarkAqua];
-                }
+                CGFloat luminance = 0.299 * r + 0.587 * g + 0.114 * b;
+                window.appearance = [NSAppearance appearanceNamed:
+                    (luminance > 0.5) ? NSAppearanceNameAqua : NSAppearanceNameDarkAqua];
             });
         }];
     }
@@ -7817,6 +7815,9 @@ static void applyAppearanceToViewTree(NSView *view, NSAppearance *appearance) {
 
 static void applyAppearanceToWindow(NSWindow *window, NSAppearance *appearance) {
     if (!window) return;
+    NSNumber *adaptiveTheme = objc_getAssociatedObject(window, "adaptiveTheme");
+    // Browser windows with native toolbars derive chrome contrast from page pixels.
+    if (adaptiveTheme && adaptiveTheme.boolValue) return;
     window.appearance = appearance;
     applyAppearanceToViewTree(window.contentView, appearance);
 }
