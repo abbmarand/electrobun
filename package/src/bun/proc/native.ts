@@ -79,6 +79,37 @@ function getWindowPtr(winId: number) {
 	);
 }
 
+type WindowStyleMaskOptions = {
+	Borderless: boolean;
+	Titled: boolean;
+	Closable: boolean;
+	Miniaturizable: boolean;
+	Resizable: boolean;
+	UnifiedTitleAndToolbar: boolean;
+	FullScreen: boolean;
+	FullSizeContentView: boolean;
+	UtilityWindow: boolean;
+	DocModalWindow: boolean;
+	NonactivatingPanel: boolean;
+	HUDWindow: boolean;
+};
+
+function getMacWindowStyleMask(options: WindowStyleMaskOptions): number {
+	let mask = 0;
+	if (options.Titled) mask |= 1;
+	if (options.Closable) mask |= 2;
+	if (options.Miniaturizable) mask |= 4;
+	if (options.Resizable) mask |= 8;
+	if (options.UtilityWindow) mask |= 16;
+	if (options.DocModalWindow) mask |= 64;
+	if (options.NonactivatingPanel) mask |= 128;
+	if (options.UnifiedTitleAndToolbar) mask |= 4096;
+	if (options.HUDWindow) mask |= 8192;
+	if (options.FullScreen) mask |= 16384;
+	if (options.FullSizeContentView) mask |= 32768;
+	return mask;
+}
+
 export const native = (() => {
 	try {
 		// Use absolute path to native wrapper DLL to avoid working directory issues
@@ -1055,20 +1086,35 @@ const _ffiImpl = {
 				trafficLightOffset = { x: 0, y: 0 },
 			} = params;
 
-			const styleMask = native_.symbols.getWindowStyle(
-				Borderless,
-				Titled,
-				Closable,
-				Miniaturizable,
-				Resizable,
-				UnifiedTitleAndToolbar,
-				FullScreen,
-				FullSizeContentView,
-				UtilityWindow,
-				DocModalWindow,
-				NonactivatingPanel,
-				HUDWindow,
-			);
+			const styleMask = process.platform === "darwin"
+				? getMacWindowStyleMask({
+					Borderless,
+					Titled,
+					Closable,
+					Miniaturizable,
+					Resizable,
+					UnifiedTitleAndToolbar,
+					FullScreen,
+					FullSizeContentView,
+					UtilityWindow,
+					DocModalWindow,
+					NonactivatingPanel,
+					HUDWindow,
+				})
+				: native_.symbols.getWindowStyle(
+					Borderless,
+					Titled,
+					Closable,
+					Miniaturizable,
+					Resizable,
+					UnifiedTitleAndToolbar,
+					FullScreen,
+					FullSizeContentView,
+					UtilityWindow,
+					DocModalWindow,
+					NonactivatingPanel,
+					HUDWindow,
+				);
 
 			const windowPtr = native_.symbols.createWindowWithFrameAndStyleFromWorker(
 				id,

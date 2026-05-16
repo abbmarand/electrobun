@@ -8058,6 +8058,25 @@ NSWindow *createNSWindowWithFrameAndStyle(uint32_t windowId,
     
 }
 
+static BOOL isElectrobunPanelWindow(NSWindow *window) {
+    return [window isKindOfClass:[ElectrobunPanel class]];
+}
+
+static void focusTopInteractiveView(NSWindow *window) {
+    if (![window.contentView isKindOfClass:[ContainerView class]]) return;
+
+    ContainerView *containerView = (ContainerView *)window.contentView;
+    for (AbstractView *abstractView in containerView.abstractViews) {
+        NSView *view = abstractView.nsView;
+        if (!view || view.hidden) continue;
+
+        if ([view acceptsFirstResponder]) {
+            [window makeFirstResponder:view];
+            return;
+        }
+    }
+}
+
 extern "C" void testFFI2(void (*completionHandler)()) {
     NSLog(@"C++  TEST FFI 2 0");
     completionHandler();
@@ -8143,6 +8162,7 @@ extern "C" void showWindow(NSWindow *window, bool activate) {
             if ([window isKindOfClass:[NSPanel class]]) {
                 [window orderFrontRegardless];
                 [window makeKeyWindow];
+                focusTopInteractiveView(window);
             } else {
                 [window orderFront:nil];
                 [window makeKeyAndOrderFront:nil];
@@ -8166,6 +8186,13 @@ extern "C" void showWindow(NSWindow *window, bool activate) {
 extern "C" void activateWindow(NSWindow *window) {
     dispatch_sync(dispatch_get_main_queue(), ^{
         if (![window isVisible]) {
+            return;
+        }
+
+        if (isElectrobunPanelWindow(window)) {
+            [window orderFrontRegardless];
+            [window makeKeyWindow];
+            focusTopInteractiveView(window);
             return;
         }
 
@@ -8260,7 +8287,11 @@ extern "C" bool isWindowFullScreen(NSWindow *window) {
 extern "C" void setWindowAlwaysOnTop(NSWindow *window, bool alwaysOnTop) {
     dispatch_sync(dispatch_get_main_queue(), ^{
         if (alwaysOnTop) {
-            [window setLevel:NSFloatingWindowLevel];
+            if (isElectrobunPanelWindow(window)) {
+                [window setLevel:NSModalPanelWindowLevel];
+            } else {
+                [window setLevel:NSFloatingWindowLevel];
+            }
         } else {
             [window setLevel:NSNormalWindowLevel];
         }
