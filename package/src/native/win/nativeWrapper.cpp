@@ -806,6 +806,10 @@ public:
 
         std::string url = request->GetURL();
         std::string path = url.substr(8); // Remove "views://" prefix
+        size_t queryOrFragment = path.find_first_of("?#");
+        if (queryOrFragment != std::string::npos) {
+            path.erase(queryOrFragment);
+        }
         if (path.empty()) path = "index.html";
 
         std::string content;
@@ -6199,6 +6203,10 @@ static std::shared_ptr<WebView2View> createWebView2View(uint32_t webviewId,
                                         
                                         if (uriStr.substr(0, 8) == "views://") {
                                             std::string filePath = uriStr.substr(8);
+                                            size_t queryOrFragment = filePath.find_first_of("?#");
+                                            if (queryOrFragment != std::string::npos) {
+                                                filePath.erase(queryOrFragment);
+                                            }
                                             // Strip trailing slashes - WebView2 may normalize URLs without folder components
                                             while (!filePath.empty() && (filePath.back() == '/' || filePath.back() == '\\')) {
                                                 filePath.pop_back();
@@ -11578,6 +11586,10 @@ void handleViewsSchemeRequest(ICoreWebView2WebResourceRequestedEventArgs* args,
     std::string path;
     if (uriStr.length() > 8) {
         path = uriStr.substr(8); // Remove "views://" prefix
+        size_t queryOrFragment = path.find_first_of("?#");
+        if (queryOrFragment != std::string::npos) {
+            path.erase(queryOrFragment);
+        }
         // Strip trailing slashes - WebView2 may normalize URLs without folder components
         while (!path.empty() && (path.back() == '/' || path.back() == '\\')) {
             path.pop_back();

@@ -539,6 +539,10 @@ public:
         std::string fullPath = "index.html"; // default
         if (url.find("views://") == 0) {
             fullPath = url.substr(8); // Skip "views://"
+            size_t queryOrFragment = fullPath.find_first_of("?#");
+            if (queryOrFragment != std::string::npos) {
+                fullPath.erase(queryOrFragment);
+            }
             // Strip trailing slashes - WebKit may normalize URLs without folder components
             while (!fullPath.empty() && (fullPath.back() == '/' || fullPath.back() == '\\')) {
                 fullPath.pop_back();
@@ -5555,9 +5559,19 @@ static void handleViewsURIScheme(WebKitURISchemeRequest* request, gpointer user_
     
     // Parse the full URI to get everything after views://
     // For views://webviewtag/index.html, we want "webviewtag/index.html"
-    const char* fullPath = "index.html"; // default
+    std::string fullPathStorage = "index.html"; // default
+    const char* fullPath = fullPathStorage.c_str();
     if (uri && strncmp(uri, "views://", 8) == 0) {
-        fullPath = uri + 8; // Skip "views://"
+        fullPathStorage = uri + 8; // Skip "views://"
+        size_t queryOrFragment = fullPathStorage.find_first_of("?#");
+        if (queryOrFragment != std::string::npos) {
+            fullPathStorage.erase(queryOrFragment);
+        }
+        // Strip trailing slashes - WebKit may normalize URLs without folder components
+        while (!fullPathStorage.empty() && (fullPathStorage.back() == '/' || fullPathStorage.back() == '\\')) {
+            fullPathStorage.pop_back();
+        }
+        fullPath = fullPathStorage.c_str();
     }
     
     // Check if this is the internal HTML request

@@ -778,6 +778,16 @@ static NSString* normalizeViewsRelativePath(NSString *urlString) {
     while ([relativePath hasPrefix:@"/"]) {
         relativePath = [relativePath substringFromIndex:1];
     }
+    NSUInteger trimIndex = [relativePath length];
+    NSRange queryRange = [relativePath rangeOfString:@"?"];
+    if (queryRange.location != NSNotFound) {
+        trimIndex = MIN(trimIndex, queryRange.location);
+    }
+    NSRange fragmentRange = [relativePath rangeOfString:@"#"];
+    if (fragmentRange.location != NSNotFound) {
+        trimIndex = MIN(trimIndex, fragmentRange.location);
+    }
+    relativePath = [relativePath substringToIndex:trimIndex];
     // Strip trailing slashes - WebView may normalize URLs without folder components
     while ([relativePath hasSuffix:@"/"] && [relativePath length] > 0) {
         relativePath = [relativePath substringToIndex:[relativePath length] - 1];
@@ -6306,6 +6316,10 @@ public:
                 NSLog(@"DEBUG CEF: Processing views:// URL: %s", urlStr.c_str());
                 // Remove the prefix (8 characters for "views://") - FIXED VERSION v2
                 std::string relativePath = urlStr.substr(8);
+                size_t queryOrFragment = relativePath.find_first_of("?#");
+                if (queryOrFragment != std::string::npos) {
+                    relativePath.erase(queryOrFragment);
+                }
                 // Strip trailing slashes - WebView may normalize URLs without folder components
                 while (!relativePath.empty() && (relativePath.back() == '/' || relativePath.back() == '\\')) {
                     relativePath.pop_back();
@@ -7943,15 +7957,17 @@ NSWindow *createNSWindowWithFrameAndStyle(uint32_t windowId,
     NSRect screenFrame = [primaryScreen frame];
     config.frame.origin.y = screenFrame.size.height - config.frame.origin.y;
     
-    // For hidden titlebar with no traffic-light buttons, strip Titled
-    // so macOS Sequoia never shows its tiling indicator on this window.
-    if (strcmp(config.titleBarStyle, "hidden") == 0) {
-        BOOL hasClose = (config.styleMask & NSWindowStyleMaskClosable) != 0;
-        BOOL hasMini  = (config.styleMask & NSWindowStyleMaskMiniaturizable) != 0;
-        BOOL hasZoom  = (config.styleMask & NSWindowStyleMaskResizable) != 0;
-        if (!hasClose && !hasMini && !hasZoom) {
-            config.styleMask &= ~NSWindowStyleMaskTitled;
-        }
+    BOOL hasClose = (config.styleMask & NSWindowStyleMaskClosable) != 0;
+    BOOL hasMini  = (config.styleMask & NSWindowStyleMaskMiniaturizable) != 0;
+    BOOL hasZoom  = (config.styleMask & NSWindowStyleMaskResizable) != 0;
+    BOOL hasNoTrafficLights = !hasClose && !hasMini && !hasZoom;
+    BOOL hidesTitleBar = strcmp(config.titleBarStyle, "hidden") == 0 ||
+        strcmp(config.titleBarStyle, "hiddenInset") == 0;
+
+    // Only custom-shaped windows should lose AppKit's titled frame. Normal
+    // hidden-titlebar windows keep it so macOS owns the native rounded border.
+    if (hidesTitleBar && hasNoTrafficLights && config.cornerRadius > 0) {
+        config.styleMask &= ~NSWindowStyleMaskTitled;
     }
 
     BOOL isPanel = (config.styleMask & NSWindowStyleMaskNonactivatingPanel) != 0;
@@ -7977,10 +7993,25 @@ NSWindow *createNSWindowWithFrameAndStyle(uint32_t windowId,
     // Allow hidden titlebar windows to participate in native fullscreen.
     [window setCollectionBehavior:
         [window collectionBehavior] | NSWindowCollectionBehaviorFullScreenPrimary];
-    if (strcmp(config.titleBarStyle, "hiddenInset") == 0 ||
-        strcmp(config.titleBarStyle, "hidden") == 0) {
+    if (hidesTitleBar) {
         window.titlebarAppearsTransparent = YES;
         window.titleVisibility = NSWindowTitleHidden;
+        if (!hasClose) [[window standardWindowButton:NSWindowCloseButton] setHidden:YES];
+        if (!hasMini)  [[window standardWindowButton:NSWindowMiniaturizeButton] setHidden:YES];
+        if (!hasZoom)  [[window standardWindowButton:NSWindowZoomButton] setHidden:YES];
+
+        if (hasNoTrafficLights) {
+            NSWindowCollectionBehavior behavior = [window collectionBehavior];
+            behavior &= ~NSWindowCollectionBehaviorFullScreenPrimary;
+            behavior &= ~NSWindowCollectionBehaviorFullScreenAuxiliary;
+            behavior |= NSWindowCollectionBehaviorFullScreenNone;
+            behavior |= NSWindowCollectionBehaviorFullScreenDisallowsTiling;
+            [window setCollectionBehavior:behavior];
+
+            @try {
+                [window setValue:@1 forKey:@"tilingBehavior"];
+            } @catch (NSException *) {}
+        }
     }
     objc_setAssociatedObject(window, kTrafficLightTitleBarStyleKey, [NSString stringWithUTF8String:config.titleBarStyle ?: "default"], OBJC_ASSOCIATION_RETAIN_NONATOMIC);
     objc_setAssociatedObject(window, kTrafficLightOffsetXKey, @(config.trafficLightOffsetX), OBJC_ASSOCIATION_RETAIN_NONATOMIC);
@@ -8861,6 +8892,8 @@ static NSPanel *g_macPermissionGuidePanel = nil;
 static NSWindow *g_macPermissionSourceWindow = nil;
 static NSRect g_macPermissionSourceFrame = NSZeroRect;
 static BOOL g_hasMacPermissionSourceFrame = NO;
+static BOOL g_macPermissionGuideAttachedToSource = NO;
+static NSInteger g_macPermissionGuideRequestID = 0;
 
 static EBMacPermissionKind macPermissionKindFromCString(const char *kind) {
     if (!kind) return EBMacPermissionKindUnknown;
@@ -8891,14 +8924,14 @@ static NSString *macPermissionSettingsQuery(EBMacPermissionKind kind) {
     }
 }
 
-static NSString *macPermissionDisplayName(EBMacPermissionKind kind) {
+static NSString *macPermissionGuideInstruction(EBMacPermissionKind kind) {
     switch (kind) {
-        case EBMacPermissionKindAccessibility:
-            return @"Accessibility";
         case EBMacPermissionKindScreenRecording:
-            return @"Screen Recording";
+            return @"Then click Quit & Reopen.";
+        case EBMacPermissionKindAccessibility:
+            return @"Then return to Cachy and click Done.";
         default:
-            return @"Permission";
+            return @"Then return to Cachy.";
     }
 }
 
@@ -8913,6 +8946,15 @@ static BOOL openMacPermissionSettings(EBMacPermissionKind kind) {
     NSString *legacy = [NSString stringWithFormat:@"x-apple.systempreferences:com.apple.preference.security?%@", query];
     NSURL *legacyURL = [NSURL URLWithString:legacy];
     return legacyURL ? [[NSWorkspace sharedWorkspace] openURL:legacyURL] : NO;
+}
+
+static void activateSystemSettingsApp(void) {
+    for (NSRunningApplication *app in [[NSWorkspace sharedWorkspace] runningApplications]) {
+        NSString *bundleIdentifier = app.bundleIdentifier;
+        if (![bundleIdentifier isEqualToString:@"com.apple.systempreferences"]) continue;
+        [app activateWithOptions:NSApplicationActivateIgnoringOtherApps];
+        return;
+    }
 }
 
 static NSScreen *screenForPoint(NSPoint point) {
@@ -8950,8 +8992,7 @@ static BOOL findSystemSettingsFrame(NSRect *outFrame) {
         CGRect cgBounds = CGRectZero;
         if (!bounds || !CGRectMakeWithDictionaryRepresentation((__bridge CFDictionaryRef)bounds, &cgBounds)) continue;
 
-        NSScreen *mainScreen = [NSScreen mainScreen];
-        CGFloat screenHeight = mainScreen ? mainScreen.frame.size.height : 0;
+        CGFloat screenHeight = CGDisplayBounds(CGMainDisplayID()).size.height;
         if (screenHeight <= 0) continue;
 
         *outFrame = NSMakeRect(cgBounds.origin.x, screenHeight - cgBounds.origin.y - cgBounds.size.height, cgBounds.size.width, cgBounds.size.height);
@@ -8961,6 +9002,11 @@ static BOOL findSystemSettingsFrame(NSRect *outFrame) {
 
     CFRelease(list);
     return found;
+}
+
+static BOOL hasSystemSettingsFrame(void) {
+    NSRect frame = NSZeroRect;
+    return findSystemSettingsFrame(&frame);
 }
 
 static NSWindow *currentPermissionSourceWindow() {
@@ -8989,24 +9035,16 @@ static void capturePermissionSourceWindow() {
     }
 }
 
-static NSRect permissionGuidePanelFrame(CGFloat width, CGFloat height) {
-    if (g_hasMacPermissionSourceFrame) {
-        NSRect sourceFrame = g_macPermissionSourceWindow ? g_macPermissionSourceWindow.frame : g_macPermissionSourceFrame;
-        NSScreen *screen = screenForRect(sourceFrame);
-        NSRect visible = screen ? screen.visibleFrame : [[NSScreen mainScreen] visibleFrame];
-        CGFloat padding = 18;
-        CGFloat x = sourceFrame.origin.x + padding;
-        CGFloat y = sourceFrame.origin.y + padding;
-        x = MAX(NSMinX(visible) + padding, MIN(x, NSMaxX(visible) - width - padding));
-        y = MAX(NSMinY(visible) + padding, MIN(y, NSMaxY(visible) - height - padding));
-        return NSMakeRect(x, y, width, height);
+static NSRect permissionGuidePanelFrame(CGFloat width, CGFloat height, BOOL *attachToSourceWindow) {
+    if (attachToSourceWindow) {
+        *attachToSourceWindow = NO;
     }
 
     NSRect settingsFrame = NSZeroRect;
     if (findSystemSettingsFrame(&settingsFrame)) {
         NSScreen *screen = screenForRect(settingsFrame);
         NSRect visible = screen ? screen.visibleFrame : [[NSScreen mainScreen] visibleFrame];
-        CGFloat padding = 18;
+        CGFloat padding = 28;
         CGFloat x = NSMaxX(settingsFrame) - width - padding;
         CGFloat y = settingsFrame.origin.y + padding;
         x = MAX(NSMinX(visible) + padding, MIN(x, NSMaxX(visible) - width - padding));
@@ -9014,9 +9052,17 @@ static NSRect permissionGuidePanelFrame(CGFloat width, CGFloat height) {
         return NSMakeRect(x, y, width, height);
     }
 
-    NSScreen *screen = screenForPoint([NSEvent mouseLocation]);
+    NSScreen *screen = nil;
+    if (g_hasMacPermissionSourceFrame) {
+        NSRect sourceFrame = g_macPermissionSourceWindow ? g_macPermissionSourceWindow.frame : g_macPermissionSourceFrame;
+        screen = screenForRect(sourceFrame);
+    }
+    if (!screen) {
+        screen = screenForPoint([NSEvent mouseLocation]);
+    }
     NSRect visible = screen ? screen.visibleFrame : [[NSScreen mainScreen] visibleFrame];
-    return NSMakeRect(NSMidX(visible) - width / 2, NSMidY(visible) - height / 2, width, height);
+    CGFloat padding = 28;
+    return NSMakeRect(NSMaxX(visible) - width - padding, NSMinY(visible) + padding, width, height);
 }
 
 @interface EBMacPermissionDragView : NSView <NSDraggingSource>
@@ -9049,10 +9095,10 @@ static NSRect permissionGuidePanelFrame(CGFloat width, CGFloat height) {
     [super drawRect:dirtyRect];
 
     NSRect pillRect = NSInsetRect(self.bounds, 0, 0);
-    NSBezierPath *pill = [NSBezierPath bezierPathWithRoundedRect:pillRect xRadius:8 yRadius:8];
-    [[NSColor controlBackgroundColor] setFill];
+    NSBezierPath *pill = [NSBezierPath bezierPathWithRoundedRect:pillRect xRadius:10 yRadius:10];
+    [[NSColor colorWithWhite:1 alpha:0.10] setFill];
     [pill fill];
-    [[NSColor separatorColor] setStroke];
+    [[NSColor colorWithWhite:1 alpha:0.16] setStroke];
     [pill stroke];
 
     NSRect iconRect = NSMakeRect(12, NSMidY(self.bounds) - 16, 32, 32);
@@ -9128,19 +9174,21 @@ static NSString *fallbackAppName(NSString *appName) {
 }
 
 static void showMacPermissionGuidePanel(EBMacPermissionKind kind, NSURL *bundleURL, NSString *appName) {
-    CGFloat sourceWidth = g_hasMacPermissionSourceFrame ? g_macPermissionSourceFrame.size.width : 520;
-    CGFloat width = MIN(520, MAX(340, sourceWidth - 36));
-    CGFloat height = 116;
+    CGFloat width = 340;
+    CGFloat height = 112;
 
     if (g_macPermissionGuidePanel) {
-        if (g_macPermissionSourceWindow) {
+        if (g_macPermissionGuideAttachedToSource && g_macPermissionSourceWindow) {
             [g_macPermissionSourceWindow removeChildWindow:g_macPermissionGuidePanel];
         }
         [g_macPermissionGuidePanel close];
         g_macPermissionGuidePanel = nil;
+        g_macPermissionGuideAttachedToSource = NO;
     }
 
-    NSPanel *panel = [[NSPanel alloc] initWithContentRect:permissionGuidePanelFrame(width, height)
+    BOOL attachToSourceWindow = NO;
+    NSRect panelFrame = permissionGuidePanelFrame(width, height, &attachToSourceWindow);
+    NSPanel *panel = [[NSPanel alloc] initWithContentRect:panelFrame
                                                 styleMask:NSWindowStyleMaskBorderless | NSWindowStyleMaskNonactivatingPanel
                                                   backing:NSBackingStoreBuffered
                                                     defer:NO];
@@ -9155,47 +9203,78 @@ static void showMacPermissionGuidePanel(EBMacPermissionKind kind, NSURL *bundleU
     content.wantsLayer = YES;
     content.layer.cornerRadius = 16;
     content.layer.masksToBounds = YES;
+    content.layer.borderWidth = 1;
+    content.layer.borderColor = [[NSColor colorWithWhite:1 alpha:0.18] CGColor];
 
     NSVisualEffectView *background = [[NSVisualEffectView alloc] initWithFrame:content.bounds];
     background.autoresizingMask = NSViewWidthSizable | NSViewHeightSizable;
-    background.material = NSVisualEffectMaterialHUDWindow;
+    background.material = NSVisualEffectMaterialPopover;
     background.blendingMode = NSVisualEffectBlendingModeBehindWindow;
     background.state = NSVisualEffectStateActive;
     [content addSubview:background];
 
+    NSView *arrowBubble = [[NSView alloc] initWithFrame:NSMakeRect(18, 66, 28, 28)];
+    arrowBubble.wantsLayer = YES;
+    arrowBubble.layer.cornerRadius = 14;
+    arrowBubble.layer.backgroundColor = [[NSColor systemBlueColor] colorWithAlphaComponent:0.18].CGColor;
+    [content addSubview:arrowBubble];
+
     NSTextField *arrow = [NSTextField labelWithString:@"↑"];
-    arrow.font = [NSFont systemFontOfSize:30 weight:NSFontWeightMedium];
+    arrow.font = [NSFont systemFontOfSize:22 weight:NSFontWeightSemibold];
     arrow.textColor = [NSColor systemBlueColor];
     arrow.alignment = NSTextAlignmentCenter;
-    arrow.frame = NSMakeRect(24, 58, 28, 36);
+    arrow.frame = NSMakeRect(18, 65, 28, 28);
     [content addSubview:arrow];
 
-    NSTextField *title = [NSTextField labelWithString:[NSString stringWithFormat:@"Drag %@ to the list above to allow %@", fallbackAppName(appName), macPermissionDisplayName(kind)]];
+    NSTextField *title = [NSTextField labelWithString:[NSString stringWithFormat:@"Drag %@ into the list above.", fallbackAppName(appName)]];
     title.font = [NSFont systemFontOfSize:13 weight:NSFontWeightSemibold];
     title.textColor = [NSColor labelColor];
-    title.frame = NSMakeRect(70, 72, width - 92, 22);
+    title.frame = NSMakeRect(58, 76, width - 76, 18);
     title.lineBreakMode = NSLineBreakByTruncatingTail;
     [content addSubview:title];
 
-    NSButton *backButton = [[NSButton alloc] initWithFrame:NSMakeRect(18, 18, 34, 34)];
+    NSTextField *subtitle = [NSTextField labelWithString:macPermissionGuideInstruction(kind)];
+    subtitle.font = [NSFont systemFontOfSize:11 weight:NSFontWeightRegular];
+    subtitle.textColor = [NSColor secondaryLabelColor];
+    subtitle.frame = NSMakeRect(58, 58, width - 76, 16);
+    subtitle.lineBreakMode = NSLineBreakByTruncatingTail;
+    [content addSubview:subtitle];
+
+    NSButton *backButton = [[NSButton alloc] initWithFrame:NSMakeRect(18, 18, 30, 30)];
     backButton.title = @"‹";
-    backButton.font = [NSFont systemFontOfSize:24 weight:NSFontWeightRegular];
+    backButton.font = [NSFont systemFontOfSize:20 weight:NSFontWeightRegular];
     backButton.bezelStyle = NSBezelStyleCircular;
     backButton.target = panel;
     backButton.action = @selector(close);
     [content addSubview:backButton];
 
-    EBMacPermissionDragView *dragView = [[EBMacPermissionDragView alloc] initWithFrame:NSMakeRect(70, 18, width - 92, 40)
+    EBMacPermissionDragView *dragView = [[EBMacPermissionDragView alloc] initWithFrame:NSMakeRect(58, 18, width - 76, 40)
                                                                              bundleURL:bundleURL
                                                                                appName:fallbackAppName(appName)];
     [content addSubview:dragView];
 
     panel.contentView = content;
-    [panel makeKeyAndOrderFront:nil];
-    if (g_macPermissionSourceWindow) {
+    [panel orderFrontRegardless];
+    if (attachToSourceWindow && g_macPermissionSourceWindow) {
         [g_macPermissionSourceWindow addChildWindow:panel ordered:NSWindowAbove];
     }
+    g_macPermissionGuideAttachedToSource = attachToSourceWindow;
     g_macPermissionGuidePanel = panel;
+}
+
+static void showMacPermissionGuidePanelWhenSettingsReady(EBMacPermissionKind kind, NSURL *bundleURL, NSString *appName, NSInteger requestID, NSInteger attempt) {
+    if (requestID != g_macPermissionGuideRequestID) return;
+
+    const NSInteger maxAttempts = 28;
+    if (hasSystemSettingsFrame() || attempt >= maxAttempts) {
+        showMacPermissionGuidePanel(kind, bundleURL, appName);
+        return;
+    }
+
+    activateSystemSettingsApp();
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(150 * NSEC_PER_MSEC)), dispatch_get_main_queue(), ^{
+        showMacPermissionGuidePanelWhenSettingsReady(kind, bundleURL, appName, requestID, attempt + 1);
+    });
 }
 
 extern "C" BOOL macPermissionStatus(const char *kind) {
@@ -9230,18 +9309,21 @@ extern "C" int requestMacPermissionDragGuide(const char *kindCString, const char
         }
 
         capturePermissionSourceWindow();
+        NSInteger requestID = ++g_macPermissionGuideRequestID;
 
         if (!openMacPermissionSettings(kind)) {
             result = -3;
             return;
         }
+        activateSystemSettingsApp();
 
         NSString *appName = appNameCString && strlen(appNameCString) > 0
             ? [NSString stringWithUTF8String:appNameCString]
             : nil;
 
-        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(650 * NSEC_PER_MSEC)), dispatch_get_main_queue(), ^{
-            showMacPermissionGuidePanel(kind, bundleURL, appName);
+        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(250 * NSEC_PER_MSEC)), dispatch_get_main_queue(), ^{
+            activateSystemSettingsApp();
+            showMacPermissionGuidePanelWhenSettingsReady(kind, bundleURL, appName, requestID, 0);
         });
         result = 0;
     });
@@ -9250,8 +9332,9 @@ extern "C" int requestMacPermissionDragGuide(const char *kindCString, const char
 
 extern "C" void closeMacPermissionDragGuide(void) {
     dispatch_async(dispatch_get_main_queue(), ^{
+        g_macPermissionGuideRequestID++;
         if (g_macPermissionGuidePanel) {
-            if (g_macPermissionSourceWindow) {
+            if (g_macPermissionGuideAttachedToSource && g_macPermissionSourceWindow) {
                 [g_macPermissionSourceWindow removeChildWindow:g_macPermissionGuidePanel];
             }
             [g_macPermissionGuidePanel close];
@@ -9259,6 +9342,7 @@ extern "C" void closeMacPermissionDragGuide(void) {
         }
         g_macPermissionSourceWindow = nil;
         g_hasMacPermissionSourceFrame = NO;
+        g_macPermissionGuideAttachedToSource = NO;
     });
 }
 
