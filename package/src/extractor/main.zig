@@ -1751,51 +1751,33 @@ pub fn pipeToFileSystem(dir: std.fs.Dir, reader: anytype) !void {
                 if (file_size == 0 and unstripped_file_name.len == 0) return;
                 const link_name = unstripped_file_name;
 
-                // Read the link target from the tar data
-                var link_target_buffer: [1024]u8 = undefined;
-                const bytes_to_read = @min(file_size, link_target_buffer.len);
+                // Tar stores symlink targets in the header linkname field. The
+                // file size is normally zero, so reading target bytes from the
+                // payload skips valid symlinks like Contents/MacOS/bun -> Cachy.
+                const link_target = header.linkName();
+                if (link_target.len == 0) {
+                    continue :header;
+                }
 
-                if (bytes_to_read > 0) {
-                    // Ensure we have enough data in buffer
-                    while (end - start < bytes_to_read) {
-                        const dest_end = end - start;
-                        @memcpy(buffer[0..dest_end], buffer[start..end]);
-                        end = dest_end;
-                        start = 0;
-                        const ask = @min(buffer.len - end, 512);
-                        end += try reader.readAtLeast(buffer[end..], ask);
-                    }
+                // Create parent directory if needed
+                if (std.fs.path.dirname(link_name)) |dir_name| {
+                    try dir.makePath(dir_name);
+                }
 
-                    @memcpy(link_target_buffer[0..bytes_to_read], buffer[start .. start + bytes_to_read]);
-                    start += file_size;
-
-                    // Add padding
-                    const rounded_link_size = std.mem.alignForward(u64, file_size, 512);
-                    const link_pad_len = @as(usize, @intCast(rounded_link_size - file_size));
-                    start += link_pad_len;
-
-                    const link_target = link_target_buffer[0..bytes_to_read];
-
-                    // Create parent directory if needed
-                    if (std.fs.path.dirname(link_name)) |dir_name| {
-                        try dir.makePath(dir_name);
-                    }
-
-                    // Create the symbolic link
-                    if (builtin.os.tag == .windows) {
-                        // On Windows, symlinks require special privileges, so skip them
-                        // TODO: Consider copying the target file instead for Windows
-                        std.debug.print("Skipping symlink creation on Windows: {s} -> {s}\n", .{ link_name, link_target });
-                    } else {
-                        dir.symLink(link_target, link_name, .{}) catch {
-                            // On error, try to remove existing file/link and retry
-                            dir.deleteFile(link_name) catch {};
-                            dir.symLink(link_target, link_name, .{}) catch |err| {
-                                std.debug.print("Warning: Could not create symlink {s} -> {s}: {}\n", .{ link_name, link_target, err });
-                                // Continue extraction even if symlink fails
-                            };
+                // Create the symbolic link
+                if (builtin.os.tag == .windows) {
+                    // On Windows, symlinks require special privileges, so skip them
+                    // TODO: Consider copying the target file instead for Windows
+                    std.debug.print("Skipping symlink creation on Windows: {s} -> {s}\n", .{ link_name, link_target });
+                } else {
+                    dir.symLink(link_target, link_name, .{}) catch {
+                        // On error, try to remove existing file/link and retry
+                        dir.deleteFile(link_name) catch {};
+                        dir.symLink(link_target, link_name, .{}) catch |err| {
+                            std.debug.print("Warning: Could not create symlink {s} -> {s}: {}\n", .{ link_name, link_target, err });
+                            // Continue extraction even if symlink fails
                         };
-                    }
+                    };
                 }
             },
             .hard_link => return error.TarUnsupportedFileType,
@@ -1895,6 +1877,10 @@ pub const Header = struct {
 
     pub fn prefix(header: Header) []const u8 {
         return str(header, 345, 345 + 155);
+    }
+
+    pub fn linkName(header: Header) []const u8 {
+        return str(header, 157, 157 + 100);
     }
 
     pub fn fileType(header: Header) FileType {
