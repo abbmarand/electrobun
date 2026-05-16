@@ -10856,11 +10856,12 @@ ELECTROBUN_EXPORT void setWindowIcon(void* window, const char* iconPath) {
  */
 
 // Callback type for global shortcut triggers
-typedef void (*GlobalShortcutCallback)(const char* accelerator);
+typedef void (*GlobalShortcutCallback)(int shortcutId);
 static GlobalShortcutCallback g_globalShortcutCallback = nullptr;
 
 // Storage for registered shortcuts
 struct ShortcutInfo {
+    int id;
     KeyCode keycode;
     unsigned int modifiers;
 };
@@ -10868,6 +10869,7 @@ static std::map<std::string, ShortcutInfo> g_globalShortcuts;
 static Display* g_shortcutDisplay = nullptr;
 static std::thread g_shortcutThread;
 static bool g_shortcutThreadRunning = false;
+static int g_nextGlobalShortcutId = 1;
 
 // Helper to get X11 keysym from key string
 static KeySym getKeySym(const std::string& key) {
@@ -10978,7 +10980,7 @@ static void shortcutEventLoop() {
                 for (const auto& pair : g_globalShortcuts) {
                     if (pair.second.keycode == keycode && pair.second.modifiers == state) {
                         if (g_globalShortcutCallback) {
-                            g_globalShortcutCallback(pair.first.c_str());
+                            g_globalShortcutCallback(pair.second.id);
                         }
                         break;
                     }
@@ -11017,18 +11019,18 @@ ELECTROBUN_EXPORT void setGlobalShortcutCallback(GlobalShortcutCallback callback
 }
 
 // Register a global keyboard shortcut
-ELECTROBUN_EXPORT bool registerGlobalShortcut(const char* accelerator) {
+ELECTROBUN_EXPORT int registerGlobalShortcut(const char* accelerator) {
     printf("GlobalShortcut: registerGlobalShortcut called for '%s'\n", accelerator ? accelerator : "(null)");
     
     if (!accelerator) {
         fprintf(stderr, "ERROR: Cannot register shortcut - accelerator is null\n");
-        return false;
+        return 0;
     }
     
     if (!g_shortcutDisplay) {
         fprintf(stderr, "ERROR: Cannot register shortcut '%s' - display not ready (g_shortcutDisplay=%p)\n", 
                 accelerator, g_shortcutDisplay);
-        return false;
+        return 0;
     }
 
     std::string accelStr(accelerator);
@@ -11036,7 +11038,7 @@ ELECTROBUN_EXPORT bool registerGlobalShortcut(const char* accelerator) {
     // Check if already registered
     if (g_globalShortcuts.find(accelStr) != g_globalShortcuts.end()) {
         fprintf(stderr, "GlobalShortcut already registered: %s\n", accelerator);
-        return false;
+        return 0;
     }
 
     // Parse the accelerator
@@ -11046,13 +11048,13 @@ ELECTROBUN_EXPORT bool registerGlobalShortcut(const char* accelerator) {
 
     if (keysym == NoSymbol) {
         fprintf(stderr, "ERROR: Unknown key: %s\n", key.c_str());
-        return false;
+        return 0;
     }
 
     KeyCode keycode = XKeysymToKeycode(g_shortcutDisplay, keysym);
     if (keycode == 0) {
         fprintf(stderr, "ERROR: Failed to get keycode for key: %s\n", key.c_str());
-        return false;
+        return 0;
     }
 
     Window root = DefaultRootWindow(g_shortcutDisplay);
@@ -11076,13 +11078,14 @@ ELECTROBUN_EXPORT bool registerGlobalShortcut(const char* accelerator) {
     // we'll assume success and let the user know if the shortcut doesn't work
 
     ShortcutInfo info;
+    info.id = g_nextGlobalShortcutId++;
     info.keycode = keycode;
     info.modifiers = modifiers;
     g_globalShortcuts[accelStr] = info;
 
-    printf("GlobalShortcut registered: %s (keycode: %d, modifiers: 0x%X)\n",
-           accelerator, keycode, modifiers);
-    return true;
+    printf("GlobalShortcut registered: %s id=%d (keycode: %d, modifiers: 0x%X)\n",
+           accelerator, info.id, keycode, modifiers);
+    return info.id;
 }
 
 // Unregister a global keyboard shortcut

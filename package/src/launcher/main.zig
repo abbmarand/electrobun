@@ -103,8 +103,12 @@ fn isDevBuild(allocator: std.mem.Allocator, exe_dir: []const u8) bool {
     return false;
 }
 
-fn getWindowsRuntimeName(allocator: std.mem.Allocator, exe_dir: []const u8) []const u8 {
-    const fallback = "bun.exe";
+fn getAppRuntimeName(
+    allocator: std.mem.Allocator,
+    exe_dir: []const u8,
+    fallback: []const u8,
+    suffix: []const u8,
+) []const u8 {
     const version_path = std.fs.path.join(allocator, &.{ exe_dir, "..", "Resources", "version.json" }) catch return fallback;
 
     const file = std.fs.openFileAbsolute(version_path, .{}) catch return fallback;
@@ -124,7 +128,7 @@ fn getWindowsRuntimeName(allocator: std.mem.Allocator, exe_dir: []const u8) []co
             else => runtime_name.append(ch) catch return fallback,
         }
     }
-    runtime_name.appendSlice(".exe") catch return fallback;
+    runtime_name.appendSlice(suffix) catch return fallback;
     const runtime_name_slice = runtime_name.toOwnedSlice() catch return fallback;
 
     const runtime_path = std.fs.path.join(allocator, &.{ exe_dir, runtime_name_slice }) catch return fallback;
@@ -194,12 +198,16 @@ pub fn main() !void {
         .macos => {
             // macOS: launcher is in MacOS/, resources in Resources/
             resources_path = try std.fs.path.join(arena_alloc, &.{ exe_dir, "..", "Resources", "main.js" });
-            argv = &[_][]const u8{ "./bun", resources_path };
+            const bun_name = getAppRuntimeName(arena_alloc, exe_dir, "bun", "");
+            argv = &[_][]const u8{ try std.fs.path.join(arena_alloc, &.{ exe_dir, bun_name }), resources_path };
         },
         .linux, .windows => {
             // Linux/Windows: launcher is in bin/, resources in Resources/
             resources_path = try std.fs.path.join(arena_alloc, &.{ exe_dir, "..", "Resources", "main.js" });
-            const bun_name = if (builtin.os.tag == .windows) getWindowsRuntimeName(arena_alloc, exe_dir) else "bun";
+            const bun_name = if (builtin.os.tag == .windows)
+                getAppRuntimeName(arena_alloc, exe_dir, "bun.exe", ".exe")
+            else
+                "bun";
             argv = &[_][]const u8{ try std.fs.path.join(arena_alloc, &.{ exe_dir, bun_name }), resources_path };
         },
         else => @panic("Unsupported platform"),

@@ -2904,7 +2904,12 @@ usageDescriptions : ""}${urlTypes ? "\n" + urlTypes : ""}${documentTypes ?
 		// Note: .bin/bun binary in node_modules is a symlink to the versioned one in another place
 		// in node_modules, so we have to dereference here to get the actual binary in the bundle.
 		const windowsRuntimeFileName = `${config.app.name.replace(/[<>:"/\\|?*]/g, "_")}.exe`;
-		const runtimeFileName = targetOS === "win" ? windowsRuntimeFileName : "bun";
+		const runtimeFileName =
+			targetOS === "win"
+				? windowsRuntimeFileName
+				: targetOS === "macos"
+					? appFileName
+					: "bun";
 		const bunBinaryDestInBundlePath =
 			join(appBundleMacOSPath, runtimeFileName) + (targetOS === "win" ? "" : targetBinExt);
 		const destFolder2 = dirname(bunBinaryDestInBundlePath);
@@ -2915,6 +2920,17 @@ usageDescriptions : ""}${urlTypes ? "\n" + urlTypes : ""}${documentTypes ?
 		cpSync(bunBinarySourcePath, bunBinaryDestInBundlePath, {
 			dereference: true,
 		});
+		if (targetOS === "macos" && runtimeFileName !== "bun") {
+			// Keep old launcher binaries working while new ones prefer the app-named runtime.
+			const legacyRuntimePath = join(appBundleMacOSPath, "bun");
+			try {
+				symlinkSync(runtimeFileName, legacyRuntimePath);
+			} catch {
+				cpSync(bunBinaryDestInBundlePath, legacyRuntimePath, {
+					dereference: true,
+				});
+			}
+		}
 
 		// Copy ICU data file if it exists (Linux/Windows external ICU builds)
 		// ICU version varies per platform WebKit build, so detect the filename dynamically

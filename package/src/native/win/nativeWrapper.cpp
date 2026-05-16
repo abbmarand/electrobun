@@ -11842,7 +11842,7 @@ std::string getMimeTypeForFile(const std::string& path) {
  */
 
 // Callback type for global shortcut triggers
-typedef void (*GlobalShortcutCallback)(const char* accelerator);
+typedef void (*GlobalShortcutCallback)(int shortcutId);
 static GlobalShortcutCallback g_globalShortcutCallback = nullptr;
 
 // Custom Windows messages for hotkey thread communication
@@ -11853,6 +11853,7 @@ static GlobalShortcutCallback g_globalShortcutCallback = nullptr;
 // Structure to pass hotkey registration data between threads
 struct HotkeyRegisterData {
     int hotkeyId;
+    int callbackId;
     UINT modifiers;
     UINT vkCode;
     std::string accelerator;
@@ -11860,14 +11861,18 @@ struct HotkeyRegisterData {
     HANDLE completionEvent;  // Signal when operation is complete
 };
 
-// Storage for registered shortcuts: accelerator string -> hotkey ID
-static std::map<std::string, int> g_globalShortcuts;
-static std::map<int, std::string> g_hotkeyIdToAccelerator;
+// Storage for registered shortcuts: accelerator string -> registered hotkey IDs
+struct ShortcutRegistration {
+    int callbackId;
+    std::vector<int> hotkeyIds;
+};
+static std::map<std::string, ShortcutRegistration> g_globalShortcuts;
+static std::map<int, int> g_hotkeyIdToCallbackId;
 static int g_nextHotkeyId = 1;
 static HWND g_hotkeyWindow = NULL;
 static std::thread g_hotkeyThread;
 static bool g_hotkeyThreadRunning = false;
-static std::mutex g_hotkeyMutex;  // Protect access to g_globalShortcuts and g_hotkeyIdToAccelerator
+static std::mutex g_hotkeyMutex;  // Protect access to g_globalShortcuts and g_hotkeyIdToCallbackId
 
 // Helper to parse virtual key code from key string
 static UINT getVirtualKeyCode(const std::string& key) {
@@ -11937,9 +11942,9 @@ static LRESULT CALLBACK HotkeyWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM
     if (msg == WM_HOTKEY) {
         int hotkeyId = (int)wParam;
         std::lock_guard<std::mutex> lock(g_hotkeyMutex);
-        auto it = g_hotkeyIdToAccelerator.find(hotkeyId);
-        if (it != g_hotkeyIdToAccelerator.end() && g_globalShortcutCallback) {
-            g_globalShortcutCallback(it->second.c_str());
+        auto it = g_hotkeyIdToCallbackId.find(hotkeyId);
+        if (it != g_hotkeyIdToCallbackId.end() && g_globalShortcutCallback) {
+            g_globalShortcutCallback(it->second);
         }
         return 0;
     }
@@ -11948,8 +11953,10 @@ static LRESULT CALLBACK HotkeyWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM
         BOOL success = RegisterHotKey(hwnd, data->hotkeyId, data->modifiers, data->vkCode);
         if (success) {
             std::lock_guard<std::mutex> lock(g_hotkeyMutex);
-            g_globalShortcuts[data->accelerator] = data->hotkeyId;
-            g_hotkeyIdToAccelerator[data->hotkeyId] = data->accelerator;
+            auto& registration = g_globalShortcuts[data->accelerator];
+            registration.callbackId = data->callbackId;
+            registration.hotkeyIds.push_back(data->hotkeyId);
+            g_hotkeyIdToCallbackId[data->hotkeyId] = data->callbackId;
             ::log("GlobalShortcut registered successfully: '" + data->accelerator + "' (id=" + std::to_string(data->hotkeyId) + ", total=" + std::to_string(g_globalShortcuts.size()) + ")");
         } else {
             DWORD error = GetLastError();
@@ -11967,10 +11974,12 @@ static LRESULT CALLBACK HotkeyWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM
     else if (msg == WM_UNREGISTER_ALL_HOTKEYS) {
         std::lock_guard<std::mutex> lock(g_hotkeyMutex);
         for (const auto& pair : g_globalShortcuts) {
-            UnregisterHotKey(hwnd, pair.second);
+            for (int hotkeyId : pair.second.hotkeyIds) {
+                UnregisterHotKey(hwnd, hotkeyId);
+            }
         }
         g_globalShortcuts.clear();
-        g_hotkeyIdToAccelerator.clear();
+        g_hotkeyIdToCallbackId.clear();
         ::log("GlobalShortcut: Unregistered all shortcuts");
         return 0;
     }
@@ -12022,10 +12031,10 @@ extern "C" ELECTROBUN_EXPORT void setGlobalShortcutCallback(GlobalShortcutCallba
 }
 
 // Register a global keyboard shortcut
-extern "C" ELECTROBUN_EXPORT BOOL registerGlobalShortcut(const char* accelerator) {
+extern "C" ELECTROBUN_EXPORT int registerGlobalShortcut(const char* accelerator) {
     if (!accelerator) {
         ::log("ERROR: Cannot register shortcut - invalid accelerator");
-        return FALSE;
+        return 0;
     }
 
     // Wait for hotkey window to be ready (with timeout)
@@ -12039,7 +12048,7 @@ extern "C" ELECTROBUN_EXPORT BOOL registerGlobalShortcut(const char* accelerator
 
     if (!g_hotkeyWindow) {
         ::log("ERROR: Cannot register shortcut - hotkey window not ready after " + std::to_string(waitCount) + "ms");
-        return FALSE;
+        return 0;
     }
 
     std::string accelStr(accelerator);
@@ -12049,7 +12058,7 @@ extern "C" ELECTROBUN_EXPORT BOOL registerGlobalShortcut(const char* accelerator
         std::lock_guard<std::mutex> lock(g_hotkeyMutex);
         if (g_globalShortcuts.find(accelStr) != g_globalShortcuts.end()) {
             ::log("GlobalShortcut already registered: " + accelStr);
-            return FALSE;
+            return 0;
         }
     }
 
@@ -12060,7 +12069,7 @@ extern "C" ELECTROBUN_EXPORT BOOL registerGlobalShortcut(const char* accelerator
 
     if (vkCode == 0) {
         ::log("ERROR: Unknown key: " + key);
-        return FALSE;
+        return 0;
     }
 
     // Prepare registration data
@@ -12070,6 +12079,7 @@ extern "C" ELECTROBUN_EXPORT BOOL registerGlobalShortcut(const char* accelerator
 
     HotkeyRegisterData data;
     data.hotkeyId = hotkeyId;
+    data.callbackId = hotkeyId;
     data.modifiers = modifiers | MOD_NOREPEAT;
     data.vkCode = vkCode;
     data.accelerator = accelStr;
@@ -12087,7 +12097,7 @@ extern "C" ELECTROBUN_EXPORT BOOL registerGlobalShortcut(const char* accelerator
 
     if (waitResult != WAIT_OBJECT_0) {
         ::log("ERROR: Registration timeout for '" + accelStr + "'");
-        return FALSE;
+        return 0;
     }
 
     if (result && (modifiers & MOD_ALT) && !(modifiers & MOD_CONTROL)) {
@@ -12097,6 +12107,7 @@ extern "C" ELECTROBUN_EXPORT BOOL registerGlobalShortcut(const char* accelerator
 
         HotkeyRegisterData altGrData;
         altGrData.hotkeyId = altGrId;
+        altGrData.callbackId = hotkeyId;
         altGrData.modifiers = (modifiers | MOD_CONTROL) | MOD_NOREPEAT;
         altGrData.vkCode = vkCode;
         altGrData.accelerator = accelStr;
@@ -12112,7 +12123,7 @@ extern "C" ELECTROBUN_EXPORT BOOL registerGlobalShortcut(const char* accelerator
         }
     }
 
-    return result;
+    return result ? hotkeyId : 0;
 }
 
 // Unregister a global keyboard shortcut
@@ -12120,20 +12131,24 @@ extern "C" ELECTROBUN_EXPORT BOOL unregisterGlobalShortcut(const char* accelerat
     if (!accelerator) return FALSE;
 
     std::string accelStr(accelerator);
-    int hotkeyId = -1;
+    std::vector<int> hotkeyIds;
 
     {
         std::lock_guard<std::mutex> lock(g_hotkeyMutex);
         auto it = g_globalShortcuts.find(accelStr);
         if (it != g_globalShortcuts.end()) {
-            hotkeyId = it->second;
-            g_hotkeyIdToAccelerator.erase(hotkeyId);
+            hotkeyIds = it->second.hotkeyIds;
+            for (int hotkeyId : hotkeyIds) {
+                g_hotkeyIdToCallbackId.erase(hotkeyId);
+            }
             g_globalShortcuts.erase(it);
         }
     }
 
-    if (hotkeyId != -1 && g_hotkeyWindow) {
-        PostMessage(g_hotkeyWindow, WM_UNREGISTER_HOTKEY, hotkeyId, 0);
+    if (!hotkeyIds.empty() && g_hotkeyWindow) {
+        for (int hotkeyId : hotkeyIds) {
+            PostMessage(g_hotkeyWindow, WM_UNREGISTER_HOTKEY, hotkeyId, 0);
+        }
         ::log("GlobalShortcut unregistered: " + accelStr);
         return TRUE;
     }
