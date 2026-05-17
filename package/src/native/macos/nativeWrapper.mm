@@ -4664,6 +4664,44 @@ extern "C" void wgpuRunGPUTest(AbstractView* abstractView) {
 
 // ----------------------- CEF and NSApplication Setup (C++ and ObjC) -----------------------
 
+static BOOL isViewDescendantOfView(NSView *view, NSView *ancestor) {
+    for (NSView *candidate = view; candidate != nil; candidate = candidate.superview) {
+        if (candidate == ancestor) return YES;
+    }
+    return NO;
+}
+
+static BOOL shouldSuppressNativeContextClick(NSEvent *event) {
+    NSEventType type = event.type;
+    BOOL isRightClick =
+        type == NSEventTypeRightMouseDown ||
+        type == NSEventTypeRightMouseUp;
+    BOOL isControlClick =
+        (type == NSEventTypeLeftMouseDown || type == NSEventTypeLeftMouseUp) &&
+        ((event.modifierFlags & NSEventModifierFlagControl) != 0);
+
+    if (!isRightClick && !isControlClick) return NO;
+    if (!globalAbstractViews) return NO;
+
+    NSWindow *window = event.window;
+    NSView *contentView = window.contentView;
+    if (!contentView) return NO;
+
+    NSPoint pointInContent = [contentView convertPoint:event.locationInWindow fromView:nil];
+    NSView *targetView = [contentView hitTest:pointInContent];
+    if (!targetView) return NO;
+
+    for (AbstractView *abstractView in [globalAbstractViews allValues]) {
+        if (abstractView.isSandboxed) continue;
+        NSView *webview = abstractView.nsView;
+        if (webview && isViewDescendantOfView(targetView, webview)) {
+            return YES;
+        }
+    }
+
+    return NO;
+}
+
 @implementation ElectrobunNSApplication
     - (BOOL)isHandlingSendEvent {
         return handlingSendEvent_;
@@ -4672,6 +4710,10 @@ extern "C" void wgpuRunGPUTest(AbstractView* abstractView) {
         handlingSendEvent_ = handlingSendEvent;
     }
     - (void)sendEvent:(NSEvent*)event {
+        if (shouldSuppressNativeContextClick(event)) {
+            return;
+        }
+
         CefScopedSendingEvent sendingEventScoper;
         [super sendEvent:event];
     }
