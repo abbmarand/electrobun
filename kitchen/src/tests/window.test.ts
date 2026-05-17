@@ -357,9 +357,9 @@ export const windowTests = [
   }), 
  
   defineTest({
-    name: "Window visibleOnAllWorkspaces (macOS)",
+    name: "Window visibleOnAllWorkspaces fullscreen auxiliary panel (macOS)",
     category: "BrowserWindow",
-    description: "Test macOS Spaces visible-on-all-workspaces behavior",
+    description: "Test macOS Spaces visible-on-all-workspaces behavior for launcher-style panels",
     async run({ createWindow, log }) {
       if (process.platform !== "darwin") {
         log(`Skipping macOS-specific visibleOnAllWorkspaces behavior on ${process.platform}`);
@@ -368,8 +368,15 @@ export const windowTests = [
 
       const win = await createWindow({
         url: "views://test-harness/index.html",
-        title: "Visible On All Workspaces Test",
+        title: "Visible On All Workspaces Panel Test",
         renderer: 'cef',
+        titleBarStyle: "hidden",
+        styleMask: {
+          Closable: false,
+          Miniaturizable: false,
+          Resizable: false,
+          NonactivatingPanel: true,
+        },
       });
 
       await new Promise((resolve) => setTimeout(resolve, 300));

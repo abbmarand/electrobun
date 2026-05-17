@@ -10991,13 +10991,42 @@ extern "C" void setWindowIcon(void* window, const char* iconPath) {
     // Not supported on macOS - macOS windows use the app bundle icon
 }
 
+static BOOL electrobunWindowHidesTitleBar(NSWindow *window) {
+    NSString *titleBarStyle = objc_getAssociatedObject(window, kTrafficLightTitleBarStyleKey);
+    return [titleBarStyle isEqualToString:@"hidden"] ||
+        [titleBarStyle isEqualToString:@"hiddenInset"];
+}
+
+static BOOL electrobunWindowHasNoTrafficLights(NSWindow *window) {
+    NSWindowStyleMask styleMask = [window styleMask];
+    BOOL hasClose = (styleMask & NSWindowStyleMaskClosable) != 0;
+    BOOL hasMini = (styleMask & NSWindowStyleMaskMiniaturizable) != 0;
+    BOOL hasZoom = (styleMask & NSWindowStyleMaskResizable) != 0;
+    return !hasClose && !hasMini && !hasZoom;
+}
+
 extern "C" void setWindowVisibleOnAllWorkspaces(NSWindow *window, bool visible) {
     dispatch_sync(dispatch_get_main_queue(), ^{
         NSWindowCollectionBehavior behavior = [window collectionBehavior];
         if (visible) {
             behavior |= NSWindowCollectionBehaviorCanJoinAllSpaces;
+            behavior |= NSWindowCollectionBehaviorFullScreenAuxiliary;
+            behavior &= ~NSWindowCollectionBehaviorFullScreenPrimary;
+            behavior &= ~NSWindowCollectionBehaviorFullScreenNone;
+            behavior &= ~NSWindowCollectionBehaviorFullScreenDisallowsTiling;
         } else {
             behavior &= ~NSWindowCollectionBehaviorCanJoinAllSpaces;
+            behavior &= ~NSWindowCollectionBehaviorFullScreenAuxiliary;
+
+            if (electrobunWindowHidesTitleBar(window) && electrobunWindowHasNoTrafficLights(window)) {
+                behavior &= ~NSWindowCollectionBehaviorFullScreenPrimary;
+                behavior |= NSWindowCollectionBehaviorFullScreenNone;
+                behavior |= NSWindowCollectionBehaviorFullScreenDisallowsTiling;
+            } else {
+                behavior &= ~NSWindowCollectionBehaviorFullScreenNone;
+                behavior &= ~NSWindowCollectionBehaviorFullScreenDisallowsTiling;
+                behavior |= NSWindowCollectionBehaviorFullScreenPrimary;
+            }
         }
         [window setCollectionBehavior:behavior];
     });

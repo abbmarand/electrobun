@@ -121,6 +121,7 @@ export class TestExecutor {
           },
           rpc: options.rpc,
           titleBarStyle: options.titleBarStyle,
+          styleMask: options.styleMask,
           trafficLightOffset: options.trafficLightOffset,
           sandbox: options.sandbox || false,
         });

@@ -381,7 +381,9 @@ export function createRPC<
 			throw new Error("Message does not contain a type.");
 
 		if (message.type === "request") {
-			if (!transport.send || !requestHandler)
+			const responseTransport = transport;
+			const sendResponse = responseTransport.send;
+			if (!sendResponse || !requestHandler)
 				throw missingTransportMethodError(
 					["send", "requestHandler"],
 					"handle requests",
@@ -405,7 +407,7 @@ export function createRPC<
 				};
 			}
 			debugHooks.onSend?.(response);
-			transport.send(response);
+			sendResponse(response);
 			return;
 		}
 

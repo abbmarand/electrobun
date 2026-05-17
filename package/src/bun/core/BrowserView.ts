@@ -365,7 +365,11 @@ export class BrowserView<T extends RPCWithTransport = RPCWithTransport> {
 				if (that.isRemoved) {
 					return;
 				}
-				that.rpcHandler = handler;
+				that.rpcHandler = (msg: unknown) => {
+					// Shared RPC instances must answer on the webview that sent the request.
+					that.rpc?.setTransport(that.createTransport());
+					handler(msg);
+				};
 			},
 		};
 	};

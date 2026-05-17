@@ -46,6 +46,21 @@ export interface TestContext {
 
 export type TitleBarStyle = 'default' | 'hiddenInset' | 'hidden';
 
+export interface WindowStyleMaskOptions {
+  Borderless?: boolean;
+  Titled?: boolean;
+  Closable?: boolean;
+  Miniaturizable?: boolean;
+  Resizable?: boolean;
+  UnifiedTitleAndToolbar?: boolean;
+  FullScreen?: boolean;
+  FullSizeContentView?: boolean;
+  UtilityWindow?: boolean;
+  DocModalWindow?: boolean;
+  NonactivatingPanel?: boolean;
+  HUDWindow?: boolean;
+}
+
 export interface WindowOptions {
   url?: string;
   html?: string;
@@ -57,6 +72,7 @@ export interface WindowOptions {
   y?: number;
   title?: string;
   titleBarStyle?: TitleBarStyle;
+  styleMask?: WindowStyleMaskOptions;
   trafficLightOffset?: { x: number; y: number };
   renderer?: 'cef' | 'native';
   hidden?: boolean;
