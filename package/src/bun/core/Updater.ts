@@ -8,7 +8,7 @@ import {
 	statSync,
 	readdirSync,
 } from "fs";
-import { execSync } from "child_process";
+import { execFileSync, execSync } from "child_process";
 import { OS as currentOS, ARCH as currentArch } from "../../shared/platform";
 import { getPlatformPrefix, getTarballFileName } from "../../shared/naming";
 import { quit } from "./Utils";
@@ -966,6 +966,8 @@ const Updater = {
 						// that runs after the app exits to do the replacement
 						const parentDir = dirname(runningAppBundlePath);
 						const updateScriptPath = join(parentDir, "update.bat");
+						const updateLauncherScriptPath = join(parentDir, "update.vbs");
+						const updateLogPath = join(parentDir, "update.log");
 						const launcherPath = join(
 							runningAppBundlePath,
 							"bin",
@@ -977,6 +979,10 @@ const Updater = {
 						const newAppWin = newAppBundlePath.replace(/\//g, "\\");
 						const extractionDirWin = extractionDir.replace(/\//g, "\\");
 						const launcherPathWin = launcherPath.replace(/\//g, "\\");
+						const scriptPathWin = updateScriptPath.replace(/\//g, "\\");
+						const launcherScriptPathWin = updateLauncherScriptPath.replace(/\//g, "\\");
+						const updateLogWin = updateLogPath.replace(/\//g, "\\");
+						const taskName = `ElectrobunUpdate_${Date.now()}`;
 
 						// Create a batch script that will:
 						// 1. Wait for the current app and its helper processes to exit
@@ -988,6 +994,8 @@ const Updater = {
 						// 5. Clean up
 						const updateScript = `@echo off
 setlocal
+set "UPDATE_LOG=${updateLogWin}"
+> "%UPDATE_LOG%" echo [%DATE% %TIME%] Starting update.
 
 :: Wait for the app and any CEF helper processes to fully exit.
 :: launcher.exe spawns bun.exe which spawns "bun Helper*.exe" processes that
@@ -1010,56 +1018,80 @@ timeout /t 2 /nobreak >nul
 set rmRetry=0
 :rmloop
 if not exist "${runningAppWin}" goto rmdone
-rmdir /s /q "${runningAppWin}" 2>nul
+rmdir /s /q "${runningAppWin}" >>"%UPDATE_LOG%" 2>&1
 if not exist "${runningAppWin}" goto rmdone
 set /a rmRetry=rmRetry+1
 if %rmRetry% GEQ 10 goto rmfailed
 timeout /t 2 /nobreak >nul
 goto rmloop
 :rmfailed
-echo Update failed: could not remove "${runningAppWin}" after retries.
-echo Files may still be locked by a helper process.
-pause
+>> "%UPDATE_LOG%" echo [%DATE% %TIME%] Update failed: could not remove "${runningAppWin}" after retries.
+>> "%UPDATE_LOG%" echo [%DATE% %TIME%] Files may still be locked by a helper process.
+schtasks /delete /tn "${taskName}" /f >nul 2>&1
+del "${launcherScriptPathWin}" >nul 2>&1
 exit /b 1
 :rmdone
 
 :: Move new app to current location (safe now that destination is gone)
-move "${newAppWin}" "${runningAppWin}"
+move /Y "${newAppWin}" "${runningAppWin}" >>"%UPDATE_LOG%" 2>&1
 if not exist "${launcherPathWin}" (
-    echo Update failed: launcher not found at "${launcherPathWin}" after move.
-    pause
+    >> "%UPDATE_LOG%" echo [%DATE% %TIME%] Update failed: launcher not found at "${launcherPathWin}" after move.
+    schtasks /delete /tn "${taskName}" /f >nul 2>&1
+    del "${launcherScriptPathWin}" >nul 2>&1
     exit /b 1
 )
 
 :: Clean up extraction directory
-rmdir /s /q "${extractionDirWin}" 2>nul
+rmdir /s /q "${extractionDirWin}" >>"%UPDATE_LOG%" 2>&1
 
 :: Launch the new app
 start "" "${launcherPathWin}"
 
-:: Clean up scheduled tasks starting with ElectrobunUpdate_
-for /f "tokens=1" %%t in ('schtasks /query /fo list ^| findstr /i "ElectrobunUpdate_"') do (
-    schtasks /delete /tn "%%t" /f >nul 2>&1
-)
+:: Clean up this scheduled task and helper files.
+schtasks /delete /tn "${taskName}" /f >nul 2>&1
 
-:: Delete this update script after a short delay
+:: Delete helper files after a short delay.
 ping -n 2 127.0.0.1 >nul
-del "%~f0"
+del "${launcherScriptPathWin}" >nul 2>&1
+del "%UPDATE_LOG%" >nul 2>&1
+del "%~f0" >nul 2>&1
 `;
 
 						await Bun.write(updateScriptPath, updateScript);
 
-						// Use Windows Task Scheduler to run the update script independently
-						// This ensures the script runs even after the app exits
-						const scriptPathWin = updateScriptPath.replace(/\//g, "\\");
-						const taskName = `ElectrobunUpdate_${Date.now()}`;
+						// Use a tiny WSH launcher so Task Scheduler starts the batch file
+						// without flashing a console window during silent updates.
+						const updateLauncherScript = `Set shell = CreateObject("WScript.Shell")
+If WScript.Arguments.Count = 0 Then WScript.Quit 1
+scriptPath = WScript.Arguments(0)
+shell.Run "cmd.exe /c " & Chr(34) & scriptPath & Chr(34), 0, False
+`;
+						await Bun.write(updateLauncherScriptPath, updateLauncherScript);
 
+						// Use Windows Task Scheduler to run the update script independently.
+						// This ensures the script runs even after the app exits.
 						// Create a scheduled task that runs immediately and deletes itself
-						execSync(
-							`schtasks /create /tn "${taskName}" /tr "cmd /c \\"${scriptPathWin}\\"" /sc once /st 00:00 /f`,
-							{ stdio: "ignore" },
+						execFileSync(
+							"schtasks",
+							[
+								"/create",
+								"/tn",
+								taskName,
+								"/tr",
+								`wscript.exe //B //Nologo "${launcherScriptPathWin}" "${scriptPathWin}"`,
+								"/sc",
+								"once",
+								"/st",
+								"00:00",
+								"/f",
+							],
+							{ stdio: "ignore", windowsHide: true },
 						);
-						execSync(`schtasks /run /tn "${taskName}"`, { stdio: "ignore" });
+						execFileSync(
+							"schtasks",
+							["/run", "/tn", taskName],
+							{ stdio: "ignore", windowsHide: true },
+						);
 						// The task will be cleaned up by Windows after it runs, or we delete it in the batch script
 
 						// Use quit() for graceful shutdown - this closes all windows and processes
