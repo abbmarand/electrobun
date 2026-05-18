@@ -10397,6 +10397,7 @@ static CGEventRef globalShortcutTapCallback(CGEventTapProxy proxy, CGEventType t
     }
 
     CGKeyCode keyCode = (CGKeyCode)CGEventGetIntegerValueField(event, kCGKeyboardEventKeycode);
+    int64_t isAutorepeat = CGEventGetIntegerValueField(event, kCGKeyboardEventAutorepeat);
     CGEventFlags flags = CGEventGetFlags(event);
     CGEventFlags relevantMask = (kCGEventFlagMaskCommand | kCGEventFlagMaskControl |
                                  kCGEventFlagMaskAlternate | kCGEventFlagMaskShift);
@@ -10405,6 +10406,11 @@ static CGEventRef globalShortcutTapCallback(CGEventTapProxy proxy, CGEventType t
     [g_globalShortcutsLock lock];
     for (const auto& shortcut : g_registeredShortcuts) {
         if (shortcut.keyCode == keyCode && shortcut.modifierFlags == eventMods) {
+            if (isAutorepeat != 0) {
+                [g_globalShortcutsLock unlock];
+                return nullptr;
+            }
+
             int shortcutId = shortcut.id;
             std::string accelerator = shortcut.accelerator;
             [g_globalShortcutsLock unlock];
