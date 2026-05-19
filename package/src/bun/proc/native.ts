@@ -3054,7 +3054,14 @@ const webviewEventJSCallback = new JSCallback(
 			return;
 		}
 
-		webviewEventHandler(id, eventName, detail);
+		try {
+			webviewEventHandler(id, eventName, detail);
+		} catch (err) {
+			console.error("[webviewEventJSCallback] Error handling event:", {
+				eventName,
+				err,
+			});
+		}
 	},
 	{
 		args: [FFIType.u32, FFIType.cstring, FFIType.cstring],

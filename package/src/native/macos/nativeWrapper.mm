@@ -62,6 +62,7 @@ static bool wgpuDebugEnabled() {
 #include <mutex>
 #include <atomic>
 #include <string.h>
+#include <stdlib.h>
 
 // Shared cross-platform utilities
 #include "../shared/glob_match.h"
@@ -2360,21 +2361,72 @@ static NSMutableURLRequest *addChromeClientHints(NSURLRequest *original) {
     return req;
 }
 
+static NSString *jsonStringFromObject(id object) {
+    if (!object || ![NSJSONSerialization isValidJSONObject:object]) {
+        return @"{}";
+    }
+
+    NSError *error = nil;
+    NSData *data = [NSJSONSerialization dataWithJSONObject:object options:0 error:&error];
+    if (error || !data) {
+        NSLog(@"[Nav] failed to serialize event payload: %@", error);
+        return @"{}";
+    }
+
+    NSString *json = [[NSString alloc] initWithData:data encoding:NSUTF8StringEncoding];
+    return json ?: @"{}";
+}
+
+static char *copyCString(NSString *string) {
+    const char *utf8 = string.UTF8String ?: "";
+    return strdup(utf8);
+}
+
+static void sendWebviewEvent(WebviewEventHandler handler, uint32_t webviewId, const char *eventName, NSString *detail) {
+    if (!handler || !eventName) {
+        return;
+    }
+
+    char *eventNameCopy = strdup(eventName);
+    char *detailCopy = copyCString(detail ?: @"");
+    if (!eventNameCopy || !detailCopy) {
+        free(eventNameCopy);
+        free(detailCopy);
+        return;
+    }
+
+    handler(webviewId, eventNameCopy, detailCopy);
+}
+
+static void dispatchWebviewEvent(WebviewEventHandler handler, uint32_t webviewId, const char *eventName, NSString *detail) {
+    if (!handler || !eventName) {
+        return;
+    }
+
+    NSString *detailCopy = [detail copy] ?: @"";
+    dispatch_async(dispatch_get_main_queue(), ^{
+        sendWebviewEvent(handler, webviewId, eventName, detailCopy);
+    });
+}
+
 @implementation MyNavigationDelegate
     - (void)webView:(WKWebView *)webView
     decidePolicyForNavigationAction:(WKNavigationAction *)navigationAction
     decisionHandler:(void (^)(WKNavigationActionPolicy))decisionHandler {
         NSURL *newURL = navigationAction.request.URL;
+        NSString *urlString = newURL.absoluteString ?: @"";
 
         // Check if cmd key is held - if so, fire event and block navigation
         BOOL isCmdClick = (navigationAction.modifierFlags & NSEventModifierFlagCommand) != 0;
 
         if (isCmdClick && navigationAction.navigationType == WKNavigationTypeLinkActivated) {
-            NSString *eventData = [NSString stringWithFormat:@"{\"url\":\"%@\",\"isCmdClick\":true,\"modifierFlags\":%lu}",
-                                 newURL.absoluteString,
-                                 (unsigned long)navigationAction.modifierFlags];
-            self.zigEventHandler(self.webviewId, strdup("new-window-open"), strdup([eventData UTF8String]));
             decisionHandler(WKNavigationActionPolicyCancel);
+            NSString *eventData = jsonStringFromObject(@{
+                @"url": urlString,
+                @"isCmdClick": @YES,
+                @"modifierFlags": @((unsigned long)navigationAction.modifierFlags)
+            });
+            dispatchWebviewEvent(self.zigEventHandler, self.webviewId, "new-window-open", eventData);
             return;
         }
 
@@ -2434,20 +2486,21 @@ static NSMutableURLRequest *addChromeClientHints(NSURLRequest *original) {
 
         // Check navigation rules synchronously from native-stored rules
         AbstractView *abstractView = [globalAbstractViews objectForKey:@(self.webviewId)];
-        BOOL shouldAllow = abstractView ? [abstractView shouldAllowNavigationToURL:newURL.absoluteString] : YES;
+        BOOL shouldAllow = abstractView ? [abstractView shouldAllowNavigationToURL:urlString] : YES;
 
-        // Fire will-navigate event with allowed status
-        NSString *eventData = [NSString stringWithFormat:@"{\"url\":\"%@\",\"allowed\":%@}",
-                             newURL.absoluteString,
-                             shouldAllow ? @"true" : @"false"];
-        self.zigEventHandler(self.webviewId, strdup("will-navigate"), strdup([eventData UTF8String]));
-
-        // Check if this navigation action should trigger a download
+        WKNavigationActionPolicy policy;
         if (navigationAction.shouldPerformDownload) {
-            decisionHandler(WKNavigationActionPolicyDownload);
+            policy = WKNavigationActionPolicyDownload;
         } else {
-            decisionHandler(shouldAllow ? WKNavigationActionPolicyAllow : WKNavigationActionPolicyCancel);
+            policy = shouldAllow ? WKNavigationActionPolicyAllow : WKNavigationActionPolicyCancel;
         }
+        decisionHandler(policy);
+
+        NSString *eventData = jsonStringFromObject(@{
+            @"url": urlString,
+            @"allowed": @(shouldAllow)
+        });
+        dispatchWebviewEvent(self.zigEventHandler, self.webviewId, "will-navigate", eventData);
     }
 
     - (void)webView:(WKWebView *)webView
@@ -2524,7 +2577,7 @@ static NSMutableURLRequest *addChromeClientHints(NSURLRequest *original) {
         NSString *urlString = webView.URL.absoluteString ?: @"";
         NSLog(@"[Nav] webview %u didFinishNavigation: %@", self.webviewId, urlString);
         if (urlString.length > 0) {
-            self.zigEventHandler(self.webviewId, strdup("did-navigate"), strdup(urlString.UTF8String));
+            sendWebviewEvent(self.zigEventHandler, self.webviewId, "did-navigate", urlString);
         }
         [self detectAndApplyThemeColor:webView];
 
@@ -2538,7 +2591,7 @@ static NSMutableURLRequest *addChromeClientHints(NSURLRequest *original) {
                  "})()"
                 completionHandler:^(id result, NSError *error) {
                     if (!error && result && [result isKindOfClass:[NSString class]] && [result length] > 0) {
-                        handler(wid, strdup("favicon-updated"), strdup([result UTF8String]));
+                        sendWebviewEvent(handler, wid, "favicon-updated", result);
                     }
                 }];
         }
@@ -2548,7 +2601,7 @@ static NSMutableURLRequest *addChromeClientHints(NSURLRequest *original) {
         NSString *urlString = webView.URL.absoluteString ?: @"";
         NSLog(@"[Nav] webview %u didCommitNavigation: %@", self.webviewId, urlString);
         if (urlString.length > 0) {
-            self.zigEventHandler(self.webviewId, strdup("did-commit-navigation"), strdup(urlString.UTF8String));
+            sendWebviewEvent(self.zigEventHandler, self.webviewId, "did-commit-navigation", urlString);
         }
         dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(200 * NSEC_PER_MSEC)),
             dispatch_get_main_queue(), ^{
