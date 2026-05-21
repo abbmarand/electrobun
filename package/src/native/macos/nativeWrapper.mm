@@ -26,6 +26,8 @@ static bool wgpuDebugEnabled() {
 }
 #import <UserNotifications/UserNotifications.h>
 #import <ApplicationServices/ApplicationServices.h>
+#import <Vision/Vision.h>
+#import <CoreImage/CoreImage.h>
 #include <sys/socket.h>
 #include <netinet/in.h>
 #include <unistd.h>
@@ -8578,6 +8580,154 @@ extern "C" void showItemInFolder(char *path) {
     NSString *pathString = [NSString stringWithUTF8String:path ?: ""];
     NSURL *fileURL = [NSURL fileURLWithPath:pathString];
     [[NSWorkspace sharedWorkspace] activateFileViewerSelectingURLs:@[fileURL]];
+}
+
+extern "C" BOOL removeImageBackground(const char *inputPathC, const char *outputPathC) {
+    if (@available(macOS 14.0, *)) {
+        @autoreleasepool {
+            NSString *inputPath = [NSString stringWithUTF8String:inputPathC ?: ""];
+            NSString *outputPath = [NSString stringWithUTF8String:outputPathC ?: ""];
+            NSURL *inputURL = [NSURL fileURLWithPath:inputPath];
+            CIImage *inputImage = [CIImage imageWithContentsOfURL:inputURL];
+            if (!inputImage) {
+                NSLog(@"[removeImageBackground] Could not load image at %@", inputPath);
+                return NO;
+            }
+
+            VNGenerateForegroundInstanceMaskRequest *request =
+                [[VNGenerateForegroundInstanceMaskRequest alloc] init];
+            VNImageRequestHandler *handler =
+                [[VNImageRequestHandler alloc] initWithCIImage:inputImage options:@{}];
+            NSError *requestError = nil;
+            if (![handler performRequests:@[request] error:&requestError]) {
+                NSLog(@"[removeImageBackground] Vision request failed: %@", requestError);
+                return NO;
+            }
+
+            VNInstanceMaskObservation *observation = request.results.firstObject;
+            if (!observation) {
+                NSLog(@"[removeImageBackground] No mask observation");
+                return NO;
+            }
+
+            NSError *maskError = nil;
+            CVPixelBufferRef maskedBuffer =
+                [observation generateMaskedImageOfInstances:observation.allInstances
+                                        fromRequestHandler:handler
+                                  croppedToInstancesExtent:NO
+                                                     error:&maskError];
+            if (!maskedBuffer || maskError) {
+                NSLog(@"[removeImageBackground] Mask generation failed: %@", maskError);
+                return NO;
+            }
+
+            CIImage *maskedImage = [CIImage imageWithCVPixelBuffer:maskedBuffer];
+            if (!maskedImage) {
+                NSLog(@"[removeImageBackground] Could not create CIImage from mask buffer");
+                return NO;
+            }
+
+            NSURL *outputURL = [NSURL fileURLWithPath:outputPath];
+            CIContext *context = [CIContext contextWithOptions:nil];
+            NSError *writeError = nil;
+            CGColorSpaceRef colorSpace = CGColorSpaceCreateWithName(kCGColorSpaceSRGB);
+            BOOL wrote = [context writePNGRepresentationOfImage:maskedImage
+                                                         toURL:outputURL
+                                                        format:kCIFormatRGBA8
+                                                   colorSpace:colorSpace
+                                                      options:@{}
+                                                        error:&writeError];
+            CGColorSpaceRelease(colorSpace);
+            if (!wrote || writeError) {
+                NSLog(@"[removeImageBackground] Write failed: %@", writeError);
+                return NO;
+            }
+            return YES;
+        }
+    }
+    NSLog(@"[removeImageBackground] Requires macOS 14.0+");
+    return NO;
+}
+
+static NSPanel *g_shareAnchorPanel = nil;
+
+static void dismissShareAnchorPanel(void) {
+    if (g_shareAnchorPanel) {
+        [g_shareAnchorPanel orderOut:nil];
+        g_shareAnchorPanel = nil;
+    }
+}
+
+static NSPanel *shareAnchorPanelAtCursor(void) {
+    dismissShareAnchorPanel();
+    NSPoint mouseLoc = [NSEvent mouseLocation];
+    NSRect frame = NSMakeRect(mouseLoc.x - 24, mouseLoc.y - 24, 48, 48);
+    NSPanel *panel = [[NSPanel alloc] initWithContentRect:frame
+                                                styleMask:NSWindowStyleMaskBorderless
+                                                  backing:NSBackingStoreBuffered
+                                                    defer:NO];
+    panel.backgroundColor = [NSColor clearColor];
+    panel.opaque = NO;
+    panel.hasShadow = NO;
+    panel.level = NSPopUpMenuWindowLevel;
+    panel.collectionBehavior =
+        NSWindowCollectionBehaviorCanJoinAllSpaces |
+        NSWindowCollectionBehaviorFullScreenAuxiliary |
+        NSWindowCollectionBehaviorTransient;
+    panel.releasedWhenClosed = NO;
+    g_shareAnchorPanel = panel;
+    [panel orderFrontRegardless];
+    return panel;
+}
+
+@interface ElectrobunSharePickerDelegate : NSObject <NSSharingServicePickerDelegate>
+@end
+
+@implementation ElectrobunSharePickerDelegate
+- (void)sharingServicePicker:(NSSharingServicePicker *)picker
+       didChooseSharingService:(NSSharingService *)service {
+    (void)picker;
+    (void)service;
+    dismissShareAnchorPanel();
+}
+@end
+
+static ElectrobunSharePickerDelegate *g_sharePickerDelegate = nil;
+
+extern "C" void shareFile(const char *pathString) {
+    NSString *path = [NSString stringWithUTF8String:pathString ?: ""];
+    if (path.length == 0) {
+        return;
+    }
+    NSURL *fileURL = [NSURL fileURLWithPath:path];
+    if (![[NSFileManager defaultManager] isReadableFileAtPath:path]) {
+        NSLog(@"[shareFile] File is not readable: %@", path);
+        return;
+    }
+
+    dispatch_async(dispatch_get_main_queue(), ^{
+        [[NSApplication sharedApplication] activateIgnoringOtherApps:YES];
+
+        NSArray *items = @[fileURL];
+        NSSharingService *airDrop =
+            [NSSharingService sharingServiceNamed:NSSharingServiceNameSendViaAirDrop];
+        if (airDrop != nil && [airDrop canPerformWithItems:items]) {
+            [airDrop performWithItems:items];
+            return;
+        }
+
+        NSLog(@"[shareFile] AirDrop unavailable, showing share picker");
+        NSPanel *panel = shareAnchorPanelAtCursor();
+        if (!g_sharePickerDelegate) {
+            g_sharePickerDelegate = [[ElectrobunSharePickerDelegate alloc] init];
+        }
+        NSSharingServicePicker *picker = [[NSSharingServicePicker alloc] initWithItems:items];
+        picker.delegate = g_sharePickerDelegate;
+        NSView *anchorView = panel.contentView;
+        [picker showRelativeToRect:NSMakeRect(0, 0, 48, 48)
+                            ofView:anchorView
+                     preferredEdge:NSMinYEdge];
+    });
 }
 
 static void activateDefaultApplicationForURL(NSURL *url) {

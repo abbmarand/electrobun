@@ -13,6 +13,14 @@ export const showItemInFolder = (path: string) => {
 	return ffi.request.showItemInFolder({ path });
 };
 
+export const removeImageBackground = (inputPath: string, outputPath: string): boolean => {
+	return ffi.request.removeImageBackground({ inputPath, outputPath });
+};
+
+export const shareFile = (path: string): void => {
+	ffi.request.shareFile({ path });
+};
+
 /**
  * Open a URL in the default browser or appropriate application.
  * Works with http/https URLs, mailto: links, custom URL schemes, etc.

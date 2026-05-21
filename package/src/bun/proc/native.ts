@@ -574,6 +574,14 @@ export const native = (() => {
 				args: [FFIType.cstring],
 				returns: FFIType.void,
 			},
+			removeImageBackground: {
+				args: [FFIType.cstring, FFIType.cstring],
+				returns: FFIType.bool,
+			},
+			shareFile: {
+				args: [FFIType.cstring],
+				returns: FFIType.void,
+			},
 			openExternal: {
 				args: [FFIType.cstring],
 				returns: FFIType.bool,
@@ -1860,6 +1868,15 @@ window.__electrobunBunBridge = window.__electrobunBunBridge || window.webkit?.me
 			const { path } = params;
 
 			native_.symbols.showItemInFolder(toCString(path));
+		},
+		removeImageBackground: (params: { inputPath: string; outputPath: string }): boolean => {
+			return native_.symbols.removeImageBackground(
+				toCString(params.inputPath),
+				toCString(params.outputPath),
+			);
+		},
+		shareFile: (params: { path: string }): void => {
+			native_.symbols.shareFile(toCString(params.path));
 		},
 		openExternal: (params: { url: string }): boolean => {
 			const { url } = params;
