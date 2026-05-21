@@ -148,6 +148,82 @@ let updateInfo: {
 	error: string;
 };
 
+function isRecord(value: unknown): value is Record<string, unknown> {
+	return typeof value === "object" && value !== null;
+}
+
+type TarHashResult =
+	| { ok: true; hash: string; metadataPath: string }
+	| { ok: false; reason: string };
+
+async function readTarHash(tarPath: string): Promise<TarHashResult> {
+	try {
+		const tarBytes = await Bun.file(tarPath).arrayBuffer();
+		const archive = new Bun.Archive(tarBytes);
+		const files = await archive.files();
+
+		let metadataPath = "";
+		for (const [filePath] of files) {
+			if (
+				filePath.endsWith("Resources/version.json") ||
+				filePath.endsWith("metadata.json")
+			) {
+				metadataPath = filePath;
+				break;
+			}
+		}
+
+		if (!metadataPath) {
+			return { ok: false, reason: "missing version metadata" };
+		}
+
+		const metadataFile = files.get(metadataPath);
+		if (!metadataFile) {
+			return { ok: false, reason: `metadata file not readable: ${metadataPath}` };
+		}
+
+		const metadata = JSON.parse(await metadataFile.text());
+		if (!isRecord(metadata)) {
+			return { ok: false, reason: `metadata is not an object: ${metadataPath}` };
+		}
+
+		const hash = metadata["hash"];
+		if (typeof hash !== "string" || hash.length === 0) {
+			return { ok: false, reason: `metadata hash missing: ${metadataPath}` };
+		}
+
+		return { ok: true, hash, metadataPath };
+	} catch (error) {
+		const reason = error instanceof Error ? error.message : String(error);
+		return { ok: false, reason };
+	}
+}
+
+async function validateTarHash(
+	tarPath: string,
+	expectedHash: string,
+): Promise<TarHashResult> {
+	const result = await readTarHash(tarPath);
+	if (!result.ok) return result;
+	if (result.hash !== expectedHash) {
+		return {
+			ok: false,
+			reason: `expected hash ${expectedHash}, found ${result.hash} in ${result.metadataPath}`,
+		};
+	}
+	return result;
+}
+
+function removeFileIfExists(filePath: string) {
+	try {
+		if (statSync(filePath, { throwIfNoEntry: false })) {
+			unlinkSync(filePath);
+		}
+	} catch {
+		// Best effort: a later validation pass will fail closed if removal did not work.
+	}
+}
+
 function cleanupExtractionFolder(
 	extractionFolder: string,
 	keepTarHash: string,
@@ -313,6 +389,19 @@ const Updater = {
 		const seenHashes: string[] = [];
 		let patchesApplied = 0;
 		let usedPatchPath = false;
+
+		if (await Bun.file(latestTarPath).exists()) {
+			const cachedTar = await validateTarHash(latestTarPath, latestHash);
+			if (!cachedTar.ok) {
+				emitStatus(
+					"local-tar-missing",
+					`Cached update tar is invalid: ${cachedTar.reason}; redownloading`,
+					{ latestHash, errorMessage: cachedTar.reason },
+				);
+				updateInfo.updateReady = false;
+				removeFileIfExists(latestTarPath);
+			}
+		}
 
 		if (!(await Bun.file(latestTarPath).exists())) {
 			emitStatus(
@@ -737,12 +826,39 @@ const Updater = {
 				}
 
 				unlinkSync(prevVersionCompressedTarballPath);
+
+				if (await Bun.file(latestTarPath).exists()) {
+					const downloadedTar = await validateTarHash(latestTarPath, latestHash);
+					if (!downloadedTar.ok) {
+						const errorMessage = `Downloaded update tar is invalid: ${downloadedTar.reason}`;
+						updateInfo.error = errorMessage;
+						updateInfo.updateReady = false;
+						emitStatus("error", errorMessage, {
+							latestHash,
+							errorMessage: downloadedTar.reason,
+						});
+						removeFileIfExists(latestTarPath);
+					}
+				}
 			}
 		}
 
 		// Note: Bun.file().exists() caches the result, so we nee d an new instance of Bun.file() here
 		// to check again
 		if (await Bun.file(latestTarPath).exists()) {
+			const readyTar = await validateTarHash(latestTarPath, latestHash);
+			if (!readyTar.ok) {
+				const errorMessage = `Update tar is invalid: ${readyTar.reason}`;
+				updateInfo.error = errorMessage;
+				updateInfo.updateReady = false;
+				emitStatus("error", errorMessage, {
+					latestHash,
+					errorMessage: readyTar.reason,
+				});
+				removeFileIfExists(latestTarPath);
+				return;
+			}
+
 			// download patch for this version, apply it.
 			// check for patch from that tar and apply it, until it matches the latest version
 			// as a fallback it should just download and unpack the latest version
@@ -782,6 +898,19 @@ const Updater = {
 			let appBundleSubpath: string = "";
 
 			if (await Bun.file(latestTarPath).exists()) {
+				const tarValidation = await validateTarHash(latestTarPath, latestHash);
+				if (!tarValidation.ok) {
+					const errorMessage = `Refusing to apply invalid update tar: ${tarValidation.reason}`;
+					updateInfo.error = errorMessage;
+					updateInfo.updateReady = false;
+					emitStatus("error", errorMessage, {
+						latestHash,
+						errorMessage: tarValidation.reason,
+					});
+					removeFileIfExists(latestTarPath);
+					return;
+				}
+
 				emitStatus(
 					"extracting",
 					`Extracting update to ${latestHash.slice(0, 8)}...`,
