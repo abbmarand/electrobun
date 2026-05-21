@@ -11144,16 +11144,39 @@ extern "C" bool isWindowVisibleOnAllWorkspaces(NSWindow *window) {
 // ----------------------- Content Blocker -----------------------
 
 static NSMutableArray<WKContentRuleList *> *g_compiledContentRuleLists = nil;
+static NSMutableSet<NSString *> *g_compiledContentRuleListIdentifiers = nil;
 static dispatch_queue_t g_contentBlockerQueue = dispatch_queue_create("electrobun.contentblocker", DISPATCH_QUEUE_SERIAL);
 
-static void addCompiledRuleList(WKContentRuleList *list) {
+static NSString *contentBlockerHashForString(NSString *json) {
+    NSData *data = [json dataUsingEncoding:NSUTF8StringEncoding];
+    unsigned char hash[CC_SHA256_DIGEST_LENGTH];
+    CC_SHA256(data.bytes, (CC_LONG)data.length, hash);
+
+    NSMutableString *hex = [NSMutableString stringWithCapacity:16];
+    for (int i = 0; i < 8; i++) {
+        [hex appendFormat:@"%02x", hash[i]];
+    }
+    return hex;
+}
+
+static BOOL addCompiledRuleList(NSString *identifier, WKContentRuleList *list) {
+    __block BOOL added = NO;
     dispatch_sync(g_contentBlockerQueue, ^{
         if (!g_compiledContentRuleLists) {
             g_compiledContentRuleLists = [NSMutableArray new];
         }
+        if (!g_compiledContentRuleListIdentifiers) {
+            g_compiledContentRuleListIdentifiers = [NSMutableSet new];
+        }
+        if ([g_compiledContentRuleListIdentifiers containsObject:identifier]) {
+            return;
+        }
+        [g_compiledContentRuleListIdentifiers addObject:identifier];
         [g_compiledContentRuleLists addObject:list];
         electrobun::ContentBlockerRuleStore::instance().setReady(true);
+        added = YES;
     });
+    return added;
 }
 
 static void pushRuleListToActiveWebviews(WKContentRuleList *list) {
@@ -11198,7 +11221,7 @@ extern "C" void loadContentBlockerRules(const char* jsonData, uint32_t jsonLen) 
 
     static NSUInteger chunkIndex = 0;
     NSUInteger thisChunk = chunkIndex++;
-    NSString *identifier = [NSString stringWithFormat:@"electrobun_cb_v2_%lu", (unsigned long)thisChunk];
+    NSString *identifier = [NSString stringWithFormat:@"electrobun_cb_v3_%@", contentBlockerHashForString(json)];
 
     NSLog(@"[ContentBlocker] Loading chunk %lu (%u bytes)...", (unsigned long)thisChunk, jsonLen);
 
@@ -11209,13 +11232,15 @@ extern "C" void loadContentBlockerRules(const char* jsonData, uint32_t jsonLen) 
                             completionHandler:^(WKContentRuleList *cachedList, NSError *lookupError) {
             if (cachedList) {
                 NSLog(@"[ContentBlocker] Cache HIT for chunk %lu", (unsigned long)thisChunk);
-                addCompiledRuleList(cachedList);
+                BOOL added = addCompiledRuleList(identifier, cachedList);
                 __block uint32_t total = 0;
                 dispatch_sync(g_contentBlockerQueue, ^{
                     total = (uint32_t)g_compiledContentRuleLists.count;
                 });
                 NSLog(@"[ContentBlocker] Loaded chunk %lu from cache (%u total)", (unsigned long)thisChunk, total);
-                pushRuleListToActiveWebviews(cachedList);
+                if (added) {
+                    pushRuleListToActiveWebviews(cachedList);
+                }
                 return;
             }
 
@@ -11230,13 +11255,15 @@ extern "C" void loadContentBlockerRules(const char* jsonData, uint32_t jsonLen) 
                           (unsigned long)thisChunk, identifier, error.localizedDescription, (long)error.code);
                     return;
                 }
-                addCompiledRuleList(list);
+                BOOL added = addCompiledRuleList(identifier, list);
                 __block uint32_t total = 0;
                 dispatch_sync(g_contentBlockerQueue, ^{
                     total = (uint32_t)g_compiledContentRuleLists.count;
                 });
                 NSLog(@"[ContentBlocker] Compiled chunk %lu (%u total)", (unsigned long)thisChunk, total);
-                pushRuleListToActiveWebviews(list);
+                if (added) {
+                    pushRuleListToActiveWebviews(list);
+                }
             }];
         }];
     });
