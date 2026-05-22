@@ -7,6 +7,7 @@
  */
 
 import { mkdirSync, writeFileSync } from "node:fs";
+import { createHash } from "node:crypto";
 import { join } from "node:path";
 import { parseArgs } from "node:util";
 
@@ -28,7 +29,44 @@ const { values: args } = parseArgs({
 	allowPositionals: true,
 });
 
-const outputDir = args.output!;
+const outputDir = typeof args.output === "string" ? args.output : join(process.cwd(), "dist", "content-blockers");
+
+type ContentBlockerManifestBase = {
+	source: string;
+	upstreamManifestKey?: string;
+};
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+	return value !== null && typeof value === "object" && !Array.isArray(value);
+}
+
+function recordValue(value: unknown, key: string): Record<string, unknown> | null {
+	if (!isRecord(value)) return null;
+	const next = value[key];
+	return isRecord(next) ? next : null;
+}
+
+function stringArrayValue(value: unknown, key: string): string[] {
+	if (!isRecord(value)) return [];
+	const next = value[key];
+	if (!Array.isArray(next)) return [];
+	const out: string[] = [];
+	for (const item of next) {
+		if (typeof item === "string") out.push(item);
+	}
+	return out;
+}
+
+function contentBlockerNativeJson(json: string): string {
+	const trimmed = json.trim();
+	if (!trimmed.endsWith("]")) return json;
+	return `${trimmed.slice(0, -1)},{"trigger":{"url-filter":".*","resource-type":["document"]},"action":{"type":"ignore-previous-rules"}}]`;
+}
+
+function contentBlockerRuleListIdentifier(json: string): string {
+	const hash = createHash("sha256").update(contentBlockerNativeJson(json)).digest("hex");
+	return `electrobun_cb_v3_${hash.slice(0, 16)}`;
+}
 
 // ---- Download helpers ----
 
@@ -51,46 +89,30 @@ async function downloadText(url: string): Promise<string> {
 async function tryPreconverted(): Promise<boolean> {
 	try {
 		const manifest = await downloadJSON(MANIFEST_URL);
-		if (!manifest || typeof manifest !== "object") throw new Error("Invalid manifest");
+		if (!isRecord(manifest)) throw new Error("Invalid manifest");
 
-		const m = manifest as Record<string, unknown>;
-		const combined = m["combined"];
-		if (!combined || typeof combined !== "object") throw new Error("No combined section in manifest");
-
-		const combinedObj = combined as Record<string, unknown>;
-		const files = combinedObj["files"];
-		if (!Array.isArray(files) || files.length === 0) throw new Error("No combined parts in manifest");
-
+		const combined = recordValue(manifest, "combined");
+		if (!combined) throw new Error("No combined section in manifest");
+		const files = stringArrayValue(combined, "files");
+		if (files.length === 0) throw new Error("No combined parts in manifest");
 		// Sort so part1 comes before part2, etc.
-		const partFiles = (files as string[]).filter(f => f.startsWith("combined-part")).sort();
+		const partFiles = files.filter(f => f.startsWith("combined-part")).sort();
 		if (partFiles.length === 0) throw new Error("No combined-part files found");
 
-		mkdirSync(outputDir, { recursive: true });
-		let totalRules = 0;
-
-		for (let i = 0; i < partFiles.length; i++) {
-			const filename = partFiles[i];
+		const allRules: unknown[] = [];
+		for (const filename of partFiles) {
 			const url = `${RELEASE_BASE}/${filename}`;
 			const rules = await downloadJSON(url);
 			if (!Array.isArray(rules)) throw new Error(`${filename} is not an array`);
-			totalRules += rules.length;
-
-			const filePath = join(outputDir, `content-blockers-${i + 1}.json`);
-			writeFileSync(filePath, JSON.stringify(rules));
-			console.log(`Wrote ${rules.length} rules to ${filePath}`);
+			allRules.push(...rules);
 		}
 
-		writeFileSync(
-			join(outputDir, "manifest.json"),
-			JSON.stringify({
-				source: "bnema/ublock-webkit-filters",
-				totalRules,
-				chunks: partFiles.length,
-				generatedAt: new Date().toISOString(),
-			}, null, 2),
-		);
+		writeChunks(allRules, outputDir, {
+			source: "bnema/ublock-webkit-filters",
+			upstreamManifestKey: JSON.stringify(manifest),
+		});
 
-		console.log(`Downloaded ${totalRules} pre-converted rules in ${partFiles.length} chunks`);
+		console.log(`Downloaded ${allRules.length} pre-converted rules`);
 		return true;
 	} catch (e) {
 		console.log(`Pre-converted download failed: ${e}`);
@@ -165,7 +187,8 @@ function convertAbpLine(line: string): ContentBlockerRule | null {
 	// ||domain^ style
 	const domainMatch = line.match(/^\|\|([a-zA-Z0-9._-]+)\^?\s*(\$.*)?$/);
 	if (domainMatch) {
-		const domain = domainMatch[1]!;
+		const domain = domainMatch[1];
+		if (!domain) return null;
 		const options = domainMatch[2] || "";
 
 		const urlFilter = "^[^:]+://+([^:/]+\\.)?" + escapeRegex(domain);
@@ -280,23 +303,35 @@ async function convertFromAbp(): Promise<ContentBlockerRule[]> {
 	return allRules;
 }
 
-function writeChunks(rules: ContentBlockerRule[], outDir: string) {
+function writeChunks(
+	rules: unknown[],
+	outDir: string,
+	manifestBase: ContentBlockerManifestBase = { source: "local-abp-conversion" }
+) {
 	mkdirSync(outDir, { recursive: true });
 
 	const totalChunks = Math.ceil(rules.length / RULES_PER_CHUNK);
+	const ruleLists: Array<{ file: string; identifier: string }> = [];
 	for (let i = 0; i < totalChunks; i++) {
 		const chunk = rules.slice(i * RULES_PER_CHUNK, (i + 1) * RULES_PER_CHUNK);
-		const filePath = join(outDir, `content-blockers-${i + 1}.json`);
-		writeFileSync(filePath, JSON.stringify(chunk));
+		const text = JSON.stringify(chunk);
+		const outputFile = `content-blockers-${i + 1}.json`;
+		const filePath = join(outDir, outputFile);
+		writeFileSync(filePath, text);
+		ruleLists.push({
+			file: outputFile,
+			identifier: contentBlockerRuleListIdentifier(text),
+		});
 		console.log(`Wrote ${chunk.length} rules to ${filePath}`);
 	}
 
 	writeFileSync(
 		join(outDir, "manifest.json"),
 		JSON.stringify({
-			source: "local-abp-conversion",
+			...manifestBase,
 			totalRules: rules.length,
 			chunks: totalChunks,
+			ruleLists,
 			generatedAt: new Date().toISOString(),
 		}, null, 2),
 	);

@@ -904,6 +904,16 @@ const contentBlockerNative = (() => {
 		}
 
 		const sym = libc.symbols.dlsym(handle, toCString("loadContentBlockerRules"));
+		const ruleListSym = libc.symbols.dlsym(handle, toCString("loadContentBlockerRuleList"));
+		const storePathSym = libc.symbols.dlsym(handle, toCString("setContentBlockerStorePath"));
+		const completionCountSym = libc.symbols.dlsym(
+			handle,
+			toCString("getContentBlockerLoadCompletionCount"),
+		);
+		const failureCountSym = libc.symbols.dlsym(
+			handle,
+			toCString("getContentBlockerLoadFailureCount"),
+		);
 		libc.close();
 
 		if (!sym) {
@@ -911,11 +921,27 @@ const contentBlockerNative = (() => {
 			return null;
 		}
 
-		const lib = dlopen(nativeWrapperPath, {
+		const symbols = {
 			loadContentBlockerRules: {
 				args: [FFIType.cstring, FFIType.u32],
 				returns: FFIType.void,
 			},
+			...(ruleListSym
+				? {
+						loadContentBlockerRuleList: {
+							args: [FFIType.cstring],
+							returns: FFIType.void,
+						},
+					}
+				: {}),
+			...(storePathSym
+				? {
+						setContentBlockerStorePath: {
+							args: [FFIType.cstring],
+							returns: FFIType.void,
+						},
+					}
+				: {}),
 			setContentBlockerEnabled: {
 				args: [FFIType.ptr, FFIType.bool],
 				returns: FFIType.void,
@@ -924,9 +950,31 @@ const contentBlockerNative = (() => {
 				args: [],
 				returns: FFIType.u32,
 			},
-		});
+			...(completionCountSym
+				? {
+						getContentBlockerLoadCompletionCount: {
+							args: [],
+							returns: FFIType.u32,
+						},
+					}
+				: {}),
+			...(failureCountSym
+				? {
+						getContentBlockerLoadFailureCount: {
+							args: [],
+							returns: FFIType.u32,
+						},
+					}
+				: {}),
+		};
+		const lib = dlopen(nativeWrapperPath, symbols);
 		console.log("[ContentBlocker] Native content blocker symbols available");
-		return lib;
+		return {
+			lib,
+			canLoadRuleListByIdentifier: !!ruleListSym,
+			canSetStorePath: !!storePathSym,
+			canReadLoadStats: !!completionCountSym && !!failureCountSym,
+		};
 	} catch (e) {
 		console.log("[ContentBlocker] Native symbols not available:", e);
 		return null;
@@ -1593,7 +1641,7 @@ window.__electrobunBunBridge = window.__electrobunBunBridge || window.webkit?.me
 			}
 
 			if (contentBlocker && contentBlockerNative) {
-				contentBlockerNative.symbols.setContentBlockerEnabled(webviewPtr, true);
+				contentBlockerNative.lib.symbols.setContentBlockerEnabled(webviewPtr, true);
 			}
 
 			return webviewPtr;
@@ -2138,20 +2186,49 @@ window.__electrobunBunBridge = window.__electrobunBunBridge || window.webkit?.me
 			if (!contentBlockerNative) return;
 			const { jsonData } = params;
 			if (!jsonData) return;
-			contentBlockerNative.symbols.loadContentBlockerRules(
+			contentBlockerNative.lib.symbols.loadContentBlockerRules(
 				toCString(jsonData),
-				jsonData.length,
+				Buffer.byteLength(jsonData, "utf8"),
 			);
+		},
+		loadContentBlockerRuleList: (params: { identifier: string }) => {
+			if (!contentBlockerNative?.canLoadRuleListByIdentifier) return;
+			const { identifier } = params;
+			if (!identifier) return;
+			contentBlockerNative.lib.symbols.loadContentBlockerRuleList(toCString(identifier));
+		},
+		setContentBlockerStorePath: (params: { path: string }) => {
+			if (!contentBlockerNative?.canSetStorePath) return;
+			const { path } = params;
+			if (!path) return;
+			contentBlockerNative.lib.symbols.setContentBlockerStorePath(toCString(path));
+		},
+		canLoadContentBlockerRuleList: (): boolean => {
+			return contentBlockerNative?.canLoadRuleListByIdentifier ?? false;
+		},
+		canSetContentBlockerStorePath: (): boolean => {
+			return contentBlockerNative?.canSetStorePath ?? false;
+		},
+		isContentBlockerAvailable: (): boolean => {
+			return contentBlockerNative !== null;
 		},
 		setContentBlockerEnabled: (params: { id: number; enabled: boolean }) => {
 			if (!contentBlockerNative) return;
 			const webview = BrowserView.getById(params.id);
 			if (!webview?.ptr) return;
-			contentBlockerNative.symbols.setContentBlockerEnabled(webview.ptr, params.enabled);
+			contentBlockerNative.lib.symbols.setContentBlockerEnabled(webview.ptr, params.enabled);
 		},
 		getContentBlockerCompiledCount: (): number => {
 			if (!contentBlockerNative) return 0;
-			return contentBlockerNative.symbols.getContentBlockerCompiledCount();
+			return contentBlockerNative.lib.symbols.getContentBlockerCompiledCount();
+		},
+		getContentBlockerLoadCompletionCount: (): number => {
+			if (!contentBlockerNative?.canReadLoadStats) return 0;
+			return contentBlockerNative.lib.symbols.getContentBlockerLoadCompletionCount();
+		},
+		getContentBlockerLoadFailureCount: (): number => {
+			if (!contentBlockerNative?.canReadLoadStats) return 0;
+			return contentBlockerNative.lib.symbols.getContentBlockerLoadFailureCount();
 		},
 	},
 	// Internal functions for menu data management

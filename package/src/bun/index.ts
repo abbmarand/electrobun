@@ -186,8 +186,29 @@ const ContentBlocker = {
 	loadRules(jsonData: string) {
 		ffi.request.loadContentBlockerRules({ jsonData });
 	},
+	loadRuleList(identifier: string) {
+		ffi.request.loadContentBlockerRuleList({ identifier });
+	},
+	setStorePath(path: string) {
+		ffi.request.setContentBlockerStorePath({ path });
+	},
+	isAvailable(): boolean {
+		return ffi.request.isContentBlockerAvailable();
+	},
+	canLoadRuleList(): boolean {
+		return ffi.request.canLoadContentBlockerRuleList();
+	},
+	canSetStorePath(): boolean {
+		return ffi.request.canSetContentBlockerStorePath();
+	},
 	getCompiledCount(): number {
 		return ffi.request.getContentBlockerCompiledCount();
+	},
+	getLoadCompletionCount(): number {
+		return ffi.request.getContentBlockerLoadCompletionCount();
+	},
+	getLoadFailureCount(): number {
+		return ffi.request.getContentBlockerLoadFailureCount();
 	},
 };
 

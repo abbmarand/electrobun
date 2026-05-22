@@ -11296,6 +11296,71 @@ extern "C" bool isWindowVisibleOnAllWorkspaces(NSWindow *window) {
 static NSMutableArray<WKContentRuleList *> *g_compiledContentRuleLists = nil;
 static NSMutableSet<NSString *> *g_compiledContentRuleListIdentifiers = nil;
 static dispatch_queue_t g_contentBlockerQueue = dispatch_queue_create("electrobun.contentblocker", DISPATCH_QUEUE_SERIAL);
+static WKContentRuleListStore *g_contentRuleListStore = nil;
+static NSString *g_contentRuleListStorePath = nil;
+static uint32_t g_contentBlockerRuleLoadCompletions = 0;
+static uint32_t g_contentBlockerRuleLoadFailures = 0;
+
+static WKContentRuleListStore *contentRuleListStore() {
+    if (g_contentRuleListStore) {
+        return g_contentRuleListStore;
+    }
+
+    if (g_contentRuleListStorePath && [g_contentRuleListStorePath length] > 0) {
+        NSURL *storeURL = [NSURL fileURLWithPath:g_contentRuleListStorePath isDirectory:YES];
+        g_contentRuleListStore = [WKContentRuleListStore storeWithURL:storeURL];
+        return g_contentRuleListStore;
+    }
+
+    g_contentRuleListStore = WKContentRuleListStore.defaultStore;
+    return g_contentRuleListStore;
+}
+
+static void recordContentBlockerRuleLoadCompletion(BOOL failed) {
+    dispatch_sync(g_contentBlockerQueue, ^{
+        g_contentBlockerRuleLoadCompletions += 1;
+        if (failed) {
+            g_contentBlockerRuleLoadFailures += 1;
+        }
+    });
+}
+
+extern "C" void setContentBlockerStorePath(const char* pathData) {
+    if (!pathData || strlen(pathData) == 0) {
+        return;
+    }
+
+    NSString *path = [NSString stringWithUTF8String:pathData];
+    if (!path || [path length] == 0) {
+        return;
+    }
+
+    void (^applyStorePath)(void) = ^{
+        if ([path isEqualToString:g_contentRuleListStorePath]) {
+            return;
+        }
+
+        NSError *error = nil;
+        [[NSFileManager defaultManager] createDirectoryAtPath:path
+                                  withIntermediateDirectories:YES
+                                                   attributes:nil
+                                                        error:&error];
+        if (error) {
+            NSLog(@"[ContentBlocker] Failed to create rule-list store %@: %@", path, error.localizedDescription);
+            return;
+        }
+
+        g_contentRuleListStorePath = [path copy];
+        g_contentRuleListStore = nil;
+        NSLog(@"[ContentBlocker] Using shared rule-list store %@", path);
+    };
+
+    if ([NSThread isMainThread]) {
+        applyStorePath();
+    } else {
+        dispatch_sync(dispatch_get_main_queue(), applyStorePath);
+    }
+}
 
 static NSString *contentBlockerHashForString(NSString *json) {
     NSData *data = [json dataUsingEncoding:NSUTF8StringEncoding];
@@ -11350,6 +11415,54 @@ extern "C" uint32_t getContentBlockerCompiledCount() {
     return count;
 }
 
+extern "C" uint32_t getContentBlockerLoadCompletionCount() {
+    __block uint32_t count = 0;
+    dispatch_sync(g_contentBlockerQueue, ^{
+        count = g_contentBlockerRuleLoadCompletions;
+    });
+    return count;
+}
+
+extern "C" uint32_t getContentBlockerLoadFailureCount() {
+    __block uint32_t count = 0;
+    dispatch_sync(g_contentBlockerQueue, ^{
+        count = g_contentBlockerRuleLoadFailures;
+    });
+    return count;
+}
+
+extern "C" void loadContentBlockerRuleList(const char* identifierData) {
+    if (!identifierData || strlen(identifierData) == 0) {
+        NSLog(@"[ContentBlocker] loadRuleList called with empty identifier, skipping");
+        return;
+    }
+
+    NSString *identifier = [NSString stringWithUTF8String:identifierData];
+    if (!identifier || identifier.length == 0) {
+        NSLog(@"[ContentBlocker] Failed to create NSString from rule list identifier");
+        return;
+    }
+
+    dispatch_async(dispatch_get_main_queue(), ^{
+        [contentRuleListStore()
+            lookUpContentRuleListForIdentifier:identifier
+                            completionHandler:^(WKContentRuleList *cachedList, NSError *lookupError) {
+            if (!cachedList) {
+                NSLog(@"[ContentBlocker] Cache MISS for %@", identifier);
+                recordContentBlockerRuleLoadCompletion(YES);
+                return;
+            }
+
+            NSLog(@"[ContentBlocker] Cache HIT for %@", identifier);
+            BOOL added = addCompiledRuleList(identifier, cachedList);
+            if (added) {
+                pushRuleListToActiveWebviews(cachedList);
+            }
+            recordContentBlockerRuleLoadCompletion(NO);
+        }];
+    });
+}
+
 extern "C" void loadContentBlockerRules(const char* jsonData, uint32_t jsonLen) {
     if (!jsonData || jsonLen == 0) {
         NSLog(@"[ContentBlocker] loadRules called with empty data, skipping");
@@ -11377,7 +11490,7 @@ extern "C" void loadContentBlockerRules(const char* jsonData, uint32_t jsonLen) 
 
     dispatch_async(dispatch_get_main_queue(), ^{
         // Try cache first — lookUp returns a previously compiled list instantly
-        [WKContentRuleListStore.defaultStore
+        [contentRuleListStore()
             lookUpContentRuleListForIdentifier:identifier
                             completionHandler:^(WKContentRuleList *cachedList, NSError *lookupError) {
             if (cachedList) {
@@ -11391,18 +11504,20 @@ extern "C" void loadContentBlockerRules(const char* jsonData, uint32_t jsonLen) 
                 if (added) {
                     pushRuleListToActiveWebviews(cachedList);
                 }
+                recordContentBlockerRuleLoadCompletion(NO);
                 return;
             }
 
             // Cache miss — compile from JSON
             NSLog(@"[ContentBlocker] Cache miss for chunk %lu, compiling...", (unsigned long)thisChunk);
-            [WKContentRuleListStore.defaultStore
+            [contentRuleListStore()
                 compileContentRuleListForIdentifier:identifier
                              encodedContentRuleList:json
                                   completionHandler:^(WKContentRuleList *list, NSError *error) {
                 if (error) {
                     NSLog(@"[ContentBlocker] FAILED chunk %lu '%@': %@ (code %ld)",
                           (unsigned long)thisChunk, identifier, error.localizedDescription, (long)error.code);
+                    recordContentBlockerRuleLoadCompletion(YES);
                     return;
                 }
                 BOOL added = addCompiledRuleList(identifier, list);
@@ -11414,6 +11529,7 @@ extern "C" void loadContentBlockerRules(const char* jsonData, uint32_t jsonLen) 
                 if (added) {
                     pushRuleListToActiveWebviews(list);
                 }
+                recordContentBlockerRuleLoadCompletion(NO);
             }];
         }];
     });
