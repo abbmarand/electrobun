@@ -735,6 +735,48 @@ std::string GetScriptExecutionUrl(const std::string& frameUrl) {
     return frameUrl;
 }
 
+static bool isTrustedAppShellURL(NSString *urlString) {
+    if (!urlString || [urlString length] == 0) {
+        return false;
+    }
+
+    NSURLComponents *components = [NSURLComponents componentsWithString:urlString];
+    NSString *scheme = [[components scheme] lowercaseString];
+    if ([scheme isEqualToString:@"views"]) {
+        return true;
+    }
+
+    if (![scheme isEqualToString:@"http"] && ![scheme isEqualToString:@"https"]) {
+        return false;
+    }
+
+    NSString *host = [[components host] lowercaseString];
+    NSNumber *port = [components port];
+    BOOL isLocalDevHost =
+        [host isEqualToString:@"localhost"] ||
+        [host isEqualToString:@"127.0.0.1"] ||
+        [host isEqualToString:@"::1"];
+    if (!isLocalDevHost || !port || [port intValue] != 5173) {
+        return false;
+    }
+
+    for (NSURLQueryItem *item in [components queryItems]) {
+        if ([[item name] isEqualToString:@"cachyWindow"] && [[item value] isEqualToString:@"launcher"]) {
+            return true;
+        }
+    }
+
+    return false;
+}
+
+static bool isTrustedAppShellURL(const std::string& urlString) {
+    if (urlString.empty()) {
+        return false;
+    }
+    NSString *nsUrlString = [NSString stringWithUTF8String:urlString.c_str()];
+    return isTrustedAppShellURL(nsUrlString);
+}
+
 NSUUID *UUIDFromString(NSString *string) {
     unsigned char hash[CC_SHA256_DIGEST_LENGTH];
     CC_SHA256(string.UTF8String, (CC_LONG)string.length, hash);
@@ -2833,8 +2875,11 @@ runOpenPanelWithParameters:(WKOpenPanelParameters *)parameters
 
         NSLog(@"WKWebView: Media capture permission requested for %@ (type: %ld)", originString, (long)type);
 
-        // views:// is the app's own bundled-asset shell — always trusted, never prompt.
-        if ([origin.protocol isEqualToString:@"views"]) {
+        NSString *requestURLString = frame.request.URL.absoluteString ?: webView.URL.absoluteString;
+
+        // The app shell is fully trusted. In production this is views://; in dev
+        // the launcher is served from localhost with cachyWindow=launcher.
+        if ([origin.protocol isEqualToString:@"views"] || isTrustedAppShellURL(requestURLString)) {
             decisionHandler(WKPermissionDecisionGrant);
             return;
         }
@@ -5871,8 +5916,14 @@ public:
         std::string origin = requesting_origin.ToString();
         NSLog(@"CEF: Media access permission requested for %s (permissions: %u)", origin.c_str(), requested_permissions);
 
-        // views:// is the app's own bundled-asset shell — always trusted, never prompt.
-        if (origin.find("views://") == 0) {
+        std::string frameUrl;
+        if (frame) {
+            frameUrl = frame->GetURL().ToString();
+        }
+
+        // The app shell is fully trusted. In production this is views://; in dev
+        // the launcher is served from localhost with cachyWindow=launcher.
+        if (isTrustedAppShellURL(origin) || isTrustedAppShellURL(frameUrl)) {
             callback->Continue(requested_permissions);
             return true;
         }
@@ -5930,10 +5981,14 @@ public:
         std::string origin = requesting_origin.ToString();
         NSLog(@"CEF: Permission prompt requested for %s (permissions: %u)", origin.c_str(), requested_permissions);
 
-        // views:// is the app's own bundled-asset shell — always trusted, never prompt.
-        // This also covers Chromium's new Loopback/Local Network Access gate triggered
-        // by the per-webview RPC websocket to ws://localhost:<port>.
-        if (origin.find("views://") == 0) {
+        std::string pageUrl;
+        if (browser && browser->GetMainFrame()) {
+            pageUrl = browser->GetMainFrame()->GetURL().ToString();
+        }
+
+        // The app shell is fully trusted. In production this is views://; in dev
+        // the launcher is served from localhost with cachyWindow=launcher.
+        if (isTrustedAppShellURL(origin) || isTrustedAppShellURL(pageUrl)) {
             callback->Continue(CEF_PERMISSION_RESULT_ACCEPT);
             return true;
         }
