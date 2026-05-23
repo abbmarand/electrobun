@@ -2705,7 +2705,35 @@ export interface Point {
 	y: number;
 }
 
-export type MacPermissionKind = "accessibility" | "screenRecording";
+export type MacPermissionKind =
+	| "accessibility"
+	| "screenRecording"
+	| "camera"
+	| "microphone"
+	| "contacts"
+	| "fullDiskAccess"
+	| "filesAndFolders"
+	| "desktopFolder"
+	| "documentsFolder"
+	| "downloadsFolder"
+	| "removableVolumes"
+	| "automation"
+	| "inputMonitoring"
+	| "location"
+	| "calendar"
+	| "reminders"
+	| "photos"
+	| "bluetooth"
+	| "speechRecognition"
+	| "localNetwork"
+	| "mediaLibrary"
+	| "motionFitness"
+	| "homeKit"
+	| "focusStatus"
+	| "remoteDesktop"
+	| "developerTools"
+	| "appManagement"
+	| "passkeyAccess";
 
 export type MacPermissionDragGuideResult =
 	| { ok: true; alreadyGranted: boolean }
@@ -2802,7 +2830,7 @@ export const Screen = {
 	},
 
 	/**
-	 * Check a macOS permission used by onboarding.
+	 * Check a macOS permission used by app flows.
 	 */
 	getMacPermissionStatus: (kind: MacPermissionKind): boolean => {
 		return ffi.request.macPermissionStatus({ kind });

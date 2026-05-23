@@ -13,6 +13,14 @@
 #import <QuartzCore/CAMetalLayer.h>
 #import <Metal/Metal.h>
 #import <MetalKit/MetalKit.h>
+#import <AVFoundation/AVFoundation.h>
+#import <Contacts/Contacts.h>
+#import <EventKit/EventKit.h>
+#import <Photos/Photos.h>
+#import <CoreLocation/CoreLocation.h>
+#import <CoreBluetooth/CoreBluetooth.h>
+#import <Speech/Speech.h>
+#import <IOKit/hidsystem/IOHIDLib.h>
 #include <dlfcn.h>
 #include <math.h>
 #include "dawn/webgpu.h"
@@ -9218,6 +9226,32 @@ typedef NS_ENUM(NSInteger, EBMacPermissionKind) {
     EBMacPermissionKindUnknown = 0,
     EBMacPermissionKindAccessibility = 1,
     EBMacPermissionKindScreenRecording = 2,
+    EBMacPermissionKindCamera = 3,
+    EBMacPermissionKindMicrophone = 4,
+    EBMacPermissionKindContacts = 5,
+    EBMacPermissionKindFullDiskAccess = 6,
+    EBMacPermissionKindFilesAndFolders = 7,
+    EBMacPermissionKindDesktopFolder = 8,
+    EBMacPermissionKindDocumentsFolder = 9,
+    EBMacPermissionKindDownloadsFolder = 10,
+    EBMacPermissionKindRemovableVolumes = 11,
+    EBMacPermissionKindAutomation = 12,
+    EBMacPermissionKindInputMonitoring = 13,
+    EBMacPermissionKindLocation = 14,
+    EBMacPermissionKindCalendar = 15,
+    EBMacPermissionKindReminders = 16,
+    EBMacPermissionKindPhotos = 17,
+    EBMacPermissionKindBluetooth = 18,
+    EBMacPermissionKindSpeechRecognition = 19,
+    EBMacPermissionKindLocalNetwork = 20,
+    EBMacPermissionKindMediaLibrary = 21,
+    EBMacPermissionKindMotionFitness = 22,
+    EBMacPermissionKindHomeKit = 23,
+    EBMacPermissionKindFocusStatus = 24,
+    EBMacPermissionKindRemoteDesktop = 25,
+    EBMacPermissionKindDeveloperTools = 26,
+    EBMacPermissionKindAppManagement = 27,
+    EBMacPermissionKindPasskeyAccess = 28,
 };
 
 static NSPanel *g_macPermissionGuidePanel = nil;
@@ -9231,7 +9265,42 @@ static EBMacPermissionKind macPermissionKindFromCString(const char *kind) {
     if (!kind) return EBMacPermissionKindUnknown;
     if (strcmp(kind, "accessibility") == 0) return EBMacPermissionKindAccessibility;
     if (strcmp(kind, "screenRecording") == 0) return EBMacPermissionKindScreenRecording;
+    if (strcmp(kind, "camera") == 0) return EBMacPermissionKindCamera;
+    if (strcmp(kind, "microphone") == 0) return EBMacPermissionKindMicrophone;
+    if (strcmp(kind, "contacts") == 0) return EBMacPermissionKindContacts;
+    if (strcmp(kind, "fullDiskAccess") == 0) return EBMacPermissionKindFullDiskAccess;
+    if (strcmp(kind, "filesAndFolders") == 0) return EBMacPermissionKindFilesAndFolders;
+    if (strcmp(kind, "desktopFolder") == 0) return EBMacPermissionKindDesktopFolder;
+    if (strcmp(kind, "documentsFolder") == 0) return EBMacPermissionKindDocumentsFolder;
+    if (strcmp(kind, "downloadsFolder") == 0) return EBMacPermissionKindDownloadsFolder;
+    if (strcmp(kind, "removableVolumes") == 0) return EBMacPermissionKindRemovableVolumes;
+    if (strcmp(kind, "automation") == 0) return EBMacPermissionKindAutomation;
+    if (strcmp(kind, "inputMonitoring") == 0) return EBMacPermissionKindInputMonitoring;
+    if (strcmp(kind, "location") == 0) return EBMacPermissionKindLocation;
+    if (strcmp(kind, "calendar") == 0) return EBMacPermissionKindCalendar;
+    if (strcmp(kind, "reminders") == 0) return EBMacPermissionKindReminders;
+    if (strcmp(kind, "photos") == 0) return EBMacPermissionKindPhotos;
+    if (strcmp(kind, "bluetooth") == 0) return EBMacPermissionKindBluetooth;
+    if (strcmp(kind, "speechRecognition") == 0) return EBMacPermissionKindSpeechRecognition;
+    if (strcmp(kind, "localNetwork") == 0) return EBMacPermissionKindLocalNetwork;
+    if (strcmp(kind, "mediaLibrary") == 0) return EBMacPermissionKindMediaLibrary;
+    if (strcmp(kind, "motionFitness") == 0) return EBMacPermissionKindMotionFitness;
+    if (strcmp(kind, "homeKit") == 0) return EBMacPermissionKindHomeKit;
+    if (strcmp(kind, "focusStatus") == 0) return EBMacPermissionKindFocusStatus;
+    if (strcmp(kind, "remoteDesktop") == 0) return EBMacPermissionKindRemoteDesktop;
+    if (strcmp(kind, "developerTools") == 0) return EBMacPermissionKindDeveloperTools;
+    if (strcmp(kind, "appManagement") == 0) return EBMacPermissionKindAppManagement;
+    if (strcmp(kind, "passkeyAccess") == 0) return EBMacPermissionKindPasskeyAccess;
     return EBMacPermissionKindUnknown;
+}
+
+static BOOL canReadAnyExpandedPath(NSArray<NSString *> *paths) {
+    NSFileManager *fileManager = [NSFileManager defaultManager];
+    for (NSString *path in paths) {
+        NSString *expandedPath = [path stringByExpandingTildeInPath];
+        if ([fileManager isReadableFileAtPath:expandedPath]) return YES;
+    }
+    return NO;
 }
 
 static BOOL isMacPermissionGranted(EBMacPermissionKind kind) {
@@ -9240,6 +9309,57 @@ static BOOL isMacPermissionGranted(EBMacPermissionKind kind) {
             return AXIsProcessTrusted();
         case EBMacPermissionKindScreenRecording:
             return CGPreflightScreenCaptureAccess();
+        case EBMacPermissionKindCamera:
+            return [AVCaptureDevice authorizationStatusForMediaType:AVMediaTypeVideo] == AVAuthorizationStatusAuthorized;
+        case EBMacPermissionKindMicrophone:
+            return [AVCaptureDevice authorizationStatusForMediaType:AVMediaTypeAudio] == AVAuthorizationStatusAuthorized;
+        case EBMacPermissionKindContacts:
+            return [CNContactStore authorizationStatusForEntityType:CNEntityTypeContacts] == CNAuthorizationStatusAuthorized;
+        case EBMacPermissionKindFullDiskAccess:
+            return canReadAnyExpandedPath(@[
+                @"~/Library/Messages/chat.db",
+                @"~/Library/Safari/CloudTabs.db",
+                @"~/Library/Application Support/AddressBook/AddressBook-v22.abcddb"
+            ]);
+        case EBMacPermissionKindInputMonitoring:
+            return IOHIDCheckAccess(kIOHIDRequestTypeListenEvent) == kIOHIDAccessTypeGranted;
+        case EBMacPermissionKindLocation: {
+            CLLocationManager *manager = [[CLLocationManager alloc] init];
+            CLAuthorizationStatus status = manager.authorizationStatus;
+            return status == kCLAuthorizationStatusAuthorizedAlways;
+        }
+        case EBMacPermissionKindCalendar: {
+            EKAuthorizationStatus status = [EKEventStore authorizationStatusForEntityType:EKEntityTypeEvent];
+            return status == EKAuthorizationStatusFullAccess || status == EKAuthorizationStatusWriteOnly;
+        }
+        case EBMacPermissionKindReminders: {
+            EKAuthorizationStatus status = [EKEventStore authorizationStatusForEntityType:EKEntityTypeReminder];
+            return status == EKAuthorizationStatusFullAccess || status == EKAuthorizationStatusWriteOnly;
+        }
+        case EBMacPermissionKindPhotos: {
+            PHAuthorizationStatus status = [PHPhotoLibrary authorizationStatusForAccessLevel:PHAccessLevelReadWrite];
+            return status == PHAuthorizationStatusAuthorized || status == PHAuthorizationStatusLimited;
+        }
+        case EBMacPermissionKindBluetooth:
+            return [CBManager authorization] == CBManagerAuthorizationAllowedAlways;
+        case EBMacPermissionKindSpeechRecognition:
+            return [SFSpeechRecognizer authorizationStatus] == SFSpeechRecognizerAuthorizationStatusAuthorized;
+        case EBMacPermissionKindFilesAndFolders:
+        case EBMacPermissionKindDesktopFolder:
+        case EBMacPermissionKindDocumentsFolder:
+        case EBMacPermissionKindDownloadsFolder:
+        case EBMacPermissionKindRemovableVolumes:
+        case EBMacPermissionKindAutomation:
+        case EBMacPermissionKindLocalNetwork:
+        case EBMacPermissionKindMediaLibrary:
+        case EBMacPermissionKindMotionFitness:
+        case EBMacPermissionKindHomeKit:
+        case EBMacPermissionKindFocusStatus:
+        case EBMacPermissionKindRemoteDesktop:
+        case EBMacPermissionKindDeveloperTools:
+        case EBMacPermissionKindAppManagement:
+        case EBMacPermissionKindPasskeyAccess:
+            return NO;
         default:
             return NO;
     }
@@ -9251,6 +9371,54 @@ static NSString *macPermissionSettingsQuery(EBMacPermissionKind kind) {
             return @"Privacy_Accessibility";
         case EBMacPermissionKindScreenRecording:
             return @"Privacy_ScreenCapture";
+        case EBMacPermissionKindCamera:
+            return @"Privacy_Camera";
+        case EBMacPermissionKindMicrophone:
+            return @"Privacy_Microphone";
+        case EBMacPermissionKindContacts:
+            return @"Privacy_Contacts";
+        case EBMacPermissionKindFullDiskAccess:
+            return @"Privacy_AllFiles";
+        case EBMacPermissionKindFilesAndFolders:
+        case EBMacPermissionKindDesktopFolder:
+        case EBMacPermissionKindDocumentsFolder:
+        case EBMacPermissionKindDownloadsFolder:
+        case EBMacPermissionKindRemovableVolumes:
+            return @"Privacy_FilesAndFolders";
+        case EBMacPermissionKindAutomation:
+            return @"Privacy_Automation";
+        case EBMacPermissionKindInputMonitoring:
+            return @"Privacy_ListenEvent";
+        case EBMacPermissionKindLocation:
+            return @"Privacy_LocationServices";
+        case EBMacPermissionKindCalendar:
+            return @"Privacy_Calendars";
+        case EBMacPermissionKindReminders:
+            return @"Privacy_Reminders";
+        case EBMacPermissionKindPhotos:
+            return @"Privacy_Photos";
+        case EBMacPermissionKindBluetooth:
+            return @"Privacy_Bluetooth";
+        case EBMacPermissionKindSpeechRecognition:
+            return @"Privacy_SpeechRecognition";
+        case EBMacPermissionKindLocalNetwork:
+            return @"Privacy_LocalNetwork";
+        case EBMacPermissionKindMediaLibrary:
+            return @"Privacy_Media";
+        case EBMacPermissionKindMotionFitness:
+            return @"Privacy_Motion";
+        case EBMacPermissionKindHomeKit:
+            return @"Privacy_HomeKit";
+        case EBMacPermissionKindFocusStatus:
+            return @"Privacy_Focus";
+        case EBMacPermissionKindRemoteDesktop:
+            return @"Privacy_RemoteDesktop";
+        case EBMacPermissionKindDeveloperTools:
+            return @"Privacy_DevTools";
+        case EBMacPermissionKindAppManagement:
+            return @"Privacy_AppBundles";
+        case EBMacPermissionKindPasskeyAccess:
+            return @"Privacy_PasskeyAccess";
         default:
             return nil;
     }
@@ -9260,6 +9428,35 @@ static NSString *macPermissionGuideInstruction(EBMacPermissionKind kind) {
     switch (kind) {
         case EBMacPermissionKindScreenRecording:
             return @"Then click Quit & Reopen.";
+        case EBMacPermissionKindFullDiskAccess:
+            return @"Then turn Cachy on and relaunch the command.";
+        case EBMacPermissionKindFilesAndFolders:
+        case EBMacPermissionKindDesktopFolder:
+        case EBMacPermissionKindDocumentsFolder:
+        case EBMacPermissionKindDownloadsFolder:
+        case EBMacPermissionKindRemovableVolumes:
+            return @"Then turn Cachy on for the needed folders.";
+        case EBMacPermissionKindCamera:
+        case EBMacPermissionKindMicrophone:
+        case EBMacPermissionKindContacts:
+        case EBMacPermissionKindAutomation:
+        case EBMacPermissionKindInputMonitoring:
+        case EBMacPermissionKindLocation:
+        case EBMacPermissionKindCalendar:
+        case EBMacPermissionKindReminders:
+        case EBMacPermissionKindPhotos:
+        case EBMacPermissionKindBluetooth:
+        case EBMacPermissionKindSpeechRecognition:
+        case EBMacPermissionKindLocalNetwork:
+        case EBMacPermissionKindMediaLibrary:
+        case EBMacPermissionKindMotionFitness:
+        case EBMacPermissionKindHomeKit:
+        case EBMacPermissionKindFocusStatus:
+        case EBMacPermissionKindRemoteDesktop:
+        case EBMacPermissionKindDeveloperTools:
+        case EBMacPermissionKindAppManagement:
+        case EBMacPermissionKindPasskeyAccess:
+            return @"Then turn Cachy on and try again.";
         case EBMacPermissionKindAccessibility:
             return @"Then return to Cachy and click Done.";
         default:
