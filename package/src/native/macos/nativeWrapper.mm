@@ -11530,10 +11530,10 @@ extern "C" void loadContentBlockerRules(const char* jsonData, uint32_t jsonLen) 
         return;
     }
 
-    // Append ignore-previous-rules for document type to prevent blocking main page navigation
+    // Append ignore-previous-rules for document types to prevent blocking main page navigation.
     NSString *trimmed = [json stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceAndNewlineCharacterSet]];
     if ([trimmed hasSuffix:@"]"]) {
-        json = [NSString stringWithFormat:@"%@,{\"trigger\":{\"url-filter\":\".*\",\"resource-type\":[\"document\"]},\"action\":{\"type\":\"ignore-previous-rules\"}}]",
+        json = [NSString stringWithFormat:@"%@,{\"trigger\":{\"url-filter\":\".*\",\"resource-type\":[\"document\",\"top-document\"]},\"action\":{\"type\":\"ignore-previous-rules\"}}]",
                 [trimmed substringToIndex:trimmed.length - 1]];
     }
 

@@ -60,7 +60,7 @@ function stringArrayValue(value: unknown, key: string): string[] {
 function contentBlockerNativeJson(json: string): string {
 	const trimmed = json.trim();
 	if (!trimmed.endsWith("]")) return json;
-	return `${trimmed.slice(0, -1)},{"trigger":{"url-filter":".*","resource-type":["document"]},"action":{"type":"ignore-previous-rules"}}]`;
+	return `${trimmed.slice(0, -1)},{"trigger":{"url-filter":".*","resource-type":["document","top-document"]},"action":{"type":"ignore-previous-rules"}}]`;
 }
 
 function contentBlockerRuleListIdentifier(json: string): string {
