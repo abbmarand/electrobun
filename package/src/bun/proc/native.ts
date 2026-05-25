@@ -164,6 +164,10 @@ export const native = (() => {
 				args: [FFIType.ptr],
 				returns: FFIType.void,
 			},
+			setWindowCloaked: {
+				args: [FFIType.ptr, FFIType.bool],
+				returns: FFIType.void,
+			},
 			closeWindow: {
 				args: [
 					FFIType.ptr, // window ptr
@@ -1260,6 +1264,17 @@ const _ffiImpl = {
 			}
 
 			native_.symbols.hideWindow(windowPtr);
+		},
+
+		setWindowCloaked: (params: { winId: number; cloaked: boolean }) => {
+			const { winId, cloaked } = params;
+			const windowPtr = getWindowPtr(winId);
+
+			if (!windowPtr) {
+				throw `Can't cloak window. Window no longer exists`;
+			}
+
+			native_.symbols.setWindowCloaked(windowPtr, cloaked);
 		},
 
 		minimizeWindow: (params: { winId: number }) => {

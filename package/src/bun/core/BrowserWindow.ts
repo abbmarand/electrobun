@@ -315,6 +315,10 @@ export class BrowserWindow<T extends RPCWithTransport = RPCWithTransport> {
 		return ffi.request.hideWindow({ winId: this.id });
 	}
 
+	setCloaked(cloaked: boolean) {
+		return ffi.request.setWindowCloaked({ winId: this.id, cloaked });
+	}
+
 	minimize() {
 		return ffi.request.minimizeWindow({ winId: this.id });
 	}

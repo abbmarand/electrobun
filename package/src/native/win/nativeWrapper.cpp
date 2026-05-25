@@ -9854,6 +9854,12 @@ ELECTROBUN_EXPORT bool isWindowVisibleOnAllWorkspaces(NSWindow *window) {
     return false;
 }
 
+ELECTROBUN_EXPORT void setWindowCloaked(NSWindow *window, bool cloaked) {
+    (void)window;
+    (void)cloaked;
+    // macOS-only launcher optimization.
+}
+
 ELECTROBUN_EXPORT void setWindowPosition(NSWindow *window, double x, double y) {
     HWND hwnd = reinterpret_cast<HWND>(window);
     if (!IsWindow(hwnd)) return;

@@ -10603,6 +10603,12 @@ ELECTROBUN_EXPORT bool isWindowVisibleOnAllWorkspaces(void* window) {
     return false;
 }
 
+ELECTROBUN_EXPORT void setWindowCloaked(void* window, bool cloaked) {
+    (void)window;
+    (void)cloaked;
+    // macOS-only launcher optimization.
+}
+
 ELECTROBUN_EXPORT void setWindowPosition(void* window, double x, double y) {
     if (!window) return;
 

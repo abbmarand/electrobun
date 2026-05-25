@@ -8367,6 +8367,42 @@ extern "C" void hideWindow(NSWindow *window) {
     });
 }
 
+static const char *kWindowCloakSavedAlphaKey = "ElectrobunWindowCloakSavedAlpha";
+static const char *kWindowCloakSavedIgnoresMouseKey = "ElectrobunWindowCloakSavedIgnoresMouse";
+
+extern "C" void setWindowCloaked(NSWindow *window, bool cloaked) {
+    dispatch_sync(dispatch_get_main_queue(), ^{
+        if (!window) return;
+
+        if (cloaked) {
+            if (!objc_getAssociatedObject(window, kWindowCloakSavedAlphaKey)) {
+                objc_setAssociatedObject(
+                    window,
+                    kWindowCloakSavedAlphaKey,
+                    @([window alphaValue]),
+                    OBJC_ASSOCIATION_RETAIN_NONATOMIC
+                );
+                objc_setAssociatedObject(
+                    window,
+                    kWindowCloakSavedIgnoresMouseKey,
+                    @([window ignoresMouseEvents]),
+                    OBJC_ASSOCIATION_RETAIN_NONATOMIC
+                );
+            }
+            [window setAlphaValue:0.0];
+            [window setIgnoresMouseEvents:YES];
+            return;
+        }
+
+        NSNumber *savedAlpha = objc_getAssociatedObject(window, kWindowCloakSavedAlphaKey);
+        NSNumber *savedIgnoresMouse = objc_getAssociatedObject(window, kWindowCloakSavedIgnoresMouseKey);
+        [window setAlphaValue:savedAlpha ? [savedAlpha doubleValue] : 1.0];
+        [window setIgnoresMouseEvents:savedIgnoresMouse ? [savedIgnoresMouse boolValue] : NO];
+        objc_setAssociatedObject(window, kWindowCloakSavedAlphaKey, nil, OBJC_ASSOCIATION_ASSIGN);
+        objc_setAssociatedObject(window, kWindowCloakSavedIgnoresMouseKey, nil, OBJC_ASSOCIATION_ASSIGN);
+    });
+}
+
 extern "C" void setWindowTitle(NSWindow *window, const char *title) {
     NSString *titleString = [NSString stringWithUTF8String:title ?: ""];
 
