@@ -357,6 +357,46 @@ export type FrontmostWindowInfo = FrontmostAppInfo & {
 	ownerPid: number;
 };
 
+export type RunningApplicationInfo = FrontmostAppInfo & {
+	pid: number;
+	active: boolean;
+	hidden: boolean;
+};
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+	return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+function readString(value: unknown): string {
+	return typeof value === "string" ? value : "";
+}
+
+function readNumber(value: unknown): number {
+	return typeof value === "number" && Number.isFinite(value) ? value : 0;
+}
+
+function readBoolean(value: unknown): boolean {
+	return typeof value === "boolean" ? value : false;
+}
+
+function parseRunningApplications(value: unknown): RunningApplicationInfo[] {
+	if (!Array.isArray(value)) return [];
+
+	const apps: RunningApplicationInfo[] = [];
+	for (const item of value) {
+		if (!isRecord(item)) continue;
+		apps.push({
+			bundleId: readString(item.bundleId),
+			name: readString(item.name),
+			path: readString(item.path),
+			pid: readNumber(item.pid),
+			active: readBoolean(item.active),
+			hidden: readBoolean(item.hidden),
+		});
+	}
+	return apps;
+}
+
 /**
  * Get info about the currently frontmost (active) application.
  * @returns Object with bundleId, name, and path, or null if unavailable
@@ -368,6 +408,19 @@ export const getFrontmostAppInfo = (): FrontmostAppInfo | null => {
 		return JSON.parse(json);
 	} catch {
 		return null;
+	}
+};
+
+/**
+ * Get currently running regular GUI applications.
+ */
+export const getRunningApplications = (): RunningApplicationInfo[] => {
+	const json = ffi.request.getRunningApplications();
+	if (!json) return [];
+	try {
+		return parseRunningApplications(JSON.parse(json));
+	} catch {
+		return [];
 	}
 };
 

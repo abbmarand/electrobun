@@ -3095,9 +3095,11 @@ runOpenPanelWithParameters:(WKOpenPanelParameters *)parameters
                 // create WKWebView
                 self.webView = [[WKWebView alloc] initWithFrame:frame configuration:configuration];
 
-                // Only set transparent background for main window webviews (autoResize/fullscreen)
-                // Child webviews (OOPIFs) need a visible background to render properly
-                if (autoResize) {
+                // Only transparent windows should make the page canvas transparent.
+                // Normal site/app windows need WebKit's opaque background so pages
+                // that do not paint their own body background do not show native
+                // dark window chrome through the document.
+                if (autoResize && transparent) {
                     [self.webView setValue:@NO forKey:@"drawsBackground"];
                     self.webView.layer.backgroundColor = [[NSColor clearColor] CGColor];
                     self.webView.layer.opaque = NO;
@@ -10001,7 +10003,7 @@ extern "C" const uint8_t* captureScreenExcludingWindow(NSWindow *window, size_t 
 }
 
 // getOnScreenWindowList - Return JSON array of on-screen, normal-layer windows.
-// Each entry: {"owner":"<app>","name":"<title>","id":<CGWindowID>}
+// Each entry includes the native window id plus app metadata when available.
 // Returns: malloc'd JSON string (caller must free), or NULL on failure.
 typedef CFArrayRef (*CGWindowListCopyWindowInfoFn)(uint32_t, uint32_t);
 
@@ -10015,9 +10017,8 @@ extern "C" const char* getOnScreenWindowList() {
         CFArrayRef list = copyInfo(kCGWindowListOptionOnScreenOnly | kCGWindowListExcludeDesktopElements, kCGNullWindowID);
         if (!list) return;
 
-        NSMutableString *json = [NSMutableString stringWithString:@"["];
+        NSMutableArray *windows = [NSMutableArray array];
         CFIndex count = CFArrayGetCount(list);
-        BOOL first = YES;
 
         for (CFIndex i = 0; i < count; i++) {
             NSDictionary *info = (__bridge NSDictionary *)CFArrayGetValueAtIndex(list, i);
@@ -10027,24 +10028,35 @@ extern "C" const char* getOnScreenWindowList() {
             NSString *owner = info[(__bridge NSString *)kCGWindowOwnerName];
             NSString *name  = info[(__bridge NSString *)kCGWindowName];
             NSNumber *num   = info[(__bridge NSString *)kCGWindowNumber];
+            NSNumber *ownerPid = info[(__bridge NSString *)kCGWindowOwnerPID];
             if (!owner || !num) continue;
 
-            // Escape embedded quotes/backslashes for JSON safety
-            NSString *safeOwner = [[owner stringByReplacingOccurrencesOfString:@"\\" withString:@"\\\\"]
-                                          stringByReplacingOccurrencesOfString:@"\"" withString:@"\\\""];
-            NSString *safeName  = name
-                ? [[name stringByReplacingOccurrencesOfString:@"\\" withString:@"\\\\"]
-                         stringByReplacingOccurrencesOfString:@"\"" withString:@"\\\""]
-                : @"";
+            NSMutableDictionary *payload = [@{
+                @"owner": owner,
+                @"name": name ?: @"",
+                @"id": num
+            } mutableCopy];
 
-            if (!first) [json appendString:@","];
-            [json appendFormat:@"{\"owner\":\"%@\",\"name\":\"%@\",\"id\":%d}",
-                safeOwner, safeName, [num intValue]];
-            first = NO;
+            if (ownerPid) {
+                payload[@"ownerPid"] = ownerPid;
+                NSRunningApplication *app =
+                    [NSRunningApplication runningApplicationWithProcessIdentifier:[ownerPid intValue]];
+                if (app) {
+                    payload[@"bundleId"] = app.bundleIdentifier ?: @"";
+                    payload[@"path"] = app.bundleURL.path ?: @"";
+                }
+            }
+
+            [windows addObject:payload];
         }
 
-        [json appendString:@"]"];
         CFRelease(list);
+        NSError *error = nil;
+        NSData *data = [NSJSONSerialization dataWithJSONObject:windows options:0 error:&error];
+        if (!data || error) return;
+
+        NSString *json = [[NSString alloc] initWithData:data encoding:NSUTF8StringEncoding];
+        if (!json) return;
         result = strdup([json UTF8String]);
     });
 
@@ -10088,17 +10100,43 @@ extern "C" const uint8_t* captureWindowById(uint32_t windowId, size_t *outSize) 
     return result;
 }
 
-static const char* copyJsonCStringFromDictionary(NSDictionary *dict) {
-    if (!dict) return NULL;
+static const char* copyJsonCStringFromObject(id object) {
+    if (!object) return NULL;
 
     NSError *error = nil;
-    NSData *data = [NSJSONSerialization dataWithJSONObject:dict options:0 error:&error];
+    NSData *data = [NSJSONSerialization dataWithJSONObject:object options:0 error:&error];
     if (!data || error) return NULL;
 
     NSString *json = [[NSString alloc] initWithData:data encoding:NSUTF8StringEncoding];
     if (!json) return NULL;
 
     return strdup([json UTF8String]);
+}
+
+// getRunningApplications - Return regular running GUI applications with bundle metadata.
+// Returns: JSON array string (caller must free), or NULL on failure.
+extern "C" const char* getRunningApplications() {
+    __block const char* result = NULL;
+
+    dispatch_sync(dispatch_get_main_queue(), ^{
+        NSMutableArray *apps = [NSMutableArray array];
+        for (NSRunningApplication *app in [[NSWorkspace sharedWorkspace] runningApplications]) {
+            if (app.activationPolicy != NSApplicationActivationPolicyRegular) continue;
+
+            [apps addObject:@{
+                @"bundleId": app.bundleIdentifier ?: @"",
+                @"name": app.localizedName ?: @"",
+                @"path": app.bundleURL.path ?: @"",
+                @"pid": @(app.processIdentifier),
+                @"active": @(app.active),
+                @"hidden": @(app.hidden)
+            }];
+        }
+
+        result = copyJsonCStringFromObject(apps);
+    });
+
+    return result;
 }
 
 // getFrontmostAppInfo - Get info about the currently frontmost application
@@ -10115,7 +10153,7 @@ extern "C" const char* getFrontmostAppInfo() {
             @"name": app.localizedName ?: @"",
             @"path": app.bundleURL.path ?: @""
         };
-        result = copyJsonCStringFromDictionary(payload);
+        result = copyJsonCStringFromObject(payload);
     });
 
     return result;
@@ -10162,7 +10200,7 @@ extern "C" const char* getFrontmostWindowInfo() {
                 @"windowTitle": windowTitle,
                 @"ownerPid": @(pid)
             };
-            result = copyJsonCStringFromDictionary(payload);
+            result = copyJsonCStringFromObject(payload);
         }
 
         CFRelease(list);

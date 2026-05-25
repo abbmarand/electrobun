@@ -10733,6 +10733,10 @@ ELECTROBUN_EXPORT const char* getFrontmostAppInfo() {
     });
 }
 
+ELECTROBUN_EXPORT const char* getRunningApplications() {
+    return strdup("[]");
+}
+
 ELECTROBUN_EXPORT const char* getFrontmostWindowBounds() {
     return NULL;
 }

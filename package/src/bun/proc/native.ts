@@ -748,6 +748,10 @@ export const native = (() => {
 				args: [],
 				returns: FFIType.cstring,
 			},
+			getRunningApplications: {
+				args: [],
+				returns: FFIType.cstring,
+			},
 			captureWindowById: {
 				args: [FFIType.u32, FFIType.ptr], // CGWindowID, size_t* outSize
 				returns: FFIType.ptr, // pointer to PNG data
@@ -2133,6 +2137,11 @@ window.__electrobunBunBridge = window.__electrobunBunBridge || window.webkit?.me
 			if (!result) return null;
 			return result.toString();
 		},
+		getRunningApplications: (): string | null => {
+			const result = native_.symbols.getRunningApplications();
+			if (!result) return null;
+			return result.toString();
+		},
 		captureWindowById: (params: { windowId: number }): Uint8Array | null => {
 			const sizeBuffer = new BigUint64Array(1);
 			const dataPtr = native_.symbols.captureWindowById(
@@ -2720,6 +2729,15 @@ export interface Point {
 	y: number;
 }
 
+export type OnScreenWindowInfo = {
+	owner: string;
+	name: string;
+	id: number;
+	ownerPid?: number;
+	bundleId?: string;
+	path?: string;
+};
+
 export type MacPermissionKind =
 	| "accessibility"
 	| "screenRecording"
@@ -2882,9 +2900,9 @@ export const Screen = {
 
 	/**
 	 * List all on-screen windows (normal layer only).
-	 * @returns Array of { owner, name, id } where id is the CGWindowID
+	 * @returns Array of on-screen window metadata where id is the native window id.
 	 */
-	getWindowList: (): Array<{ owner: string; name: string; id: number }> => {
+	getWindowList: (): OnScreenWindowInfo[] => {
 		const json = ffi.request.getOnScreenWindowList();
 		if (!json) return [];
 		try {
