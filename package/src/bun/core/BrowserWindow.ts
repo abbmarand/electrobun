@@ -362,7 +362,11 @@ export class BrowserWindow<T extends RPCWithTransport = RPCWithTransport> {
 	setVisibleOnAllWorkspaces(visibleOnAllWorkspaces: boolean) {
 		return ffi.request.setWindowVisibleOnAllWorkspaces({ winId: this.id, visibleOnAllWorkspaces });
 	}
-	
+
+	setHiddenFromMissionControl(hiddenFromMissionControl: boolean) {
+		return ffi.request.setWindowHiddenFromMissionControl({ winId: this.id, hiddenFromMissionControl });
+	}
+
 	isVisibleOnAllWorkspaces(): boolean {
 		return ffi.request.isWindowVisibleOnAllWorkspaces({ winId: this.id });
 	}

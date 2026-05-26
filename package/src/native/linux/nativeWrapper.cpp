@@ -10607,6 +10607,12 @@ ELECTROBUN_EXPORT bool isWindowVisibleOnAllWorkspaces(void* window) {
     return false;
 }
 
+ELECTROBUN_EXPORT void setWindowHiddenFromMissionControl(void* window, bool hidden) {
+    (void)window;
+    (void)hidden;
+    // macOS-only Mission Control behavior.
+}
+
 ELECTROBUN_EXPORT void setWindowCloaked(void* window, bool cloaked) {
     (void)window;
     (void)cloaked;

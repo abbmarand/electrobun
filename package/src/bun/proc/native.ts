@@ -222,18 +222,22 @@ export const native = (() => {
 				args: [FFIType.ptr],
 				returns: FFIType.bool,
 			},
-				setWindowPosition: {
-					args: [FFIType.ptr, FFIType.f64, FFIType.f64],
-					returns: FFIType.void,
-				},
-				setWindowButtonPosition: {
-					args: [FFIType.ptr, FFIType.f64, FFIType.f64],
-					returns: FFIType.void,
-				},
-				setWindowSize: {
-					args: [FFIType.ptr, FFIType.f64, FFIType.f64],
-					returns: FFIType.void,
-				},
+			setWindowHiddenFromMissionControl: {
+				args: [FFIType.ptr, FFIType.bool],
+				returns: FFIType.void,
+			},
+			setWindowPosition: {
+				args: [FFIType.ptr, FFIType.f64, FFIType.f64],
+				returns: FFIType.void,
+			},
+			setWindowButtonPosition: {
+				args: [FFIType.ptr, FFIType.f64, FFIType.f64],
+				returns: FFIType.void,
+			},
+			setWindowSize: {
+				args: [FFIType.ptr, FFIType.f64, FFIType.f64],
+				returns: FFIType.void,
+			},
 			setWindowFrame: {
 				args: [FFIType.ptr, FFIType.f64, FFIType.f64, FFIType.f64, FFIType.f64],
 				returns: FFIType.void,
@@ -1428,32 +1432,49 @@ const _ffiImpl = {
 			return native_.symbols.isWindowVisibleOnAllWorkspaces(windowPtr);
 		},
 
-			setWindowPosition: (params: { winId: number; x: number; y: number }) => {
-				const { winId, x, y } = params;
-				const windowPtr = getWindowPtr(winId);
+		setWindowHiddenFromMissionControl: (params: {
+			winId: number;
+			hiddenFromMissionControl: boolean;
+		}) => {
+			const { winId, hiddenFromMissionControl } = params;
+			const windowPtr = getWindowPtr(winId);
 
-				if (!windowPtr) {
-					throw `Can't set window position. Window no longer exists`;
-				}
+			if (!windowPtr) {
+				throw `Can't set hidden from Mission Control. Window no longer exists`;
+			}
 
-				native_.symbols.setWindowPosition(windowPtr, x, y);
-			},
+			native_.symbols.setWindowHiddenFromMissionControl(
+				windowPtr,
+				hiddenFromMissionControl,
+			);
+		},
 
-			setWindowButtonPosition: (params: { winId: number; x: number; y: number }) => {
-				const { winId, x, y } = params;
-				const windowPtr = getWindowPtr(winId);
+		setWindowPosition: (params: { winId: number; x: number; y: number }) => {
+			const { winId, x, y } = params;
+			const windowPtr = getWindowPtr(winId);
 
-				if (!windowPtr) {
-					throw `Can't set window button position. Window no longer exists`;
-				}
+			if (!windowPtr) {
+				throw `Can't set window position. Window no longer exists`;
+			}
 
-				native_.symbols.setWindowButtonPosition(windowPtr, x, y);
-			},
+			native_.symbols.setWindowPosition(windowPtr, x, y);
+		},
 
-			setWindowSize: (params: {
-				winId: number;
-				width: number;
-				height: number;
+		setWindowButtonPosition: (params: { winId: number; x: number; y: number }) => {
+			const { winId, x, y } = params;
+			const windowPtr = getWindowPtr(winId);
+
+			if (!windowPtr) {
+				throw `Can't set window button position. Window no longer exists`;
+			}
+
+			native_.symbols.setWindowButtonPosition(windowPtr, x, y);
+		},
+
+		setWindowSize: (params: {
+			winId: number;
+			width: number;
+			height: number;
 		}) => {
 			const { winId, width, height } = params;
 			const windowPtr = getWindowPtr(winId);

@@ -11617,6 +11617,24 @@ extern "C" bool isWindowVisibleOnAllWorkspaces(NSWindow *window) {
     return result;
 }
 
+extern "C" void setWindowHiddenFromMissionControl(NSWindow *window, bool hidden) {
+    dispatch_sync(dispatch_get_main_queue(), ^{
+        if (!window) return;
+
+        NSWindowCollectionBehavior behavior = [window collectionBehavior];
+        if (hidden) {
+            behavior |= NSWindowCollectionBehaviorTransient;
+            behavior |= NSWindowCollectionBehaviorIgnoresCycle;
+            behavior &= ~NSWindowCollectionBehaviorManaged;
+            behavior &= ~NSWindowCollectionBehaviorParticipatesInCycle;
+        } else {
+            behavior &= ~NSWindowCollectionBehaviorTransient;
+            behavior &= ~NSWindowCollectionBehaviorIgnoresCycle;
+        }
+        [window setCollectionBehavior:behavior];
+    });
+}
+
 // ----------------------- Content Blocker -----------------------
 
 static NSMutableArray<WKContentRuleList *> *g_compiledContentRuleLists = nil;
