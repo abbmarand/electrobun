@@ -1,5 +1,5 @@
 import { existsSync } from "fs";
-import { join } from "path";
+import { dirname, join, resolve } from "path";
 import electrobunEventEmitter from "../events/eventEmitter";
 import ElectrobunEvent from "../events/event";
 import { BrowserView } from "../core/BrowserView";
@@ -111,16 +111,35 @@ function getMacWindowStyleMask(options: WindowStyleMaskOptions): number {
 	return mask;
 }
 
+function uniqueNativeWrapperCandidates(name: string): string[] {
+	const cwd = process.cwd();
+	const execDir = dirname(process.execPath);
+	const candidates = [
+		join(cwd, name),
+		join(cwd, "bin", name),
+		join(execDir, name),
+		join(execDir, "..", name),
+		join(execDir, "..", "bin", name),
+	];
+	const seen = new Set<string>();
+	return candidates
+		.map((candidate) => resolve(candidate))
+		.filter((candidate) => {
+			if (seen.has(candidate)) return false;
+			seen.add(candidate);
+			return true;
+		});
+}
+
+function getNativeWrapperPath(name: string): string {
+	const candidates = uniqueNativeWrapperCandidates(name);
+	return candidates.find((candidate) => existsSync(candidate)) ?? candidates[0]!;
+}
+
 export const native = (() => {
 	try {
-		// Use absolute path to native wrapper DLL to avoid working directory issues
-		// On Windows shortcuts, the working directory may not be set correctly
 		const nativeWrapperName = `libNativeWrapper.${suffix}`;
-		const cwdNativeWrapperPath = join(process.cwd(), nativeWrapperName);
-		const binNativeWrapperPath = join(process.cwd(), "bin", nativeWrapperName);
-		const nativeWrapperPath = existsSync(cwdNativeWrapperPath)
-			? cwdNativeWrapperPath
-			: binNativeWrapperPath;
+		const nativeWrapperPath = getNativeWrapperPath(nativeWrapperName);
 		return dlopen(nativeWrapperPath, {
 			// window
 			createWindowWithFrameAndStyleFromWorker: {
@@ -588,14 +607,18 @@ export const native = (() => {
 				args: [FFIType.cstring],
 				returns: FFIType.void,
 			},
-			removeImageBackground: {
-				args: [FFIType.cstring, FFIType.cstring],
-				returns: FFIType.bool,
-			},
-			shareFile: {
-				args: [FFIType.cstring],
-				returns: FFIType.void,
-			},
+			...(process.platform === "darwin"
+				? {
+						removeImageBackground: {
+							args: [FFIType.cstring, FFIType.cstring],
+							returns: FFIType.bool,
+						},
+						shareFile: {
+							args: [FFIType.cstring],
+							returns: FFIType.void,
+						},
+					}
+				: {}),
 			openExternal: {
 				args: [FFIType.cstring],
 				returns: FFIType.bool,
@@ -894,7 +917,13 @@ export const native = (() => {
 			// },
 		});
 	} catch (err) {
-		console.error("[native] failed to load native wrapper:", err);
+		const nativeWrapperName = `libNativeWrapper.${suffix}`;
+		console.error("[native] failed to load native wrapper:", {
+			error: err,
+			candidates: uniqueNativeWrapperCandidates(nativeWrapperName),
+			cwd: process.cwd(),
+			execPath: process.execPath,
+		});
 		// FFI not available — running as a carrot inside Bunny Ears or in a build-only context.
 		return null;
 	}
@@ -1964,12 +1993,14 @@ window.__electrobunBunBridge = window.__electrobunBunBridge || window.webkit?.me
 			native_.symbols.showItemInFolder(toCString(path));
 		},
 		removeImageBackground: (params: { inputPath: string; outputPath: string }): boolean => {
+			if (!("removeImageBackground" in native_.symbols)) return false;
 			return native_.symbols.removeImageBackground(
 				toCString(params.inputPath),
 				toCString(params.outputPath),
 			);
 		},
 		shareFile: (params: { path: string }): void => {
+			if (!("shareFile" in native_.symbols)) return;
 			native_.symbols.shareFile(toCString(params.path));
 		},
 		openExternal: (params: { url: string }): boolean => {
