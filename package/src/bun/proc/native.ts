@@ -2661,7 +2661,7 @@ if (native) {
 			console.log(`[GlobalShortcut] JS callback received id=${shortcutId} handler=${handler ? "yes" : "no"}`);
 			if (handler) handler();
 		},
-		{ args: [FFIType.int], returns: "void", threadsafe: true },
+		{ args: ["i32"], returns: "void", threadsafe: true },
 	);
 	_callbacks.push(globalShortcutCallback);
 	native_.symbols.setGlobalShortcutCallback(globalShortcutCallback);
