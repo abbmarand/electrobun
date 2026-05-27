@@ -10900,23 +10900,16 @@ ELECTROBUN_EXPORT bool getAppIconToPath(const char* appPath, const char* destPat
     }
     if (!hIcon) return false;
 
-    ICONINFO ii;
-    if (!GetIconInfo(hIcon, &ii)) {
-        DestroyIcon(hIcon);
-        return false;
-    }
-
-    Gdiplus::Bitmap srcBmp(ii.hbmColor, nullptr);
-    DeleteObject(ii.hbmColor);
-    DeleteObject(ii.hbmMask);
-
     int outSize = (size > 0) ? size : 64;
     Gdiplus::Bitmap dst(outSize, outSize, PixelFormat32bppARGB);
     {
         Gdiplus::Graphics g(&dst);
+        g.Clear(Gdiplus::Color(0, 0, 0, 0));
         g.SetInterpolationMode(Gdiplus::InterpolationModeHighQualityBicubic);
         g.SetSmoothingMode(Gdiplus::SmoothingModeAntiAlias);
-        g.DrawImage(&srcBmp, 0, 0, outSize, outSize);
+        HDC hdc = g.GetHDC();
+        DrawIconEx(hdc, 0, 0, hIcon, outSize, outSize, 0, nullptr, DI_NORMAL);
+        g.ReleaseHDC(hdc);
     }
 
     int destWideLen = MultiByteToWideChar(CP_UTF8, 0, destPath, -1, nullptr, 0);
