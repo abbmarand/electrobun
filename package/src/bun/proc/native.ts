@@ -1,3 +1,4 @@
+import { existsSync } from "fs";
 import { join } from "path";
 import electrobunEventEmitter from "../events/eventEmitter";
 import ElectrobunEvent from "../events/event";
@@ -114,7 +115,12 @@ export const native = (() => {
 	try {
 		// Use absolute path to native wrapper DLL to avoid working directory issues
 		// On Windows shortcuts, the working directory may not be set correctly
-		const nativeWrapperPath = join(process.cwd(), `libNativeWrapper.${suffix}`);
+		const nativeWrapperName = `libNativeWrapper.${suffix}`;
+		const cwdNativeWrapperPath = join(process.cwd(), nativeWrapperName);
+		const binNativeWrapperPath = join(process.cwd(), "bin", nativeWrapperName);
+		const nativeWrapperPath = existsSync(cwdNativeWrapperPath)
+			? cwdNativeWrapperPath
+			: binNativeWrapperPath;
 		return dlopen(nativeWrapperPath, {
 			// window
 			createWindowWithFrameAndStyleFromWorker: {
