@@ -3634,6 +3634,9 @@ usageDescriptions : ""}${urlTypes ? "\n" + urlTypes : ""}${documentTypes ?
 			}
 
 			// todo (yoav): add ability to swap out BUILD VARS
+			if (existsSync(destination)) {
+				rmSync(destination, { recursive: true, force: true });
+			}
 			cpSync(source, destination, { recursive: true, dereference: true });
 		}
 
