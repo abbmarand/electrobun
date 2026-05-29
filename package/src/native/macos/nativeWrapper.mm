@@ -9192,6 +9192,52 @@ extern "C" void clipboardWriteImage(const uint8_t *pngData, size_t size) {
     });
 }
 
+// clipboardReadFilePaths - Read file paths from the system clipboard as a JSON string array
+extern "C" const char* clipboardReadFilePaths() {
+    __block const char* result = NULL;
+
+    dispatch_sync(dispatch_get_main_queue(), ^{
+        NSPasteboard *pasteboard = [NSPasteboard generalPasteboard];
+        NSArray *urls = [pasteboard readObjectsForClasses:@[[NSURL class]]
+                                                  options:@{NSPasteboardURLReadingFileURLsOnlyKey: @YES}];
+        NSMutableArray *paths = [NSMutableArray array];
+        for (NSURL *url in urls) {
+            if ([url isFileURL] && [url path]) {
+                [paths addObject:[url path]];
+            }
+        }
+
+        NSData *jsonData = [NSJSONSerialization dataWithJSONObject:paths options:0 error:nil];
+        NSString *json = jsonData ? [[NSString alloc] initWithData:jsonData encoding:NSUTF8StringEncoding] : @"[]";
+        result = strdup([json UTF8String]);
+    });
+
+    return result;
+}
+
+// clipboardWriteFilePaths - Write file paths to the system clipboard from a JSON string array
+extern "C" void clipboardWriteFilePaths(const char *pathsJson) {
+    if (!pathsJson) return;
+
+    dispatch_sync(dispatch_get_main_queue(), ^{
+        NSData *jsonData = [NSData dataWithBytes:pathsJson length:strlen(pathsJson)];
+        id parsed = [NSJSONSerialization JSONObjectWithData:jsonData options:0 error:nil];
+        if (![parsed isKindOfClass:[NSArray class]]) return;
+
+        NSMutableArray *urls = [NSMutableArray array];
+        for (id value in (NSArray *)parsed) {
+            if (![value isKindOfClass:[NSString class]]) continue;
+            NSURL *url = [NSURL fileURLWithPath:(NSString *)value];
+            if (url) [urls addObject:url];
+        }
+        if ([urls count] == 0) return;
+
+        NSPasteboard *pasteboard = [NSPasteboard generalPasteboard];
+        [pasteboard clearContents];
+        [pasteboard writeObjects:urls];
+    });
+}
+
 // clipboardClear - Clear the clipboard
 extern "C" void clipboardClear() {
     dispatch_sync(dispatch_get_main_queue(), ^{

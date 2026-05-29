@@ -733,18 +733,26 @@ export const native = (() => {
 				args: [],
 				returns: FFIType.i64,
 			},
-			clipboardReadImage: {
-				args: [FFIType.ptr], // pointer to size_t for output size
-				returns: FFIType.ptr, // pointer to PNG data
-			},
-			clipboardWriteImage: {
-				args: [FFIType.ptr, FFIType.u64], // PNG data pointer, size
-				returns: FFIType.void,
-			},
-		clipboardClear: {
-			args: [],
-			returns: FFIType.void,
-		},
+				clipboardReadImage: {
+					args: [FFIType.ptr], // pointer to size_t for output size
+					returns: FFIType.ptr, // pointer to PNG data
+				},
+				clipboardWriteImage: {
+					args: [FFIType.ptr, FFIType.u64], // PNG data pointer, size
+					returns: FFIType.void,
+				},
+				clipboardReadFilePaths: {
+					args: [],
+					returns: FFIType.cstring,
+				},
+				clipboardWriteFilePaths: {
+					args: [FFIType.cstring],
+					returns: FFIType.void,
+				},
+				clipboardClear: {
+					args: [],
+					returns: FFIType.void,
+				},
 		simulatePaste: {
 			args: [],
 			returns: FFIType.void,
@@ -2122,13 +2130,34 @@ window.__electrobunBunBridge = window.__electrobunBunBridge || window.webkit?.me
 
 			return result;
 		},
-		clipboardWriteImage: (params: { pngData: Uint8Array }): void => {
-			const { pngData } = params;
-			native_.symbols.clipboardWriteImage(ptr(pngData), BigInt(pngData.length));
-		},
-		clipboardClear: (): void => {
-			native_.symbols.clipboardClear();
-		},
+			clipboardWriteImage: (params: { pngData: Uint8Array }): void => {
+				const { pngData } = params;
+				native_.symbols.clipboardWriteImage(ptr(pngData), BigInt(pngData.length));
+			},
+			clipboardReadFilePaths: (): string[] => {
+				const result = native_.symbols.clipboardReadFilePaths();
+				if (!result) return [];
+				const raw = result.toString();
+				if (!raw) return [];
+				let parsed: unknown;
+				try {
+					parsed = JSON.parse(raw);
+				} catch {
+					return [];
+				}
+				if (!Array.isArray(parsed)) return [];
+				const paths: string[] = [];
+				for (const value of parsed) {
+					if (typeof value === "string" && value.length > 0) paths.push(value);
+				}
+				return paths;
+			},
+			clipboardWriteFilePaths: (params: { paths: string[] }): void => {
+				native_.symbols.clipboardWriteFilePaths(toCString(JSON.stringify(params.paths)));
+			},
+			clipboardClear: (): void => {
+				native_.symbols.clipboardClear();
+			},
 		simulatePaste: (): void => {
 			native_.symbols.simulatePaste();
 		},

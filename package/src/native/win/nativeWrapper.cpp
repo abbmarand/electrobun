@@ -15,6 +15,8 @@
 #include <functional>
 #include <future>
 #include <memory>
+#include <cctype>
+#include <cstdio>
 #include <windows.h>
 #include <atomic>
 #include "../shared/pending_resize_queue.h"
@@ -10492,6 +10494,230 @@ static bool openClipboardWithRetry(HWND owner) {
     return false;
 }
 
+static void ensureGdiplus();
+static bool getEncoderClsid(const WCHAR* format, CLSID* pClsid);
+
+static std::string jsonEscapeString(const std::string& value) {
+    std::string result;
+    result.reserve(value.size() + 8);
+    for (unsigned char ch : value) {
+        switch (ch) {
+            case '\\': result += "\\\\"; break;
+            case '"': result += "\\\""; break;
+            case '\b': result += "\\b"; break;
+            case '\f': result += "\\f"; break;
+            case '\n': result += "\\n"; break;
+            case '\r': result += "\\r"; break;
+            case '\t': result += "\\t"; break;
+            default:
+                if (ch < 0x20) {
+                    char buffer[7];
+                    snprintf(buffer, sizeof(buffer), "\\u%04x", ch);
+                    result += buffer;
+                } else {
+                    result += static_cast<char>(ch);
+                }
+                break;
+        }
+    }
+    return result;
+}
+
+static uint8_t* copyHGlobalBytes(HGLOBAL hGlobal, size_t* outSize) {
+    if (outSize) *outSize = 0;
+    if (!hGlobal) return nullptr;
+    SIZE_T dataSize = GlobalSize(hGlobal);
+    if (dataSize == 0) return nullptr;
+    void* data = GlobalLock(hGlobal);
+    if (!data) return nullptr;
+    uint8_t* result = static_cast<uint8_t*>(malloc(static_cast<size_t>(dataSize)));
+    if (result) {
+        memcpy(result, data, static_cast<size_t>(dataSize));
+        if (outSize) *outSize = static_cast<size_t>(dataSize);
+    }
+    GlobalUnlock(hGlobal);
+    return result;
+}
+
+static uint8_t* streamToMallocBytes(IStream* stream, size_t* outSize) {
+    if (outSize) *outSize = 0;
+    if (!stream) return nullptr;
+    HGLOBAL hGlobal = nullptr;
+    if (FAILED(GetHGlobalFromStream(stream, &hGlobal)) || !hGlobal) return nullptr;
+    return copyHGlobalBytes(hGlobal, outSize);
+}
+
+static uint8_t* bitmapToPngBytes(Gdiplus::Bitmap* bitmap, size_t* outSize) {
+    if (outSize) *outSize = 0;
+    if (!bitmap) return nullptr;
+    ensureGdiplus();
+    CLSID pngClsid;
+    if (!getEncoderClsid(L"image/png", &pngClsid)) return nullptr;
+    IStream* stream = nullptr;
+    if (FAILED(CreateStreamOnHGlobal(nullptr, TRUE, &stream))) return nullptr;
+    if (bitmap->Save(stream, &pngClsid, nullptr) != Gdiplus::Ok) {
+        stream->Release();
+        return nullptr;
+    }
+    uint8_t* result = streamToMallocBytes(stream, outSize);
+    stream->Release();
+    return result;
+}
+
+static size_t dibColorTableBytes(const BITMAPINFOHEADER* header) {
+    if (!header) return 0;
+    if (header->biClrUsed > 0) return static_cast<size_t>(header->biClrUsed) * sizeof(RGBQUAD);
+    if (header->biBitCount <= 8) return static_cast<size_t>(1u << header->biBitCount) * sizeof(RGBQUAD);
+    if (header->biCompression == BI_BITFIELDS) return 3 * sizeof(DWORD);
+    return 0;
+}
+
+static uint8_t* dibToPngBytes(const void* dibData, size_t dibSize, size_t* outSize) {
+    if (outSize) *outSize = 0;
+    if (!dibData || dibSize < sizeof(BITMAPINFOHEADER)) return nullptr;
+    const BITMAPINFOHEADER* header = static_cast<const BITMAPINFOHEADER*>(dibData);
+    if (header->biSize < sizeof(BITMAPINFOHEADER) || header->biSize > dibSize) return nullptr;
+    const BYTE* bits = static_cast<const BYTE*>(dibData) + header->biSize + dibColorTableBytes(header);
+    if (bits >= static_cast<const BYTE*>(dibData) + dibSize) return nullptr;
+
+    HDC screenDC = GetDC(nullptr);
+    HBITMAP bitmapHandle = CreateDIBitmap(
+        screenDC,
+        header,
+        CBM_INIT,
+        bits,
+        static_cast<const BITMAPINFO*>(dibData),
+        DIB_RGB_COLORS
+    );
+    ReleaseDC(nullptr, screenDC);
+    if (!bitmapHandle) return nullptr;
+
+    ensureGdiplus();
+    Gdiplus::Bitmap bitmap(bitmapHandle, nullptr);
+    uint8_t* result = bitmapToPngBytes(&bitmap, outSize);
+    DeleteObject(bitmapHandle);
+    return result;
+}
+
+static HGLOBAL pngBytesToDibHGlobal(const uint8_t* pngData, size_t size) {
+    if (!pngData || size == 0) return nullptr;
+    ensureGdiplus();
+
+    HGLOBAL pngGlobal = GlobalAlloc(GMEM_MOVEABLE, size);
+    if (!pngGlobal) return nullptr;
+    void* pngCopy = GlobalLock(pngGlobal);
+    if (!pngCopy) {
+        GlobalFree(pngGlobal);
+        return nullptr;
+    }
+    memcpy(pngCopy, pngData, size);
+    GlobalUnlock(pngGlobal);
+
+    IStream* stream = nullptr;
+    if (FAILED(CreateStreamOnHGlobal(pngGlobal, TRUE, &stream))) {
+        GlobalFree(pngGlobal);
+        return nullptr;
+    }
+
+    std::unique_ptr<Gdiplus::Bitmap> source(Gdiplus::Bitmap::FromStream(stream));
+    stream->Release();
+    if (!source || source->GetLastStatus() != Gdiplus::Ok) return nullptr;
+
+    UINT width = source->GetWidth();
+    UINT height = source->GetHeight();
+    if (width == 0 || height == 0) return nullptr;
+
+    Gdiplus::Bitmap normalized(width, height, PixelFormat32bppARGB);
+    {
+        Gdiplus::Graphics graphics(&normalized);
+        graphics.Clear(Gdiplus::Color(0, 0, 0, 0));
+        graphics.DrawImage(source.get(), 0, 0, width, height);
+    }
+
+    Gdiplus::Rect rect(0, 0, static_cast<INT>(width), static_cast<INT>(height));
+    Gdiplus::BitmapData bitmapData = {};
+    if (normalized.LockBits(&rect, Gdiplus::ImageLockModeRead, PixelFormat32bppARGB, &bitmapData) != Gdiplus::Ok) {
+        return nullptr;
+    }
+
+    size_t stride = static_cast<size_t>(width) * 4;
+    size_t pixelBytes = stride * static_cast<size_t>(height);
+    size_t totalBytes = sizeof(BITMAPINFOHEADER) + pixelBytes;
+    HGLOBAL dibGlobal = GlobalAlloc(GMEM_MOVEABLE, totalBytes);
+    if (!dibGlobal) {
+        normalized.UnlockBits(&bitmapData);
+        return nullptr;
+    }
+
+    BYTE* dib = static_cast<BYTE*>(GlobalLock(dibGlobal));
+    if (!dib) {
+        normalized.UnlockBits(&bitmapData);
+        GlobalFree(dibGlobal);
+        return nullptr;
+    }
+
+    BITMAPINFOHEADER* header = reinterpret_cast<BITMAPINFOHEADER*>(dib);
+    ZeroMemory(header, sizeof(BITMAPINFOHEADER));
+    header->biSize = sizeof(BITMAPINFOHEADER);
+    header->biWidth = static_cast<LONG>(width);
+    header->biHeight = -static_cast<LONG>(height);
+    header->biPlanes = 1;
+    header->biBitCount = 32;
+    header->biCompression = BI_RGB;
+    header->biSizeImage = static_cast<DWORD>(pixelBytes);
+
+    BYTE* destination = dib + sizeof(BITMAPINFOHEADER);
+    const BYTE* sourcePixels = static_cast<const BYTE*>(bitmapData.Scan0);
+    for (UINT row = 0; row < height; row++) {
+        memcpy(destination + row * stride, sourcePixels + row * bitmapData.Stride, stride);
+    }
+
+    GlobalUnlock(dibGlobal);
+    normalized.UnlockBits(&bitmapData);
+    return dibGlobal;
+}
+
+static HBITMAP pngBytesToHBitmap(const uint8_t* pngData, size_t size) {
+    if (!pngData || size == 0) return nullptr;
+    ensureGdiplus();
+
+    HGLOBAL pngGlobal = GlobalAlloc(GMEM_MOVEABLE, size);
+    if (!pngGlobal) return nullptr;
+    void* pngCopy = GlobalLock(pngGlobal);
+    if (!pngCopy) {
+        GlobalFree(pngGlobal);
+        return nullptr;
+    }
+    memcpy(pngCopy, pngData, size);
+    GlobalUnlock(pngGlobal);
+
+    IStream* stream = nullptr;
+    if (FAILED(CreateStreamOnHGlobal(pngGlobal, TRUE, &stream))) {
+        GlobalFree(pngGlobal);
+        return nullptr;
+    }
+
+    std::unique_ptr<Gdiplus::Bitmap> source(Gdiplus::Bitmap::FromStream(stream));
+    stream->Release();
+    if (!source || source->GetLastStatus() != Gdiplus::Ok) return nullptr;
+
+    UINT width = source->GetWidth();
+    UINT height = source->GetHeight();
+    if (width == 0 || height == 0) return nullptr;
+
+    Gdiplus::Bitmap normalized(width, height, PixelFormat32bppARGB);
+    {
+        Gdiplus::Graphics graphics(&normalized);
+        graphics.Clear(Gdiplus::Color(0, 0, 0, 0));
+        graphics.DrawImage(source.get(), 0, 0, width, height);
+    }
+
+    HBITMAP hBitmap = nullptr;
+    Gdiplus::Color transparent(0, 0, 0, 0);
+    if (normalized.GetHBITMAP(transparent, &hBitmap) != Gdiplus::Ok) return nullptr;
+    return hBitmap;
+}
+
 // clipboardReadText - Read text from the system clipboard
 // Returns: UTF-8 string (caller must free) or NULL if no text available
 ELECTROBUN_EXPORT const char* clipboardReadText() {
@@ -10566,20 +10792,30 @@ ELECTROBUN_EXPORT const uint8_t* clipboardReadImage(size_t* outSize) {
 
         const uint8_t* result = nullptr;
 
-        // Try CF_DIB format (Device Independent Bitmap)
-        HANDLE hData = GetClipboardData(CF_DIB);
-        if (hData) {
-            BITMAPINFO* bmi = static_cast<BITMAPINFO*>(GlobalLock(hData));
-            if (bmi) {
-                // For now, return raw DIB data - full PNG conversion would require
-                // additional libraries like libpng or GDI+
-                // TODO: Implement proper PNG conversion using GDI+ or similar
-                size_t dataSize = GlobalSize(hData);
-                uint8_t* buffer = static_cast<uint8_t*>(malloc(dataSize));
-                memcpy(buffer, bmi, dataSize);
-                if (outSize) *outSize = dataSize;
-                result = buffer;
-                GlobalUnlock(hData);
+        UINT pngFormat = RegisterClipboardFormatA("PNG");
+        HANDLE pngData = GetClipboardData(pngFormat);
+        if (pngData) {
+            result = copyHGlobalBytes(static_cast<HGLOBAL>(pngData), outSize);
+        }
+
+        if (!result) {
+            HANDLE dibData = GetClipboardData(CF_DIB);
+            if (dibData) {
+                SIZE_T dibSize = GlobalSize(dibData);
+                void* dib = GlobalLock(dibData);
+                if (dib) {
+                    result = dibToPngBytes(dib, static_cast<size_t>(dibSize), outSize);
+                    GlobalUnlock(dibData);
+                }
+            }
+        }
+
+        if (!result) {
+            HBITMAP hBitmap = static_cast<HBITMAP>(GetClipboardData(CF_BITMAP));
+            if (hBitmap) {
+                ensureGdiplus();
+                Gdiplus::Bitmap bitmap(hBitmap, nullptr);
+                result = bitmapToPngBytes(&bitmap, outSize);
             }
         }
 
@@ -10599,25 +10835,147 @@ ELECTROBUN_EXPORT void clipboardWriteImage(const uint8_t* pngData, size_t size) 
 
         EmptyClipboard();
 
-        // For now, store as raw data - proper PNG to DIB conversion would require
-        // additional libraries
-        // TODO: Implement proper PNG to DIB conversion
-        HGLOBAL hMem = GlobalAlloc(GMEM_MOVEABLE, size);
-        if (hMem) {
-            void* data = GlobalLock(hMem);
+        HGLOBAL pngMem = GlobalAlloc(GMEM_MOVEABLE, size);
+        if (pngMem) {
+            void* data = GlobalLock(pngMem);
             if (data) {
                 memcpy(data, pngData, size);
-                GlobalUnlock(hMem);
-                // Register a custom format for PNG data
+                GlobalUnlock(pngMem);
                 UINT pngFormat = RegisterClipboardFormatA("PNG");
-                if (!SetClipboardData(pngFormat, hMem)) {
-                    GlobalFree(hMem);
+                if (!SetClipboardData(pngFormat, pngMem)) {
+                    GlobalFree(pngMem);
                 }
             } else {
-                GlobalFree(hMem);
+                GlobalFree(pngMem);
             }
         }
 
+        HGLOBAL dibMem = pngBytesToDibHGlobal(pngData, size);
+        if (dibMem && !SetClipboardData(CF_DIB, dibMem)) {
+            GlobalFree(dibMem);
+        }
+
+        HBITMAP bitmap = pngBytesToHBitmap(pngData, size);
+        if (bitmap && !SetClipboardData(CF_BITMAP, bitmap)) {
+            DeleteObject(bitmap);
+        }
+
+        CloseClipboard();
+    });
+}
+
+// clipboardReadFilePaths - Read file paths from clipboard as a JSON string array
+ELECTROBUN_EXPORT const char* clipboardReadFilePaths() {
+    return MainThreadDispatcher::dispatch_sync([=]() -> const char* {
+        if (!openClipboardWithRetry(nullptr)) {
+            return strdup("[]");
+        }
+
+        std::string json = "[";
+        bool first = true;
+        HDROP drop = static_cast<HDROP>(GetClipboardData(CF_HDROP));
+        if (drop) {
+            UINT count = DragQueryFileW(drop, 0xFFFFFFFF, nullptr, 0);
+            for (UINT index = 0; index < count; index++) {
+                UINT length = DragQueryFileW(drop, index, nullptr, 0);
+                if (length == 0) continue;
+                std::wstring path(length + 1, L'\0');
+                DragQueryFileW(drop, index, &path[0], length + 1);
+                path.resize(length);
+                std::string utf8 = WStringToString(path);
+                if (!first) json += ",";
+                first = false;
+                json += "\"";
+                json += jsonEscapeString(utf8);
+                json += "\"";
+            }
+        }
+        json += "]";
+        CloseClipboard();
+        return strdup(json.c_str());
+    });
+}
+
+static std::vector<std::wstring> parseFilePathJsonArray(const char* json) {
+    std::vector<std::wstring> paths;
+    if (!json) return paths;
+    std::string input(json);
+    size_t index = 0;
+    while (index < input.size() && isspace(static_cast<unsigned char>(input[index]))) index++;
+    if (index >= input.size() || input[index] != '[') return paths;
+    index++;
+    while (index < input.size()) {
+        while (index < input.size() && isspace(static_cast<unsigned char>(input[index]))) index++;
+        if (index < input.size() && input[index] == ']') break;
+        if (index >= input.size() || input[index] != '"') break;
+        index++;
+        std::string value;
+        while (index < input.size()) {
+            char ch = input[index++];
+            if (ch == '"') break;
+            if (ch == '\\' && index < input.size()) {
+                char escaped = input[index++];
+                if (escaped == '"' || escaped == '\\' || escaped == '/') value += escaped;
+                else if (escaped == 'n') value += '\n';
+                else if (escaped == 'r') value += '\r';
+                else if (escaped == 't') value += '\t';
+                else if (escaped == 'b') value += '\b';
+                else if (escaped == 'f') value += '\f';
+            } else {
+                value += ch;
+            }
+        }
+        if (!value.empty()) paths.push_back(StringToWString(value));
+        while (index < input.size() && isspace(static_cast<unsigned char>(input[index]))) index++;
+        if (index < input.size() && input[index] == ',') index++;
+    }
+    return paths;
+}
+
+// clipboardWriteFilePaths - Write file paths to clipboard from a JSON string array
+ELECTROBUN_EXPORT void clipboardWriteFilePaths(const char* pathsJson) {
+    std::vector<std::wstring> paths = parseFilePathJsonArray(pathsJson);
+    if (paths.empty()) return;
+
+    MainThreadDispatcher::dispatch_sync([=]() {
+        if (!openClipboardWithRetry(nullptr)) {
+            return;
+        }
+
+        size_t characters = 1;
+        for (const std::wstring& path : paths) {
+            characters += path.size() + 1;
+        }
+        size_t bytes = sizeof(DROPFILES) + characters * sizeof(wchar_t);
+        HGLOBAL hMem = GlobalAlloc(GMEM_MOVEABLE | GMEM_ZEROINIT, bytes);
+        if (!hMem) {
+            CloseClipboard();
+            return;
+        }
+
+        DROPFILES* dropFiles = static_cast<DROPFILES*>(GlobalLock(hMem));
+        if (!dropFiles) {
+            GlobalFree(hMem);
+            CloseClipboard();
+            return;
+        }
+
+        dropFiles->pFiles = sizeof(DROPFILES);
+        dropFiles->fWide = TRUE;
+        wchar_t* cursor = reinterpret_cast<wchar_t*>(reinterpret_cast<BYTE*>(dropFiles) + sizeof(DROPFILES));
+        for (const std::wstring& path : paths) {
+            memcpy(cursor, path.c_str(), path.size() * sizeof(wchar_t));
+            cursor += path.size();
+            *cursor = L'\0';
+            cursor++;
+        }
+        *cursor = L'\0';
+        GlobalUnlock(hMem);
+
+        EmptyClipboard();
+        if (!SetClipboardData(CF_HDROP, hMem)) {
+            GlobalFree(hMem);
+        }
         CloseClipboard();
     });
 }

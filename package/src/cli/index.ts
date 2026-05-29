@@ -2903,7 +2903,7 @@ usageDescriptions : ""}${urlTypes ? "\n" + urlTypes : ""}${documentTypes ?
 		);
 		// Note: .bin/bun binary in node_modules is a symlink to the versioned one in another place
 		// in node_modules, so we have to dereference here to get the actual binary in the bundle.
-		const windowsRuntimeFileName = `${config.app.name.replace(/[<>:"/\\|?*]/g, "_")}.exe`;
+		const windowsRuntimeFileName = `${appFileName.replace(/[<>:"/\\|?*]/g, "_")}.exe`;
 		const runtimeFileName =
 			targetOS === "win"
 				? windowsRuntimeFileName

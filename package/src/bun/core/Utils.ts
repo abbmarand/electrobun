@@ -323,6 +323,22 @@ export const clipboardWriteImage = (pngData: Uint8Array): void => {
 };
 
 /**
+ * Read file paths from the system clipboard.
+ * @returns Absolute file paths, or an empty array if no files are available
+ */
+export const clipboardReadFilePaths = (): string[] => {
+	return ffi.request.clipboardReadFilePaths();
+};
+
+/**
+ * Write file paths to the system clipboard.
+ * @param paths - Absolute file paths
+ */
+export const clipboardWriteFilePaths = (paths: string[]): void => {
+	ffi.request.clipboardWriteFilePaths({ paths });
+};
+
+/**
  * Clear the system clipboard.
  */
 export const clipboardClear = (): void => {
