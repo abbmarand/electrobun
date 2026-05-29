@@ -10482,11 +10482,21 @@ ELECTROBUN_EXPORT int showMessageBox(const char *type,
 // Clipboard API
 // ============================================================================
 
+static bool openClipboardWithRetry(HWND owner) {
+    for (int attempt = 0; attempt < 10; attempt++) {
+        if (OpenClipboard(owner)) {
+            return true;
+        }
+        Sleep(10);
+    }
+    return false;
+}
+
 // clipboardReadText - Read text from the system clipboard
 // Returns: UTF-8 string (caller must free) or NULL if no text available
 ELECTROBUN_EXPORT const char* clipboardReadText() {
     return MainThreadDispatcher::dispatch_sync([=]() -> const char* {
-        if (!OpenClipboard(nullptr)) {
+        if (!openClipboardWithRetry(nullptr)) {
             return nullptr;
         }
 
@@ -10516,7 +10526,7 @@ ELECTROBUN_EXPORT void clipboardWriteText(const char* text) {
     if (!text) return;
 
     MainThreadDispatcher::dispatch_sync([=]() {
-        if (!OpenClipboard(nullptr)) {
+        if (!openClipboardWithRetry(nullptr)) {
             return;
         }
 
@@ -10528,9 +10538,15 @@ ELECTROBUN_EXPORT void clipboardWriteText(const char* text) {
             HGLOBAL hMem = GlobalAlloc(GMEM_MOVEABLE, wideLen * sizeof(wchar_t));
             if (hMem) {
                 wchar_t* wText = static_cast<wchar_t*>(GlobalLock(hMem));
-                MultiByteToWideChar(CP_UTF8, 0, text, -1, wText, wideLen);
-                GlobalUnlock(hMem);
-                SetClipboardData(CF_UNICODETEXT, hMem);
+                if (wText) {
+                    MultiByteToWideChar(CP_UTF8, 0, text, -1, wText, wideLen);
+                    GlobalUnlock(hMem);
+                    if (!SetClipboardData(CF_UNICODETEXT, hMem)) {
+                        GlobalFree(hMem);
+                    }
+                } else {
+                    GlobalFree(hMem);
+                }
             }
         }
 
@@ -10544,7 +10560,7 @@ ELECTROBUN_EXPORT const uint8_t* clipboardReadImage(size_t* outSize) {
     return MainThreadDispatcher::dispatch_sync([=]() -> const uint8_t* {
         if (outSize) *outSize = 0;
 
-        if (!OpenClipboard(nullptr)) {
+        if (!openClipboardWithRetry(nullptr)) {
             return nullptr;
         }
 
@@ -10577,7 +10593,7 @@ ELECTROBUN_EXPORT void clipboardWriteImage(const uint8_t* pngData, size_t size) 
     if (!pngData || size == 0) return;
 
     MainThreadDispatcher::dispatch_sync([=]() {
-        if (!OpenClipboard(nullptr)) {
+        if (!openClipboardWithRetry(nullptr)) {
             return;
         }
 
@@ -10589,11 +10605,17 @@ ELECTROBUN_EXPORT void clipboardWriteImage(const uint8_t* pngData, size_t size) 
         HGLOBAL hMem = GlobalAlloc(GMEM_MOVEABLE, size);
         if (hMem) {
             void* data = GlobalLock(hMem);
-            memcpy(data, pngData, size);
-            GlobalUnlock(hMem);
-            // Register a custom format for PNG data
-            UINT pngFormat = RegisterClipboardFormatA("PNG");
-            SetClipboardData(pngFormat, hMem);
+            if (data) {
+                memcpy(data, pngData, size);
+                GlobalUnlock(hMem);
+                // Register a custom format for PNG data
+                UINT pngFormat = RegisterClipboardFormatA("PNG");
+                if (!SetClipboardData(pngFormat, hMem)) {
+                    GlobalFree(hMem);
+                }
+            } else {
+                GlobalFree(hMem);
+            }
         }
 
         CloseClipboard();
@@ -10603,7 +10625,7 @@ ELECTROBUN_EXPORT void clipboardWriteImage(const uint8_t* pngData, size_t size) 
 // clipboardClear - Clear the clipboard
 ELECTROBUN_EXPORT void clipboardClear() {
     MainThreadDispatcher::dispatch_sync([=]() {
-        if (OpenClipboard(nullptr)) {
+        if (openClipboardWithRetry(nullptr)) {
             EmptyClipboard();
             CloseClipboard();
         }
@@ -10614,7 +10636,7 @@ ELECTROBUN_EXPORT void clipboardClear() {
 // Returns: comma-separated list of formats (caller must free)
 ELECTROBUN_EXPORT const char* clipboardAvailableFormats() {
     return MainThreadDispatcher::dispatch_sync([=]() -> const char* {
-        if (!OpenClipboard(nullptr)) {
+        if (!openClipboardWithRetry(nullptr)) {
             return strdup("");
         }
 

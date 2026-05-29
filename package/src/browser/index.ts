@@ -19,6 +19,7 @@ const RPC_SOCKET_PORT = window.__electrobunRpcSocketPort;
 
 class Electroview<T extends RPCWithTransport> {
 	bunSocket?: WebSocket;
+	pendingBunMessages: string[] = [];
 	// user's custom rpc browser <-> bun
 	rpc?: T;
 	rpcHandler?: (msg: unknown) => void;
@@ -56,7 +57,7 @@ class Electroview<T extends RPCWithTransport> {
 		this.bunSocket = socket;
 
 		socket.addEventListener("open", () => {
-			// this.bunSocket?.send("Hello from webview " + WEBVIEW_ID);
+			void this.flushPendingBunMessages();
 		});
 
 		socket.addEventListener("message", async (event) => {
@@ -108,26 +109,52 @@ class Electroview<T extends RPCWithTransport> {
 		};
 	}
 
-	async bunBridge(msg: string) {
-		if (this.bunSocket?.readyState === WebSocket.OPEN) {
-			try {
-				const { encryptedData, iv, tag } =
-					await window.__electrobun_encrypt(msg);
-
-				const encryptedPacket = {
-					encryptedData: encryptedData,
-					iv: iv,
-					tag: tag,
-				};
-				const encryptedPacketString = JSON.stringify(encryptedPacket);
-				this.bunSocket.send(encryptedPacketString);
-				return;
-			} catch (error) {
-				console.error("Error sending message to bun via socket:", error);
-			}
+	async sendToBunSocket(msg: string): Promise<boolean> {
+		if (this.bunSocket?.readyState !== WebSocket.OPEN) {
+			return false;
 		}
 
-		// if socket's are unavailable, fallback to postMessage
+		try {
+			const { encryptedData, iv, tag } =
+				await window.__electrobun_encrypt(msg);
+
+			const encryptedPacket = {
+				encryptedData,
+				iv,
+				tag,
+			};
+			const encryptedPacketString = JSON.stringify(encryptedPacket);
+			this.bunSocket.send(encryptedPacketString);
+			return true;
+		} catch (error) {
+			console.error("Error sending message to bun via socket:", error);
+		}
+
+		return false;
+	}
+
+	async flushPendingBunMessages() {
+		while (this.pendingBunMessages.length > 0) {
+			const nextMessage = this.pendingBunMessages.shift();
+			if (!nextMessage) continue;
+			const sent = await this.sendToBunSocket(nextMessage);
+			if (!sent) {
+				this.pendingBunMessages.unshift(nextMessage);
+				return;
+			}
+		}
+	}
+
+	async bunBridge(msg: string) {
+		if (await this.sendToBunSocket(msg)) {
+			return;
+		}
+
+		if (RPC_SOCKET_PORT && WEBVIEW_ID) {
+			this.pendingBunMessages.push(msg);
+			return;
+		}
+
 		window.__electrobunBunBridge?.postMessage(msg);
 	}
 

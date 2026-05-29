@@ -47,6 +47,13 @@ export const socketMap: {
 	};
 } = {};
 
+function socketEntryForWebview(webviewId: number) {
+	if (!socketMap[webviewId]) {
+		socketMap[webviewId] = { socket: null, queue: [] };
+	}
+	return socketMap[webviewId];
+}
+
 export const removeSocketForWebview = (webviewId: number) => {
 	const rpc = socketMap[webviewId];
 	if (!rpc) return;
@@ -98,10 +105,13 @@ const startRPCServer = () => {
 						}
 						const { webviewId } = ws.data;
 
-						if (!socketMap[webviewId]) {
-							socketMap[webviewId] = { socket: ws, queue: [] };
-						} else {
-							socketMap[webviewId].socket = ws;
+						const entry = socketEntryForWebview(webviewId);
+						entry.socket = ws;
+						while (entry.queue.length > 0 && ws.readyState === WebSocket.OPEN) {
+							const queuedMessage = entry.queue.shift();
+							if (queuedMessage) {
+								ws.send(queuedMessage);
+							}
 						}
 					},
 					close(ws: ServerWebSocket<{ webviewId: number }>, _code: number, _reason: string) {
@@ -168,35 +178,37 @@ const startRPCServer = () => {
 
 export const { rpcServer, rpcPort } = startRPCServer();
 
-// Will return true if message was sent over websocket
-// false if it was not (caller should fallback to postMessage/evaluateJS rpc)
+// Returns true when the message was sent over the websocket or queued until it opens.
+// Returns false only when the webview no longer exists.
 export const sendMessageToWebviewViaSocket = (
 	webviewId: number,
-	message: any,
+	message: unknown,
 ): boolean => {
-	const rpc = socketMap[webviewId];
 	const browserView = BrowserView.getById(webviewId);
 
 	if (!browserView) return false;
 
-	if (rpc?.socket?.readyState === WebSocket.OPEN) {
-		try {
-			const unencryptedString = JSON.stringify(message);
-			const encrypted = encrypt(browserView.secretKey, unencryptedString);
+	try {
+		const unencryptedString = JSON.stringify(message);
+		const encrypted = encrypt(browserView.secretKey, unencryptedString);
 
-			const encryptedPacket = {
-				encryptedData: encrypted.encrypted,
-				iv: encrypted.iv,
-				tag: encrypted.tag,
-			};
+		const encryptedPacket = {
+			encryptedData: encrypted.encrypted,
+			iv: encrypted.iv,
+			tag: encrypted.tag,
+		};
 
-			const encryptedPacketString = JSON.stringify(encryptedPacket);
+		const encryptedPacketString = JSON.stringify(encryptedPacket);
+		const rpc = socketEntryForWebview(webviewId);
 
+		if (rpc.socket?.readyState === WebSocket.OPEN) {
 			rpc.socket.send(encryptedPacketString);
-			return true;
-		} catch (error) {
-			console.error("Error sending message to webview via socket:", error);
+		} else {
+			rpc.queue.push(encryptedPacketString);
 		}
+		return true;
+	} catch (error) {
+		console.error("Error sending message to webview via socket:", error);
 	}
 
 	return false;
