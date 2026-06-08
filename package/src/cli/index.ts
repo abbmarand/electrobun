@@ -4479,12 +4479,37 @@ usageDescriptions : ""}${urlTypes ? "\n" + urlTypes : ""}${documentTypes ?
 						}
 
 						// hdiutil create -volname "YourAppName" -srcfolder /path/to/staging -ov -format UDZO YourAppName.dmg
-						// Note: use ULFO (lzfse) for better compatibility with large CEF frameworks and modern macOS
-						execSync(
-							`hdiutil create -volname "${dmgVolumeName}" -srcfolder ${escapePathForTerminal(
-								dmgStagingDir,
-							)} -ov -format ULFO ${escapePathForTerminal(dmgCreationPath)}`,
-						);
+						// Note: use ULFO (lzfse) for better compatibility with large CEF frameworks and modern macOS.
+						// GitHub macOS runners can intermittently return "Resource busy" from hdiutil.
+						const createDmgCommand = `hdiutil create -volname "${dmgVolumeName}" -srcfolder ${escapePathForTerminal(
+							dmgStagingDir,
+						)} -ov -format ULFO ${escapePathForTerminal(dmgCreationPath)}`;
+						let createDmgError: unknown;
+						for (let attempt = 1; attempt <= 5; attempt++) {
+							try {
+								execSync(createDmgCommand);
+								createDmgError = undefined;
+								break;
+							} catch (error) {
+								createDmgError = error;
+								if (attempt === 5) break;
+								const message =
+									error instanceof Error ? error.message : String(error);
+								console.warn(
+									`hdiutil create failed on attempt ${attempt}/5; retrying: ${message}`,
+								);
+								if (existsSync(dmgCreationPath)) {
+									rmSync(dmgCreationPath, { force: true });
+								}
+								const retryStart = Date.now();
+								while (Date.now() - retryStart < attempt * 2000) {
+									/* wait */
+								}
+							}
+						}
+						if (createDmgError !== undefined) {
+							throw createDmgError;
+						}
 
 						if (
 							buildEnvironment === "stable" &&
