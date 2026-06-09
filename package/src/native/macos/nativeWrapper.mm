@@ -3885,6 +3885,32 @@ extern "C" void showNativePermissionSheet(AbstractView *abstractView,
             return nil;
         }
 
+        // If the popup has a real http/https URL, route it to Bun as new-window-open so it
+        // opens as a proper site bundle window (same partition, full chrome, all listeners).
+        // Only use NativePopupWindowController for blank/empty popups where the page
+        // document.writes into the returned window (e.g. some OAuth popup patterns).
+        NSURL *popupUrl = navigationAction.request.URL;
+        NSString *popupScheme = popupUrl.scheme.lowercaseString ?: @"";
+        BOOL isRealWebUrl = ([popupScheme isEqualToString:@"http"] || [popupScheme isEqualToString:@"https"])
+                            && popupUrl.absoluteString.length > 0;
+
+        if (isRealWebUrl && self.zigEventHandler) {
+            NSString *urlString = popupUrl.absoluteString;
+            NSString *eventData = jsonStringFromObject(@{
+                @"source": @"popup-navigate",
+                @"url": urlString,
+                @"isCmdClick": @NO,
+                @"isSPANavigation": @NO,
+                @"navigationType": navigationTypeName(navigationAction.navigationType),
+                @"modifierFlags": @((unsigned long)navigationAction.modifierFlags),
+                @"isUserGesture": @YES,
+                @"targetFrame": targetFrameName(navigationAction.targetFrame),
+                @"button": @(navigationAction.buttonNumber)
+            });
+            dispatchWebviewEvent(self.zigEventHandler, self.webviewId, "new-window-open", eventData);
+            return nil;
+        }
+
         NSString *targetName = nativePopupTargetNameForNavigationAction(navigationAction);
         NSString *registryKey = nativePopupRegistryKey(webView, targetName);
         if (registryKey) {
