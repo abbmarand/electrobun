@@ -2797,7 +2797,12 @@ extern "C" void webviewRespondToPermissionRequest(const char *requestId, const c
         // For main-frame navigations that haven't been processed yet,
         // cancel, inject stored cookies, and re-issue the request.
         // The custom header prevents re-entry.
-        if (navigationAction.targetFrame.isMainFrame
+        // Only applies to http/https — custom schemes (slack://, zoommtg:, mailto:, etc.) must
+        // fall through so will-navigate fires and the Bun side can prompt for them.
+        NSString *scheme = newURL.scheme.lowercaseString ?: @"";
+        BOOL isHttpScheme = [scheme isEqualToString:@"http"] || [scheme isEqualToString:@"https"];
+        if (isHttpScheme
+            && navigationAction.targetFrame.isMainFrame
             && ![navigationAction.request valueForHTTPHeaderField:@"X-EB-CI"]) {
 
             BOOL isGoogle = isGoogleDomain(newURL.host);
@@ -3469,7 +3474,8 @@ static void showWebviewSaveFailure(NSError *error) {
 
             MyNavigationDelegate *navigationDelegate = [[MyNavigationDelegate alloc] init];
             navigationDelegate.zigCallback = NULL;
-            navigationDelegate.zigEventHandler = NULL;
+            // Wire the event handler so will-navigate (and external-protocol prompts) fire from the popup.
+            navigationDelegate.zigEventHandler = webviewEventHandler;
             navigationDelegate.webviewId = webviewId;
             self.navigationDelegate = navigationDelegate;
             self.webView.navigationDelegate = navigationDelegate;
