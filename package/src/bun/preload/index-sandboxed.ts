@@ -13,7 +13,6 @@ import "./globals.d.ts";
 import {
 	initLifecycleEvents,
 	initCmdClickHandling,
-	initSPANavigationInterception,
 	initOverscrollPrevention,
 } from "./events";
 
@@ -24,5 +23,4 @@ import {
 
 initLifecycleEvents();
 initCmdClickHandling();
-initSPANavigationInterception();
 initOverscrollPrevention();

@@ -22,7 +22,6 @@ import {
 	emitWebviewEvent,
 	initLifecycleEvents,
 	initCmdClickHandling,
-	initSPANavigationInterception,
 	initOverscrollPrevention,
 } from "./events";
 
@@ -60,7 +59,6 @@ window.__electrobunSendToHost = (message: unknown) => {
 // Initialize all features
 initLifecycleEvents();
 initCmdClickHandling();
-initSPANavigationInterception();
 initOverscrollPrevention();
 initDragRegions();
 initWebviewTag();

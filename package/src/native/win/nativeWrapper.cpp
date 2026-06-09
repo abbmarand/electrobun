@@ -9120,6 +9120,18 @@ ELECTROBUN_EXPORT const char* evaluateJavascriptSync(AbstractView *abstractView,
     return nullptr;
 }
 
+ELECTROBUN_EXPORT BOOL webviewPrint(AbstractView *abstractView) {
+    (void)abstractView;
+    return FALSE;
+}
+
+ELECTROBUN_EXPORT BOOL webviewSavePageAs(AbstractView *abstractView, const char *suggestedName, const char *format) {
+    (void)abstractView;
+    (void)suggestedName;
+    (void)format;
+    return FALSE;
+}
+
 ELECTROBUN_EXPORT void testFFI(void *ptr) {
     // Stub implementation
 }
@@ -9323,6 +9335,10 @@ ELECTROBUN_EXPORT void webviewSetPageZoom(AbstractView *abstractView, double zoo
 ELECTROBUN_EXPORT double webviewGetPageZoom(AbstractView *abstractView) {
     // pageZoom is WebKit-specific, not available on Windows
     return 1.0;
+}
+
+ELECTROBUN_EXPORT void webviewRespondToPermissionRequest(const char *requestId, const char *decision) {
+    // Windows permission prompts still use the native fallback path.
 }
 
 ELECTROBUN_EXPORT NSRect createNSRectWrapper(double x, double y, double width, double height) {

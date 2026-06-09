@@ -66,6 +66,7 @@ static bool wgpuDebugEnabled() {
 #include <string>
 #include <vector>
 #include <list>
+#include <functional>
 #include <cstdint>
 #include <chrono>
 #include <map>
@@ -944,6 +945,8 @@ void releaseObjCObject(id objcObject) {
 
 // ----------------------- Abstract Base Classes -----------------------
 
+@class NativePopupWindowController;
+
 @interface AbstractView : NSObject
     @property (nonatomic, assign) uint32_t webviewId;
     @property (nonatomic, assign) NSView * nsView;
@@ -993,6 +996,9 @@ void releaseObjCObject(id objcObject) {
     - (void)findInPage:(const char*)searchText forward:(BOOL)forward matchCase:(BOOL)matchCase;
     - (void)stopFindInPage;
 
+    - (BOOL)printPage;
+    - (BOOL)savePageAs:(const char*)suggestedName format:(const char*)format;
+
     // Developer tools methods
     - (void)openDevTools;
     - (void)closeDevTools;
@@ -1014,6 +1020,8 @@ void releaseObjCObject(id objcObject) {
 
 // Global map to track all AbstractView instances by their webviewId
 static NSMutableDictionary<NSNumber *, AbstractView *> *globalAbstractViews = nil;
+static NSMutableSet<NativePopupWindowController *> *globalNativePopupControllers = nil;
+static NSMutableDictionary<NSString *, NativePopupWindowController *> *globalNamedNativePopupControllers = nil;
 
 // OSR (Off-Screen Rendering) View for transparent CEF windows
 @interface CEFOSRView : NSView {
@@ -1066,7 +1074,12 @@ static NSMutableDictionary<NSNumber *, AbstractView *> *globalAbstractViews = ni
     @property (nonatomic, assign) DecideNavigationCallback zigCallback;
     @property (nonatomic, assign) WebviewEventHandler zigEventHandler;
     @property (nonatomic, assign) uint32_t webviewId;
+    @property (nonatomic, assign) uint32_t nextDownloadId;
+    @property (nonatomic, strong) NSMutableDictionary<NSValue *, NSNumber *> *downloadIds;
     @property (nonatomic, strong) NSMutableDictionary<NSValue *, NSString *> *downloadPaths;
+    @property (nonatomic, strong) NSMutableDictionary<NSValue *, NSString *> *downloadUrls;
+    @property (nonatomic, strong) NSMutableDictionary<NSValue *, NSString *> *downloadMimeTypes;
+    @property (nonatomic, strong) NSMutableDictionary<NSValue *, NSNumber *> *downloadTotalBytes;
     @property (nonatomic, strong) NSMutableSet<WKDownload *> *observedDownloads;
     - (void)detectAndApplyThemeColor:(WKWebView *)webView;
 @end
@@ -1074,6 +1087,25 @@ static NSMutableDictionary<NSNumber *, AbstractView *> *globalAbstractViews = ni
 @interface MyWebViewUIDelegate : NSObject <WKUIDelegate>
     @property (nonatomic, assign) WebviewEventHandler zigEventHandler;
     @property (nonatomic, assign) uint32_t webviewId;
+@end
+
+@interface NativePopupWindowController : NSObject <NSWindowDelegate>
+    @property (nonatomic, strong) NSWindow *window;
+    @property (nonatomic, strong) WKWebView *webView;
+    @property (nonatomic, strong) MyNavigationDelegate *navigationDelegate;
+    @property (nonatomic, strong) MyWebViewUIDelegate *uiDelegate;
+    @property (nonatomic, copy) NSString *registryKey;
+    @property (nonatomic, assign) BOOL didCleanUp;
+
+    - (instancetype)initWithOpenerWebView:(WKWebView *)openerWebView
+                            configuration:(WKWebViewConfiguration *)configuration
+                         navigationAction:(WKNavigationAction *)navigationAction
+                            windowFeatures:(WKWindowFeatures *)windowFeatures
+                              targetName:(NSString *)targetName
+                             webviewId:(uint32_t)webviewId
+                       webviewEventHandler:(WebviewEventHandler)webviewEventHandler;
+    - (void)show;
+    - (void)close;
 @end
 
 @interface MyScriptMessageHandler : NSObject <WKScriptMessageHandler>
@@ -1141,6 +1173,8 @@ static NSMutableDictionary<NSNumber *, AbstractView *> *globalAbstractViews = ni
     @property (nonatomic, assign) BOOL hasCustomButtonPosition;
     @property (nonatomic, assign) double buttonPositionX;
     @property (nonatomic, assign) double buttonPositionY;
+    @property (nonatomic, assign) BOOL isInNativeFullscreen;
+    @property (nonatomic, assign) BOOL isInNativeFullscreenTransition;
 @end
 
 // ----------------------- Navigation Toolbar -----------------------
@@ -1402,6 +1436,8 @@ NSArray<NSValue *> *addOverlapRects(NSArray<NSDictionary *> *rectsArray, CGFloat
 
     - (BOOL)canGoBack { [self doesNotRecognizeSelector:_cmd]; return NO; }
     - (BOOL)canGoForward { [self doesNotRecognizeSelector:_cmd]; return NO; }
+    - (BOOL)printPage { [self doesNotRecognizeSelector:_cmd]; return NO; }
+    - (BOOL)savePageAs:(const char*)suggestedName format:(const char*)format { [self doesNotRecognizeSelector:_cmd]; return NO; }
 
     - (void)evaluateJavaScriptWithNoCompletion:(const char*)jsString { [self doesNotRecognizeSelector:_cmd]; }
     - (const char*)evaluateJavaScriptSync:(const char*)jsString { return NULL; }
@@ -2429,14 +2465,39 @@ static NSString *jsonStringFromObject(id object) {
     return json ?: @"{}";
 }
 
+static NSString *navigationTypeName(WKNavigationType navigationType) {
+    switch (navigationType) {
+        case WKNavigationTypeLinkActivated:
+            return @"link-activated";
+        case WKNavigationTypeFormSubmitted:
+            return @"form-submitted";
+        case WKNavigationTypeBackForward:
+            return @"back-forward";
+        case WKNavigationTypeReload:
+            return @"reload";
+        case WKNavigationTypeFormResubmitted:
+            return @"form-resubmitted";
+        case WKNavigationTypeOther:
+        default:
+            return @"other";
+    }
+}
+
+static NSString *targetFrameName(WKFrameInfo *targetFrame) {
+    if (!targetFrame) {
+        return @"none";
+    }
+    return targetFrame.isMainFrame ? @"main-frame" : @"subframe";
+}
+
 static char *copyCString(NSString *string) {
     const char *utf8 = string.UTF8String ?: "";
     return strdup(utf8);
 }
 
-static void sendWebviewEvent(WebviewEventHandler handler, uint32_t webviewId, const char *eventName, NSString *detail) {
+static uint32_t sendWebviewEvent(WebviewEventHandler handler, uint32_t webviewId, const char *eventName, NSString *detail) {
     if (!handler || !eventName) {
-        return;
+        return 0;
     }
 
     char *eventNameCopy = strdup(eventName);
@@ -2444,10 +2505,10 @@ static void sendWebviewEvent(WebviewEventHandler handler, uint32_t webviewId, co
     if (!eventNameCopy || !detailCopy) {
         free(eventNameCopy);
         free(detailCopy);
-        return;
+        return 0;
     }
 
-    handler(webviewId, eventNameCopy, detailCopy);
+    return handler(webviewId, eventNameCopy, detailCopy);
 }
 
 static void dispatchWebviewEvent(WebviewEventHandler handler, uint32_t webviewId, const char *eventName, NSString *detail) {
@@ -2461,7 +2522,182 @@ static void dispatchWebviewEvent(WebviewEventHandler handler, uint32_t webviewId
     });
 }
 
+struct PendingPermissionRequest {
+    std::function<void(bool)> respond;
+};
+
+static std::atomic<uint64_t> g_nextPermissionRequestId{1};
+static std::mutex g_pendingPermissionRequestsMutex;
+static std::map<std::string, PendingPermissionRequest> g_pendingPermissionRequests;
+
+static NSString *originStringFromWKSecurityOrigin(WKSecurityOrigin *origin) {
+    if (!origin) return @"";
+    NSString *protocol = origin.protocol ?: @"";
+    NSString *host = origin.host ?: @"";
+    NSInteger port = origin.port;
+    if (port > 0) {
+        return [NSString stringWithFormat:@"%@://%@:%ld", protocol, host, (long)port];
+    }
+    return [NSString stringWithFormat:@"%@://%@", protocol, host];
+}
+
+static void addPermissionType(NSMutableArray<NSString *> *types, NSString *type) {
+    if (![types containsObject:type]) {
+        [types addObject:type];
+    }
+}
+
+static NSArray<NSString *> *permissionTypesForWKMediaCaptureType(WKMediaCaptureType type) {
+    NSMutableArray<NSString *> *types = [NSMutableArray array];
+    switch (type) {
+        case WKMediaCaptureTypeCamera:
+            addPermissionType(types, @"camera");
+            break;
+        case WKMediaCaptureTypeMicrophone:
+            addPermissionType(types, @"microphone");
+            break;
+        case WKMediaCaptureTypeCameraAndMicrophone:
+            addPermissionType(types, @"camera");
+            addPermissionType(types, @"microphone");
+            break;
+        default:
+            addPermissionType(types, @"camera");
+            addPermissionType(types, @"microphone");
+            break;
+    }
+    return types;
+}
+
+static NSArray<NSString *> *permissionTypesForCefPermissions(uint32_t requestedPermissions) {
+    NSMutableArray<NSString *> *types = [NSMutableArray array];
+    if (requestedPermissions & CEF_PERMISSION_TYPE_CAMERA_STREAM ||
+        requestedPermissions & CEF_PERMISSION_TYPE_CAMERA_PAN_TILT_ZOOM) {
+        addPermissionType(types, @"camera");
+    }
+    if (requestedPermissions & CEF_PERMISSION_TYPE_MIC_STREAM) {
+        addPermissionType(types, @"microphone");
+    }
+    if (requestedPermissions & CEF_PERMISSION_TYPE_GEOLOCATION) {
+        addPermissionType(types, @"geolocation");
+    }
+    if (requestedPermissions & CEF_PERMISSION_TYPE_NOTIFICATIONS) {
+        addPermissionType(types, @"notifications");
+    }
+    if (requestedPermissions & CEF_PERMISSION_TYPE_MIDI_SYSEX) {
+        addPermissionType(types, @"midi");
+    }
+    if (requestedPermissions & CEF_PERMISSION_TYPE_CLIPBOARD) {
+        addPermissionType(types, @"clipboardRead");
+        addPermissionType(types, @"clipboardWrite");
+    }
+    if (requestedPermissions & CEF_PERMISSION_TYPE_CAPTURED_SURFACE_CONTROL) {
+        addPermissionType(types, @"screen");
+    }
+    return types;
+}
+
+static bool emitPermissionRequest(WebviewEventHandler handler,
+                                  uint32_t webviewId,
+                                  NSString *origin,
+                                  NSString *pageUrl,
+                                  NSString *frameUrl,
+                                  NSArray<NSString *> *permissionTypes,
+                                  std::function<void(bool)> responder) {
+    if (!handler) return false;
+
+    uint64_t requestId = g_nextPermissionRequestId.fetch_add(1);
+    std::string requestIdKey = std::to_string(requestId);
+    NSString *requestIdString = [NSString stringWithUTF8String:requestIdKey.c_str()];
+
+    {
+        std::lock_guard<std::mutex> lock(g_pendingPermissionRequestsMutex);
+        g_pendingPermissionRequests[requestIdKey] = {std::move(responder)};
+    }
+
+    NSDictionary *payload = @{
+        @"requestId": requestIdString,
+        @"webviewId": @(webviewId),
+        @"origin": origin ?: @"",
+        @"pageUrl": pageUrl ?: @"",
+        @"frameUrl": frameUrl ?: @"",
+        @"permissionTypes": permissionTypes ?: @[],
+        @"platform": @"macos"
+    };
+    NSString *json = jsonStringFromObject(payload);
+    uint32_t handled = sendWebviewEvent(handler, webviewId, "permission-requested", json);
+    if (handled != 0) return true;
+
+    {
+        std::lock_guard<std::mutex> lock(g_pendingPermissionRequestsMutex);
+        g_pendingPermissionRequests.erase(requestIdKey);
+    }
+    return false;
+}
+
+static void resolvePendingPermissionRequest(const char *requestId, bool allowed) {
+    if (!requestId) return;
+
+    std::function<void(bool)> responder;
+    {
+        std::lock_guard<std::mutex> lock(g_pendingPermissionRequestsMutex);
+        auto it = g_pendingPermissionRequests.find(requestId);
+        if (it == g_pendingPermissionRequests.end()) return;
+        responder = std::move(it->second.respond);
+        g_pendingPermissionRequests.erase(it);
+    }
+
+    if (responder) {
+        responder(allowed);
+    }
+}
+
+extern "C" void webviewRespondToPermissionRequest(const char *requestId, const char *decision) {
+    if (!requestId || !decision) return;
+    if (strcmp(decision, "allow") == 0) {
+        resolvePendingPermissionRequest(requestId, true);
+    } else if (strcmp(decision, "block") == 0) {
+        resolvePendingPermissionRequest(requestId, false);
+    }
+}
+
 @implementation MyNavigationDelegate
+    - (NSValue *)downloadKey:(WKDownload *)download API_AVAILABLE(macos(11.3)) {
+        return [NSValue valueWithNonretainedObject:download];
+    }
+
+    - (NSNumber *)downloadIdForDownload:(WKDownload *)download create:(BOOL)create API_AVAILABLE(macos(11.3)) {
+        if (!self.downloadIds) {
+            self.downloadIds = [NSMutableDictionary dictionary];
+        }
+
+        NSValue *key = [self downloadKey:download];
+        NSNumber *existing = [self.downloadIds objectForKey:key];
+        if (existing) return existing;
+        if (!create) return nil;
+
+        self.nextDownloadId += 1;
+        if (self.nextDownloadId == 0) self.nextDownloadId = 1;
+        NSNumber *downloadId = @(self.nextDownloadId);
+        [self.downloadIds setObject:downloadId forKey:key];
+        return downloadId;
+    }
+
+    - (WKDownload *)downloadForProgress:(NSProgress *)progress API_AVAILABLE(macos(11.3)) {
+        for (WKDownload *download in self.observedDownloads) {
+            if (download.progress == progress) return download;
+        }
+        return nil;
+    }
+
+    - (void)cleanupDownloadMetadata:(WKDownload *)download API_AVAILABLE(macos(11.3)) {
+        NSValue *key = [self downloadKey:download];
+        [self.downloadIds removeObjectForKey:key];
+        [self.downloadPaths removeObjectForKey:key];
+        [self.downloadUrls removeObjectForKey:key];
+        [self.downloadMimeTypes removeObjectForKey:key];
+        [self.downloadTotalBytes removeObjectForKey:key];
+    }
+
     - (void)webView:(WKWebView *)webView
     decidePolicyForNavigationAction:(WKNavigationAction *)navigationAction
     decisionHandler:(void (^)(WKNavigationActionPolicy))decisionHandler {
@@ -2471,12 +2707,18 @@ static void dispatchWebviewEvent(WebviewEventHandler handler, uint32_t webviewId
         // Check if cmd key is held - if so, fire event and block navigation
         BOOL isCmdClick = (navigationAction.modifierFlags & NSEventModifierFlagCommand) != 0;
 
-        if (isCmdClick && navigationAction.navigationType == WKNavigationTypeLinkActivated) {
+        if (isCmdClick && navigationAction.navigationType == WKNavigationTypeLinkActivated && self.zigEventHandler) {
             decisionHandler(WKNavigationActionPolicyCancel);
             NSString *eventData = jsonStringFromObject(@{
+                @"source": @"native-navigation",
                 @"url": urlString,
                 @"isCmdClick": @YES,
-                @"modifierFlags": @((unsigned long)navigationAction.modifierFlags)
+                @"isSPANavigation": @NO,
+                @"navigationType": navigationTypeName(navigationAction.navigationType),
+                @"modifierFlags": @((unsigned long)navigationAction.modifierFlags),
+                @"isUserGesture": @YES,
+                @"targetFrame": targetFrameName(navigationAction.targetFrame),
+                @"button": @(navigationAction.buttonNumber)
             });
             dispatchWebviewEvent(self.zigEventHandler, self.webviewId, "new-window-open", eventData);
             return;
@@ -2702,6 +2944,9 @@ static void dispatchWebviewEvent(WebviewEventHandler handler, uint32_t webviewId
 
         if (downloadsDirectory) {
             NSString *destinationPath = [downloadsDirectory stringByAppendingPathComponent:suggestedFilename];
+            NSString *sourceUrl = response.URL.absoluteString ?: @"";
+            NSString *mimeType = response.MIMEType ?: @"";
+            long long expectedBytes = response.expectedContentLength;
 
             // Handle duplicate filenames by appending a number
             NSFileManager *fileManager = [NSFileManager defaultManager];
@@ -2725,7 +2970,21 @@ static void dispatchWebviewEvent(WebviewEventHandler handler, uint32_t webviewId
             if (!self.downloadPaths) {
                 self.downloadPaths = [NSMutableDictionary dictionary];
             }
-            [self.downloadPaths setObject:destinationPath forKey:[NSValue valueWithNonretainedObject:download]];
+            if (!self.downloadUrls) {
+                self.downloadUrls = [NSMutableDictionary dictionary];
+            }
+            if (!self.downloadMimeTypes) {
+                self.downloadMimeTypes = [NSMutableDictionary dictionary];
+            }
+            if (!self.downloadTotalBytes) {
+                self.downloadTotalBytes = [NSMutableDictionary dictionary];
+            }
+            NSValue *downloadKey = [self downloadKey:download];
+            NSNumber *downloadId = [self downloadIdForDownload:download create:YES];
+            [self.downloadPaths setObject:destinationPath forKey:downloadKey];
+            if (sourceUrl.length > 0) [self.downloadUrls setObject:sourceUrl forKey:downloadKey];
+            if (mimeType.length > 0) [self.downloadMimeTypes setObject:mimeType forKey:downloadKey];
+            [self.downloadTotalBytes setObject:@(expectedBytes) forKey:downloadKey];
 
             // Observe download progress via KVO
             if (!self.observedDownloads) {
@@ -2739,10 +2998,19 @@ static void dispatchWebviewEvent(WebviewEventHandler handler, uint32_t webviewId
 
             // Send download-started event
             if (self.zigEventHandler) {
-                // Use NSJSONSerialization for proper escaping
-                NSDictionary *eventDict = @{@"filename": suggestedFilename, @"path": destinationPath};
-                NSData *jsonData = [NSJSONSerialization dataWithJSONObject:eventDict options:0 error:nil];
-                NSString *eventData = [[NSString alloc] initWithData:jsonData encoding:NSUTF8StringEncoding];
+                NSString *eventData = jsonStringFromObject(@{
+                    @"downloadId": downloadId,
+                    @"filename": suggestedFilename ?: @"",
+                    @"path": destinationPath ?: @"",
+                    @"destinationPath": destinationPath ?: @"",
+                    @"url": sourceUrl ?: @"",
+                    @"mimeType": mimeType ?: @"",
+                    @"totalBytes": @(expectedBytes),
+                    @"receivedBytes": @(0),
+                    @"percentComplete": @(0),
+                    @"progress": @(0),
+                    @"canResume": @NO
+                });
                 self.zigEventHandler(self.webviewId, strdup("download-started"), strdup([eventData UTF8String]));
             }
 
@@ -2764,16 +3032,32 @@ static void dispatchWebviewEvent(WebviewEventHandler handler, uint32_t webviewId
 
         // Send download-completed event
         if (self.zigEventHandler) {
-            NSString *path = [self.downloadPaths objectForKey:[NSValue valueWithNonretainedObject:download]];
+            NSValue *downloadKey = [self downloadKey:download];
+            NSNumber *downloadId = [self downloadIdForDownload:download create:NO] ?: @(0);
+            NSString *path = [self.downloadPaths objectForKey:downloadKey];
             NSString *filename = [path lastPathComponent] ?: @"";
-            // Use NSJSONSerialization for proper escaping
-            NSDictionary *eventDict = @{@"filename": filename, @"path": path ?: @""};
-            NSData *jsonData = [NSJSONSerialization dataWithJSONObject:eventDict options:0 error:nil];
-            NSString *eventData = [[NSString alloc] initWithData:jsonData encoding:NSUTF8StringEncoding];
+            NSString *sourceUrl = [self.downloadUrls objectForKey:downloadKey] ?: @"";
+            NSString *mimeType = [self.downloadMimeTypes objectForKey:downloadKey] ?: @"";
+            long long totalBytes = [[self.downloadTotalBytes objectForKey:downloadKey] longLongValue];
+            long long receivedBytes = download.progress.completedUnitCount;
+            if (receivedBytes < 0) receivedBytes = 0;
+            NSString *eventData = jsonStringFromObject(@{
+                @"downloadId": downloadId,
+                @"filename": filename,
+                @"path": path ?: @"",
+                @"destinationPath": path ?: @"",
+                @"url": sourceUrl,
+                @"mimeType": mimeType,
+                @"totalBytes": @(totalBytes),
+                @"receivedBytes": @(receivedBytes),
+                @"percentComplete": @(100),
+                @"progress": @(100),
+                @"canResume": @NO
+            });
             self.zigEventHandler(self.webviewId, strdup("download-completed"), strdup([eventData UTF8String]));
 
             // Clean up
-            [self.downloadPaths removeObjectForKey:[NSValue valueWithNonretainedObject:download]];
+            [self cleanupDownloadMetadata:download];
         }
     }
 
@@ -2788,16 +3072,36 @@ static void dispatchWebviewEvent(WebviewEventHandler handler, uint32_t webviewId
 
         // Send download-failed event
         if (self.zigEventHandler) {
-            NSString *path = [self.downloadPaths objectForKey:[NSValue valueWithNonretainedObject:download]];
+            NSValue *downloadKey = [self downloadKey:download];
+            NSNumber *downloadId = [self downloadIdForDownload:download create:NO] ?: @(0);
+            NSString *path = [self.downloadPaths objectForKey:downloadKey];
             NSString *filename = [path lastPathComponent] ?: @"";
-            // Use NSJSONSerialization for proper escaping
-            NSDictionary *eventDict = @{@"filename": filename, @"path": path ?: @"", @"error": error.localizedDescription};
-            NSData *jsonData = [NSJSONSerialization dataWithJSONObject:eventDict options:0 error:nil];
-            NSString *eventData = [[NSString alloc] initWithData:jsonData encoding:NSUTF8StringEncoding];
+            NSString *sourceUrl = [self.downloadUrls objectForKey:downloadKey] ?: @"";
+            NSString *mimeType = [self.downloadMimeTypes objectForKey:downloadKey] ?: @"";
+            long long totalBytes = [[self.downloadTotalBytes objectForKey:downloadKey] longLongValue];
+            long long receivedBytes = download.progress.completedUnitCount;
+            if (receivedBytes < 0) receivedBytes = 0;
+            NSString *eventData = jsonStringFromObject(@{
+                @"downloadId": downloadId,
+                @"filename": filename,
+                @"path": path ?: @"",
+                @"destinationPath": path ?: @"",
+                @"url": sourceUrl,
+                @"mimeType": mimeType,
+                @"totalBytes": @(totalBytes),
+                @"receivedBytes": @(receivedBytes),
+                @"percentComplete": @((int)(download.progress.fractionCompleted * 100)),
+                @"progress": @((int)(download.progress.fractionCompleted * 100)),
+                @"canResume": @(resumeData != nil),
+                @"error": error.localizedDescription ?: @"Download failed",
+                @"errorMessage": error.localizedDescription ?: @"Download failed",
+                @"errorDomain": error.domain ?: @"",
+                @"errorCode": @(error.code)
+            });
             self.zigEventHandler(self.webviewId, strdup("download-failed"), strdup([eventData UTF8String]));
 
             // Clean up
-            [self.downloadPaths removeObjectForKey:[NSValue valueWithNonretainedObject:download]];
+            [self cleanupDownloadMetadata:download];
         }
     }
 
@@ -2812,9 +3116,398 @@ static void dispatchWebviewEvent(WebviewEventHandler handler, uint32_t webviewId
 
             // Send download-progress event
             if (self.zigEventHandler) {
-                NSString *eventData = [NSString stringWithFormat:@"{\"progress\":%d}", percent];
+                WKDownload *download = [self downloadForProgress:progress];
+                NSValue *downloadKey = download ? [self downloadKey:download] : nil;
+                NSNumber *downloadId = download ? ([self downloadIdForDownload:download create:NO] ?: @(0)) : @(0);
+                NSString *path = downloadKey ? ([self.downloadPaths objectForKey:downloadKey] ?: @"") : @"";
+                NSString *sourceUrl = downloadKey ? ([self.downloadUrls objectForKey:downloadKey] ?: @"") : @"";
+                NSString *mimeType = downloadKey ? ([self.downloadMimeTypes objectForKey:downloadKey] ?: @"") : @"";
+                long long totalBytes = progress.totalUnitCount;
+                if (totalBytes < 0 && downloadKey) {
+                    totalBytes = [[self.downloadTotalBytes objectForKey:downloadKey] longLongValue];
+                }
+                long long receivedBytes = progress.completedUnitCount;
+                if (receivedBytes < 0) receivedBytes = 0;
+                NSString *eventData = jsonStringFromObject(@{
+                    @"downloadId": downloadId,
+                    @"filename": path.length > 0 ? [path lastPathComponent] : @"",
+                    @"path": path,
+                    @"destinationPath": path,
+                    @"url": sourceUrl,
+                    @"mimeType": mimeType,
+                    @"totalBytes": @(totalBytes),
+                    @"receivedBytes": @(receivedBytes),
+                    @"percentComplete": @(percent),
+                    @"progress": @(percent),
+                    @"canResume": @NO
+                });
                 self.zigEventHandler(self.webviewId, strdup("download-progress"), strdup([eventData UTF8String]));
             }
+        }
+    }
+@end
+
+static NSString *normalizedNativePopupTargetName(NSString *targetName) {
+    if (!targetName || targetName.length == 0) return nil;
+    NSString *trimmed = [targetName stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceAndNewlineCharacterSet]];
+    if (trimmed.length == 0) return nil;
+
+    NSString *lower = [trimmed lowercaseString];
+    if ([lower isEqualToString:@"_blank"] ||
+        [lower isEqualToString:@"_self"] ||
+        [lower isEqualToString:@"_parent"] ||
+        [lower isEqualToString:@"_top"]) {
+        return nil;
+    }
+
+    return trimmed;
+}
+
+static NSString *nativePopupTargetNameForNavigationAction(WKNavigationAction *navigationAction) {
+    NSArray<NSString *> *keys = @[@"targetFrameName", @"_targetFrameName", @"frameName", @"_frameName"];
+    for (NSString *key in keys) {
+        id value = nil;
+        @try {
+            value = [navigationAction valueForKey:key];
+        } @catch (NSException *exception) {
+            value = nil;
+        }
+        if ([value isKindOfClass:[NSString class]]) {
+            NSString *name = normalizedNativePopupTargetName((NSString *)value);
+            if (name) return name;
+        }
+    }
+    return nil;
+}
+
+static NSString *nativePopupRegistryKey(WKWebView *openerWebView, NSString *targetName) {
+    NSString *name = normalizedNativePopupTargetName(targetName);
+    if (!openerWebView || !name) return nil;
+    return [NSString stringWithFormat:@"%p:%@", openerWebView, name];
+}
+
+static CGFloat nativePopupClamp(CGFloat value, CGFloat minimum, CGFloat maximum) {
+    if (maximum < minimum) return minimum;
+    return MIN(MAX(value, minimum), maximum);
+}
+
+static CGFloat nativePopupFeatureNumber(NSNumber *number, CGFloat fallback) {
+    if (!number) return fallback;
+    double value = number.doubleValue;
+    if (!isfinite(value)) return fallback;
+    return (CGFloat)value;
+}
+
+static NSRect nativePopupFrame(WKWebView *openerWebView, WKWindowFeatures *windowFeatures) {
+    NSWindow *openerWindow = openerWebView.window;
+    NSScreen *screen = openerWindow.screen ?: [NSScreen mainScreen];
+    if (!screen && NSScreen.screens.count > 0) {
+        screen = NSScreen.screens.firstObject;
+    }
+
+    NSRect visibleFrame = screen ? screen.visibleFrame : NSMakeRect(0, 0, 1200, 800);
+    NSRect screenFrame = screen ? screen.frame : visibleFrame;
+    NSRect openerFrame = openerWindow ? openerWindow.frame : NSMakeRect(NSMidX(visibleFrame) - 400, NSMidY(visibleFrame) - 300, 800, 600);
+
+    CGFloat defaultWidth = MIN(MAX(openerFrame.size.width * 0.72, 480.0), 900.0);
+    CGFloat defaultHeight = MIN(MAX(openerFrame.size.height * 0.72, 360.0), 700.0);
+    CGFloat width = nativePopupFeatureNumber(windowFeatures.width, defaultWidth);
+    CGFloat height = nativePopupFeatureNumber(windowFeatures.height, defaultHeight);
+
+    width = nativePopupClamp(width, 320.0, MAX(320.0, visibleFrame.size.width));
+    height = nativePopupClamp(height, 240.0, MAX(240.0, visibleFrame.size.height));
+
+    BOOL hasX = windowFeatures.x != nil;
+    BOOL hasY = windowFeatures.y != nil;
+    CGFloat x = hasX ? nativePopupFeatureNumber(windowFeatures.x, openerFrame.origin.x + 32.0) : openerFrame.origin.x + 32.0;
+    CGFloat y = hasY
+        ? NSMaxY(screenFrame) - nativePopupFeatureNumber(windowFeatures.y, 0.0) - height
+        : NSMaxY(openerFrame) - height - 32.0;
+
+    x = nativePopupClamp(x, visibleFrame.origin.x, NSMaxX(visibleFrame) - width);
+    y = nativePopupClamp(y, visibleFrame.origin.y, NSMaxY(visibleFrame) - height);
+
+    return NSMakeRect(round(x), round(y), round(width), round(height));
+}
+
+static void pauseAndStopWKWebView(WKWebView *webView) {
+    if (!webView) return;
+    @try {
+        [webView evaluateJavaScript:@"(function(){try{document.querySelectorAll('video,audio').forEach(function(m){try{m.pause();m.muted=true;m.removeAttribute('src');m.srcObject=null;m.load();}catch(e){}});}catch(e){}})()"
+                             inFrame:nil
+                      inContentWorld:[WKContentWorld pageWorld]
+                    completionHandler:nil];
+    } @catch (NSException *exception) {}
+    [webView stopLoading];
+}
+
+static NSArray<NSString *> *stringArrayFromOpenPanelParameterSelector(WKOpenPanelParameters *parameters, NSString *selectorName) {
+    if (!parameters || !selectorName) return @[];
+
+    SEL selector = NSSelectorFromString(selectorName);
+    if (![parameters respondsToSelector:selector]) return @[];
+
+    id value = nil;
+    @try {
+        #pragma clang diagnostic push
+        #pragma clang diagnostic ignored "-Warc-performSelector-leaks"
+        value = [parameters performSelector:selector];
+        #pragma clang diagnostic pop
+    } @catch (NSException *exception) {
+        return @[];
+    }
+
+    if (![value isKindOfClass:[NSArray class]]) return @[];
+
+    NSMutableArray<NSString *> *strings = [NSMutableArray array];
+    for (id item in (NSArray *)value) {
+        if (![item isKindOfClass:[NSString class]]) continue;
+        NSString *string = [(NSString *)item stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceAndNewlineCharacterSet]];
+        if (string.length > 0) {
+            [strings addObject:string];
+        }
+    }
+    return strings;
+}
+
+static NSString *normalizedOpenPanelExtension(NSString *value) {
+    if (!value) return nil;
+
+    NSString *normalized = [[value stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceAndNewlineCharacterSet]] lowercaseString];
+    while ([normalized hasPrefix:@"."]) {
+        normalized = [normalized substringFromIndex:1];
+    }
+    if (normalized.length == 0 || [normalized isEqualToString:@"*"] || [normalized containsString:@"/"]) {
+        return nil;
+    }
+    return normalized;
+}
+
+static void addOpenPanelExtension(NSMutableOrderedSet<NSString *> *extensions, NSString *value) {
+    NSString *normalized = normalizedOpenPanelExtension(value);
+    if (normalized) {
+        [extensions addObject:normalized];
+    }
+}
+
+static NSArray<NSString *> *extensionsForOpenPanelMIMEType(NSString *mimeType) {
+    if (!mimeType) return @[];
+
+    NSString *normalized = [[mimeType stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceAndNewlineCharacterSet]] lowercaseString];
+    if (normalized.length == 0 || [normalized isEqualToString:@"*/*"]) return @[];
+
+    NSDictionary<NSString *, NSArray<NSString *> *> *knownMIMETypes = @{
+        @"image/*": @[ @"jpg", @"jpeg", @"png", @"gif", @"webp", @"heic", @"heif", @"tif", @"tiff", @"bmp", @"svg" ],
+        @"video/*": @[ @"mp4", @"mov", @"m4v", @"webm", @"avi", @"mkv" ],
+        @"audio/*": @[ @"mp3", @"m4a", @"aac", @"wav", @"aiff", @"flac", @"ogg" ],
+        @"text/*": @[ @"txt", @"text", @"md", @"markdown", @"csv", @"tsv", @"html", @"css", @"js", @"json", @"xml" ],
+        @"application/pdf": @[ @"pdf" ],
+        @"application/json": @[ @"json" ],
+        @"text/csv": @[ @"csv" ],
+        @"text/plain": @[ @"txt", @"text" ],
+        @"text/markdown": @[ @"md", @"markdown" ],
+        @"application/zip": @[ @"zip" ],
+        @"application/vnd.ms-excel": @[ @"xls" ],
+        @"application/vnd.openxmlformats-officedocument.spreadsheetml.sheet": @[ @"xlsx" ],
+        @"application/msword": @[ @"doc" ],
+        @"application/vnd.openxmlformats-officedocument.wordprocessingml.document": @[ @"docx" ],
+        @"application/vnd.ms-powerpoint": @[ @"ppt" ],
+        @"application/vnd.openxmlformats-officedocument.presentationml.presentation": @[ @"pptx" ]
+    };
+
+    NSArray<NSString *> *extensions = knownMIMETypes[normalized];
+    return extensions ?: @[];
+}
+
+static NSArray<NSString *> *acceptedOpenPanelFileTypes(WKOpenPanelParameters *parameters) {
+    NSMutableOrderedSet<NSString *> *fileTypes = [NSMutableOrderedSet orderedSet];
+
+    for (NSString *extension in stringArrayFromOpenPanelParameterSelector(parameters, @"_allowedFileExtensions")) {
+        addOpenPanelExtension(fileTypes, extension);
+    }
+    for (NSString *extension in stringArrayFromOpenPanelParameterSelector(parameters, @"_acceptedFileExtensions")) {
+        addOpenPanelExtension(fileTypes, extension);
+    }
+    for (NSString *mimeType in stringArrayFromOpenPanelParameterSelector(parameters, @"_acceptedMIMETypes")) {
+        for (NSString *extension in extensionsForOpenPanelMIMEType(mimeType)) {
+            addOpenPanelExtension(fileTypes, extension);
+        }
+    }
+
+    return fileTypes.array;
+}
+
+static NSString *safeWebviewSavePanelName(NSString *suggestedName, NSString *fileExtension) {
+    NSString *name = suggestedName && suggestedName.length > 0 ? suggestedName : @"Page";
+    NSCharacterSet *invalidCharacters = [NSCharacterSet characterSetWithCharactersInString:@"/\\?%*:|\"<>"];
+    NSArray<NSString *> *parts = [name componentsSeparatedByCharactersInSet:invalidCharacters];
+    NSString *safeName = [[parts componentsJoinedByString:@"-"] stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceAndNewlineCharacterSet]];
+    if (safeName.length == 0) {
+        safeName = @"Page";
+    }
+    if ([[safeName.pathExtension lowercaseString] isEqualToString:fileExtension]) {
+        return safeName;
+    }
+    if (safeName.pathExtension.length > 0) {
+        safeName = [safeName stringByDeletingPathExtension];
+    }
+    return [safeName stringByAppendingPathExtension:fileExtension];
+}
+
+static void showWebviewSaveFailure(NSError *error) {
+    NSBeep();
+    NSLog(@"[webview-save] failed: %@", error ? error.localizedDescription : @"Unknown error");
+}
+
+@implementation NativePopupWindowController
+    - (instancetype)initWithOpenerWebView:(WKWebView *)openerWebView
+                            configuration:(WKWebViewConfiguration *)configuration
+                         navigationAction:(WKNavigationAction *)navigationAction
+                            windowFeatures:(WKWindowFeatures *)windowFeatures
+                              targetName:(NSString *)targetName
+                             webviewId:(uint32_t)webviewId
+                       webviewEventHandler:(WebviewEventHandler)webviewEventHandler {
+        self = [super init];
+        if (self) {
+            NSRect frame = nativePopupFrame(openerWebView, windowFeatures);
+            BOOL allowsResizing = !windowFeatures.allowsResizing || windowFeatures.allowsResizing.boolValue;
+            NSWindowStyleMask styleMask = NSWindowStyleMaskTitled |
+                NSWindowStyleMaskClosable |
+                NSWindowStyleMaskMiniaturizable;
+            if (allowsResizing) {
+                styleMask |= NSWindowStyleMaskResizable;
+            }
+
+            self.window = [[NSWindow alloc] initWithContentRect:frame
+                                                      styleMask:styleMask
+                                                        backing:NSBackingStoreBuffered
+                                                          defer:NO
+                                                         screen:openerWebView.window.screen];
+            self.window.releasedWhenClosed = NO;
+            self.window.delegate = self;
+            [self.window setCollectionBehavior:[self.window collectionBehavior] | NSWindowCollectionBehaviorFullScreenAuxiliary];
+
+            NSURL *url = navigationAction.request.URL;
+            NSString *title = url.host.length > 0 ? url.host : @"Popup";
+            [self.window setTitle:title];
+
+            NSView *contentView = [[NSView alloc] initWithFrame:NSMakeRect(0, 0, frame.size.width, frame.size.height)];
+            contentView.autoresizingMask = NSViewWidthSizable | NSViewHeightSizable;
+            [self.window setContentView:contentView];
+
+            self.webView = [[WKWebView alloc] initWithFrame:contentView.bounds configuration:configuration];
+            self.webView.autoresizingMask = NSViewWidthSizable | NSViewHeightSizable;
+            self.webView.customUserAgent = openerWebView.customUserAgent;
+            [contentView addSubview:self.webView];
+
+            MyNavigationDelegate *navigationDelegate = [[MyNavigationDelegate alloc] init];
+            navigationDelegate.zigCallback = NULL;
+            navigationDelegate.zigEventHandler = NULL;
+            navigationDelegate.webviewId = webviewId;
+            self.navigationDelegate = navigationDelegate;
+            self.webView.navigationDelegate = navigationDelegate;
+            objc_setAssociatedObject(self.webView, "NavigationDelegate", navigationDelegate, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+
+            MyWebViewUIDelegate *uiDelegate = [[MyWebViewUIDelegate alloc] init];
+            uiDelegate.zigEventHandler = webviewEventHandler;
+            uiDelegate.webviewId = webviewId;
+            self.uiDelegate = uiDelegate;
+            self.webView.UIDelegate = uiDelegate;
+            objc_setAssociatedObject(self.webView, "UIDelegate", uiDelegate, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+            objc_setAssociatedObject(self.webView, "NativePopupWindowController", self, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+
+            [self.webView addObserver:self forKeyPath:@"title" options:NSKeyValueObservingOptionNew context:nil];
+
+            if (!globalNativePopupControllers) {
+                globalNativePopupControllers = [[NSMutableSet alloc] init];
+            }
+            [globalNativePopupControllers addObject:self];
+
+            self.registryKey = nativePopupRegistryKey(openerWebView, targetName);
+            if (self.registryKey) {
+                if (!globalNamedNativePopupControllers) {
+                    globalNamedNativePopupControllers = [[NSMutableDictionary alloc] init];
+                }
+                globalNamedNativePopupControllers[self.registryKey] = self;
+            }
+        }
+        return self;
+    }
+
+    - (void)show {
+        if (!self.window || !self.webView) return;
+        [self.window makeKeyAndOrderFront:nil];
+        [self.window makeFirstResponder:self.webView];
+        [[NSApplication sharedApplication] activateIgnoringOtherApps:YES];
+    }
+
+    - (void)close {
+        if (!self.window || self.didCleanUp) return;
+        [self.window close];
+    }
+
+    - (BOOL)windowShouldClose:(NSWindow *)sender {
+        return YES;
+    }
+
+    - (void)windowDidResize:(NSNotification *)notification {
+        if (!self.webView || !self.window.contentView) return;
+        self.webView.frame = self.window.contentView.bounds;
+    }
+
+    - (void)windowDidBecomeKey:(NSNotification *)notification {
+        if (self.webView) {
+            [self.window makeFirstResponder:self.webView];
+        }
+    }
+
+    - (void)windowWillClose:(NSNotification *)notification {
+        if (self.didCleanUp) return;
+        self.didCleanUp = YES;
+
+        WKWebView *webViewToClean = self.webView;
+        pauseAndStopWKWebView(webViewToClean);
+        @try {
+            [webViewToClean removeObserver:self forKeyPath:@"title"];
+        } @catch (NSException *exception) {}
+
+        webViewToClean.navigationDelegate = nil;
+        webViewToClean.UIDelegate = nil;
+        objc_setAssociatedObject(webViewToClean, "NativePopupWindowController", nil, OBJC_ASSOCIATION_ASSIGN);
+        [webViewToClean removeFromSuperview];
+        [webViewToClean loadRequest:[NSURLRequest requestWithURL:[NSURL URLWithString:@"about:blank"]]];
+
+        if (self.registryKey) {
+            [globalNamedNativePopupControllers removeObjectForKey:self.registryKey];
+        }
+        [globalNativePopupControllers removeObject:self];
+
+        self.webView = nil;
+        self.navigationDelegate = nil;
+        self.uiDelegate = nil;
+        self.window.delegate = nil;
+        self.window = nil;
+    }
+
+    - (void)observeValueForKeyPath:(NSString *)keyPath
+                          ofObject:(id)object
+                            change:(NSDictionary<NSKeyValueChangeKey,id> *)change
+                           context:(void *)context {
+        if (object == self.webView && [keyPath isEqualToString:@"title"]) {
+            NSString *title = self.webView.title;
+            if (title.length > 0) {
+                [self.window setTitle:title];
+            }
+            return;
+        }
+        [super observeValueForKeyPath:keyPath ofObject:object change:change context:context];
+    }
+
+    - (void)dealloc {
+        if (!self.didCleanUp && self.webView) {
+            @try {
+                [self.webView removeObserver:self forKeyPath:@"title"];
+            } @catch (NSException *exception) {}
         }
     }
 @end
@@ -2825,25 +3518,63 @@ static void dispatchWebviewEvent(WebviewEventHandler handler, uint32_t webviewId
         forNavigationAction:(WKNavigationAction *)navigationAction
             windowFeatures:(WKWindowFeatures *)windowFeatures {
         
-        // Check if this is a cmd+click or a traditional popup window request
+        // WK calls this delegate for target=_blank/window.open-style auxiliary webviews.
+        // Cmd-click links are handled in the navigation delegate to avoid duplicate events.
         BOOL isCmdClick = (navigationAction.modifierFlags & NSEventModifierFlagCommand) != 0;
-        BOOL isNewWindow = !navigationAction.targetFrame.isMainFrame || isCmdClick;        
+        BOOL hasTargetFrame = navigationAction.targetFrame != nil;
+        BOOL isNewWindow = !hasTargetFrame || !navigationAction.targetFrame.isMainFrame;
         
-        if (isNewWindow) {
-            NSString *eventData = [NSString stringWithFormat:@"{\"url\":\"%@\",\"isCmdClick\":%@,\"modifierFlags\":%lu}", 
-                                 navigationAction.request.URL.absoluteString, 
-                                 isCmdClick ? @"true" : @"false",
-                                 (unsigned long)navigationAction.modifierFlags];            
+        if (!isNewWindow) {
+            return nil;
+        }
+
+        if (isCmdClick && self.zigEventHandler) {
+            BOOL isLinkActivation = navigationAction.navigationType == WKNavigationTypeLinkActivated;
+            NSString *urlString = navigationAction.request.URL.absoluteString ?: @"";
+            NSString *eventData = jsonStringFromObject(@{
+                @"source": @"native-ui",
+                @"nativeDelegate": @"native-ui",
+                @"url": urlString,
+                @"isCmdClick": @YES,
+                @"isSPANavigation": @NO,
+                @"navigationType": navigationTypeName(navigationAction.navigationType),
+                @"modifierFlags": @((unsigned long)navigationAction.modifierFlags),
+                @"isUserGesture": @(isLinkActivation || isCmdClick),
+                @"targetFrame": targetFrameName(navigationAction.targetFrame),
+                @"button": @(navigationAction.buttonNumber)
+            });
             
-            if (self.zigEventHandler) {                
-                // Use strdup to create a persistent copy of the string for the FFI callback
-                char* eventDataCopy = strdup([eventData UTF8String]);
-                self.zigEventHandler(self.webviewId, strdup("new-window-open"), eventDataCopy);                
-            } else {
-                NSLog(@"[NEW_WINDOW] ERROR: zigEventHandler is NULL!");
+            dispatchWebviewEvent(self.zigEventHandler, self.webviewId, "new-window-open", eventData);
+            return nil;
+        }
+
+        NSString *targetName = nativePopupTargetNameForNavigationAction(navigationAction);
+        NSString *registryKey = nativePopupRegistryKey(webView, targetName);
+        if (registryKey) {
+            NativePopupWindowController *existing = globalNamedNativePopupControllers[registryKey];
+            if (existing && existing.webView && existing.window && existing.window.isVisible) {
+                [existing show];
+                return existing.webView;
             }
         }
-        return nil;
+
+        NativePopupWindowController *controller =
+            [[NativePopupWindowController alloc] initWithOpenerWebView:webView
+                                                         configuration:configuration
+                                                      navigationAction:navigationAction
+                                                        windowFeatures:windowFeatures
+                                                            targetName:targetName
+                                                             webviewId:self.webviewId
+                                                    webviewEventHandler:self.zigEventHandler];
+        [controller show];
+        return controller.webView;
+    }
+
+    - (void)webViewDidClose:(WKWebView *)webView {
+        NativePopupWindowController *controller = objc_getAssociatedObject(webView, "NativePopupWindowController");
+        if (controller) {
+            [controller close];
+        }
     }
     
     // Handle file input elements (<input type="file">)
@@ -2859,9 +3590,13 @@ runOpenPanelWithParameters:(WKOpenPanelParameters *)parameters
         [openPanel setCanChooseDirectories:parameters.allowsDirectories];
         [openPanel setCanChooseFiles:YES];
         
-        // Note: WKOpenPanelParameters doesn't expose acceptedMIMETypes in older versions
-        // The file filtering will be handled by the web page's input element accept attribute
-        // For now, we'll keep the dialog open to all file types and let the web page handle filtering
+        NSArray<NSString *> *acceptedFileTypes = acceptedOpenPanelFileTypes(parameters);
+        if (acceptedFileTypes.count > 0) {
+            #pragma clang diagnostic push
+            #pragma clang diagnostic ignored "-Wdeprecated-declarations"
+            [openPanel setAllowedFileTypes:acceptedFileTypes];
+            #pragma clang diagnostic pop
+        }
         
         // Run the panel synchronously to avoid block capture issues
         NSInteger response = [openPanel runModal];
@@ -2878,17 +3613,35 @@ runOpenPanelWithParameters:(WKOpenPanelParameters *)parameters
     type:(WKMediaCaptureType)type
     decisionHandler:(void (^)(WKPermissionDecision decision))decisionHandler {
         
-        NSString *originString = [NSString stringWithFormat:@"%@://%@", origin.protocol, origin.host];
+        NSString *originString = originStringFromWKSecurityOrigin(origin);
         std::string originStd = [originString UTF8String];
 
         NSLog(@"WKWebView: Media capture permission requested for %@ (type: %ld)", originString, (long)type);
 
-        NSString *requestURLString = frame.request.URL.absoluteString ?: webView.URL.absoluteString;
+        NSString *pageURLString = webView.URL.absoluteString ?: @"";
+        NSString *requestURLString = frame.request.URL.absoluteString ?: pageURLString;
 
         // The app shell is fully trusted. In production this is views://; in dev
         // the launcher is served from localhost with cachyWindow=launcher.
         if ([origin.protocol isEqualToString:@"views"] || isTrustedAppShellURL(requestURLString)) {
             decisionHandler(WKPermissionDecisionGrant);
+            return;
+        }
+
+        void (^decisionHandlerCopy)(WKPermissionDecision) = [decisionHandler copy];
+        bool bridged = emitPermissionRequest(
+            self.zigEventHandler,
+            self.webviewId,
+            originString,
+            pageURLString,
+            requestURLString,
+            permissionTypesForWKMediaCaptureType(type),
+            [decisionHandlerCopy](bool allowed) {
+                dispatch_async(dispatch_get_main_queue(), ^{
+                    decisionHandlerCopy(allowed ? WKPermissionDecisionGrant : WKPermissionDecisionDeny);
+                });
+            });
+        if (bridged) {
             return;
         }
 
@@ -2957,14 +3710,34 @@ runOpenPanelWithParameters:(WKOpenPanelParameters *)parameters
     initiatedByFrame:(WKFrameInfo *)frame
     decisionHandler:(void (^)(WKPermissionDecision decision))decisionHandler {
         
-        NSString *originString = [NSString stringWithFormat:@"%@://%@", origin.protocol, origin.host];
+        NSString *originString = originStringFromWKSecurityOrigin(origin);
         std::string originStd = [originString UTF8String];
 
         NSLog(@"WKWebView: Geolocation permission requested for %@", originString);
 
+        NSString *pageURLString = webView.URL.absoluteString ?: @"";
+        NSString *requestURLString = frame.request.URL.absoluteString ?: pageURLString;
+
         // views:// is the app's own bundled-asset shell — always trusted, never prompt.
-        if ([origin.protocol isEqualToString:@"views"]) {
+        if ([origin.protocol isEqualToString:@"views"] || isTrustedAppShellURL(requestURLString)) {
             decisionHandler(WKPermissionDecisionGrant);
+            return;
+        }
+
+        void (^decisionHandlerCopy)(WKPermissionDecision) = [decisionHandler copy];
+        bool bridged = emitPermissionRequest(
+            self.zigEventHandler,
+            self.webviewId,
+            originString,
+            pageURLString,
+            requestURLString,
+            @[ @"geolocation" ],
+            [decisionHandlerCopy](bool allowed) {
+                dispatch_async(dispatch_get_main_queue(), ^{
+                    decisionHandlerCopy(allowed ? WKPermissionDecisionGrant : WKPermissionDecisionDeny);
+                });
+            });
+        if (bridged) {
             return;
         }
 
@@ -3083,7 +3856,7 @@ runOpenPanelWithParameters:(WKOpenPanelParameters *)parameters
                 
                 [configuration.preferences setValue:@YES forKey:@"developerExtrasEnabled"];        
                 [configuration.preferences setValue:@YES forKey:@"elementFullscreenEnabled"];                                
-                [configuration.preferences setValue:@YES forKey:@"allowsPictureInPictureMediaPlayback"];                
+                [configuration.preferences setValue:@YES forKey:@"allowsPictureInPictureMediaPlayback"];
                 
                 // Add scheme handler
                 MyURLSchemeHandler *assetSchemeHandler = [[MyURLSchemeHandler alloc] init];
@@ -3628,6 +4401,109 @@ runOpenPanelWithParameters:(WKOpenPanelParameters *)parameters
         });
     }
 
+    - (BOOL)printPage {
+        if (!self.webView) return NO;
+        dispatch_async(dispatch_get_main_queue(), ^{
+            if (!self.webView) return;
+            NSPrintInfo *printInfo = [[NSPrintInfo sharedPrintInfo] copy];
+            printInfo.horizontalPagination = NSPrintingPaginationModeFit;
+            printInfo.verticalPagination = NSPrintingPaginationModeAutomatic;
+
+            NSPrintOperation *operation = nil;
+            if (@available(macOS 11.0, *)) {
+                operation = [self.webView printOperationWithPrintInfo:printInfo];
+            } else {
+                operation = [NSPrintOperation printOperationWithView:self.webView printInfo:printInfo];
+            }
+            if (!operation) return;
+            operation.showsPrintPanel = YES;
+            operation.showsProgressPanel = YES;
+
+            NSWindow *window = self.webView.window;
+            if (window) {
+                [operation runOperationModalForWindow:window delegate:nil didRunSelector:NULL contextInfo:NULL];
+            } else {
+                [operation runOperation];
+            }
+        });
+        return YES;
+    }
+
+    - (BOOL)savePageAs:(const char*)suggestedName format:(const char*)format {
+        if (!self.webView) return NO;
+
+        NSString *name = suggestedName ? [NSString stringWithUTF8String:suggestedName] : nil;
+        NSString *formatString = format ? [[NSString stringWithUTF8String:format] lowercaseString] : @"webarchive";
+        BOOL savePDF = [formatString isEqualToString:@"pdf"];
+        NSString *fileExtension = savePDF ? @"pdf" : @"webarchive";
+        NSString *panelName = safeWebviewSavePanelName(name, fileExtension);
+
+        dispatch_async(dispatch_get_main_queue(), ^{
+            if (!self.webView) return;
+            NSSavePanel *panel = [NSSavePanel savePanel];
+            panel.nameFieldStringValue = panelName;
+            panel.canCreateDirectories = YES;
+            #pragma clang diagnostic push
+            #pragma clang diagnostic ignored "-Wdeprecated-declarations"
+            panel.allowedFileTypes = @[ fileExtension ];
+            #pragma clang diagnostic pop
+
+            void (^saveData)(NSURL *) = ^(NSURL *destinationURL) {
+                if (!destinationURL) return;
+
+                if (savePDF) {
+                    if (@available(macOS 11.0, *)) {
+                        [self.webView createPDFWithConfiguration:nil completionHandler:^(NSData *pdfData, NSError *error) {
+                            if (!pdfData || error) {
+                                showWebviewSaveFailure(error);
+                                return;
+                            }
+                            NSError *writeError = nil;
+                            if (![pdfData writeToURL:destinationURL options:NSDataWritingAtomic error:&writeError]) {
+                                showWebviewSaveFailure(writeError);
+                            }
+                        }];
+                    } else {
+                        showWebviewSaveFailure(nil);
+                    }
+                    return;
+                }
+
+                if (@available(macOS 11.0, *)) {
+                    [self.webView createWebArchiveDataWithCompletionHandler:^(NSData *archiveData, NSError *error) {
+                        if (!archiveData || error) {
+                            showWebviewSaveFailure(error);
+                            return;
+                        }
+                        NSError *writeError = nil;
+                        if (![archiveData writeToURL:destinationURL options:NSDataWritingAtomic error:&writeError]) {
+                            showWebviewSaveFailure(writeError);
+                        }
+                    }];
+                } else {
+                    showWebviewSaveFailure(nil);
+                }
+            };
+
+            NSWindow *window = self.webView.window;
+            if (window) {
+                [panel beginSheetModalForWindow:window completionHandler:^(NSModalResponse result) {
+                    if (result == NSModalResponseOK) {
+                        saveData(panel.URL);
+                    }
+                }];
+            } else {
+                [panel beginWithCompletionHandler:^(NSModalResponse result) {
+                    if (result == NSModalResponseOK) {
+                        saveData(panel.URL);
+                    }
+                }];
+            }
+        });
+
+        return YES;
+    }
+
     - (void)openDevTools {
         dispatch_async(dispatch_get_main_queue(), ^{
             // WKWebView doesn't have public DevTools API, but we can use private API if available
@@ -3834,6 +4710,8 @@ runOpenPanelWithParameters:(WKOpenPanelParameters *)parameters
 
     - (void)findInPage:(const char*)searchText forward:(BOOL)forward matchCase:(BOOL)matchCase {}
     - (void)stopFindInPage {}
+    - (BOOL)printPage { return NO; }
+    - (BOOL)savePageAs:(const char*)suggestedName format:(const char*)format { return NO; }
     - (void)openDevTools {}
     - (void)closeDevTools {}
     - (void)toggleDevTools {}
@@ -5540,10 +6418,19 @@ public:
 
             // Send download-started event
             if (webview_event_handler_) {
-                std::string escapedFilename = EscapeJavaScriptString(suggested_name.ToString());
-                std::string escapedPath = EscapeJavaScriptString(std::string([destinationPath UTF8String]));
-                std::string eventData = "{\"filename\":\"" + escapedFilename +
-                    "\",\"path\":\"" + escapedPath + "\"}";
+                int percent = download_item->GetPercentComplete();
+                if (percent < 0) percent = 0;
+                std::string eventData = electrobun::DownloadEventBuilder()
+                    .setDownloadId(downloadId)
+                    .setUrl(download_item->GetURL().ToString())
+                    .setFilename(suggested_name.ToString())
+                    .setMimeType(download_item->GetMimeType().ToString())
+                    .setDestinationPath(std::string([destinationPath UTF8String]))
+                    .setTotalBytes(download_item->GetTotalBytes())
+                    .setReceivedBytes(download_item->GetReceivedBytes())
+                    .setPercentComplete(percent)
+                    .setCanResume(false)
+                    .toJson();
                 // Use strdup to create persistent copies for the FFI callback
                 webview_event_handler_(webview_id_, strdup("download-started"), strdup(eventData.c_str()));
             }
@@ -5575,10 +6462,17 @@ public:
                 if (lastSlash != std::string::npos) {
                     filename = fullPath.substr(lastSlash + 1);
                 }
-                std::string escapedFilename = EscapeJavaScriptString(filename);
-                std::string escapedPath = EscapeJavaScriptString(fullPath);
-                std::string eventData = "{\"filename\":\"" + escapedFilename +
-                    "\",\"path\":\"" + escapedPath + "\"}";
+                std::string eventData = electrobun::DownloadEventBuilder()
+                    .setDownloadId(downloadId)
+                    .setUrl(download_item->GetURL().ToString())
+                    .setFilename(filename)
+                    .setMimeType(download_item->GetMimeType().ToString())
+                    .setDestinationPath(fullPath)
+                    .setTotalBytes(download_item->GetTotalBytes())
+                    .setReceivedBytes(download_item->GetReceivedBytes())
+                    .setPercentComplete(100)
+                    .setCanResume(false)
+                    .toJson();
                 NSLog(@"DEBUG CEF Download: Sending event data - %s", eventData.c_str());
                 // Use strdup to create persistent copies for the FFI callback
                 webview_event_handler_(webview_id_, strdup("download-completed"), strdup(eventData.c_str()));
@@ -5596,9 +6490,23 @@ public:
                 if (path.empty()) {
                     path = download_item->GetFullPath().ToString();
                 }
-                std::string escapedPath = EscapeJavaScriptString(path);
-                std::string eventData = "{\"filename\":\"\",\"path\":\"" + escapedPath +
-                    "\",\"error\":\"Download canceled\"}";
+                std::string filename = path;
+                size_t lastSlash = path.find_last_of('/');
+                if (lastSlash != std::string::npos) {
+                    filename = path.substr(lastSlash + 1);
+                }
+                std::string eventData = electrobun::DownloadEventBuilder()
+                    .setDownloadId(downloadId)
+                    .setUrl(download_item->GetURL().ToString())
+                    .setFilename(filename)
+                    .setMimeType(download_item->GetMimeType().ToString())
+                    .setDestinationPath(path)
+                    .setTotalBytes(download_item->GetTotalBytes())
+                    .setReceivedBytes(download_item->GetReceivedBytes())
+                    .setPercentComplete(download_item->GetPercentComplete())
+                    .setCanResume(false)
+                    .setErrorMessage("Download canceled")
+                    .toJson();
                 // Use strdup to create persistent copies for the FFI callback
                 webview_event_handler_(webview_id_, strdup("download-failed"), strdup(eventData.c_str()));
             }
@@ -5610,7 +6518,26 @@ public:
             if (percent >= 0) {
                 // Send download-progress event
                 if (webview_event_handler_) {
-                    std::string eventData = "{\"progress\":" + std::to_string(percent) + "}";
+                    std::string path = download_paths_[downloadId];
+                    if (path.empty()) {
+                        path = download_item->GetFullPath().ToString();
+                    }
+                    std::string filename = path;
+                    size_t lastSlash = path.find_last_of('/');
+                    if (lastSlash != std::string::npos) {
+                        filename = path.substr(lastSlash + 1);
+                    }
+                    std::string eventData = electrobun::DownloadEventBuilder()
+                        .setDownloadId(downloadId)
+                        .setUrl(download_item->GetURL().ToString())
+                        .setFilename(filename)
+                        .setMimeType(download_item->GetMimeType().ToString())
+                        .setDestinationPath(path)
+                        .setTotalBytes(download_item->GetTotalBytes())
+                        .setReceivedBytes(download_item->GetReceivedBytes())
+                        .setPercentComplete(percent)
+                        .setCanResume(false)
+                        .toJson();
                     webview_event_handler_(webview_id_, strdup("download-progress"), strdup(eventData.c_str()));
                 }
             }
@@ -5930,11 +6857,40 @@ public:
         if (frame) {
             frameUrl = frame->GetURL().ToString();
         }
+        std::string pageUrl;
+        if (browser && browser->GetMainFrame()) {
+            pageUrl = browser->GetMainFrame()->GetURL().ToString();
+        }
 
         // The app shell is fully trusted. In production this is views://; in dev
         // the launcher is served from localhost with cachyWindow=launcher.
-        if (isTrustedAppShellURL(origin) || isTrustedAppShellURL(frameUrl)) {
+        if (isTrustedAppShellURL(origin) || isTrustedAppShellURL(frameUrl) || isTrustedAppShellURL(pageUrl)) {
             callback->Continue(requested_permissions);
+            return true;
+        }
+
+        CefRefPtr<CefMediaAccessCallback> callbackRef = callback;
+        uint32_t requestedPermissions = requested_permissions;
+        NSString *originString = [NSString stringWithUTF8String:origin.c_str()];
+        NSString *pageUrlString = [NSString stringWithUTF8String:pageUrl.c_str()];
+        NSString *frameUrlString = [NSString stringWithUTF8String:frameUrl.c_str()];
+        bool bridged = emitPermissionRequest(
+            webview_event_handler_,
+            webview_id_,
+            originString,
+            pageUrlString,
+            frameUrlString,
+            permissionTypesForCefPermissions(requested_permissions),
+            [callbackRef, requestedPermissions](bool allowed) {
+                dispatch_async(dispatch_get_main_queue(), ^{
+                    if (allowed) {
+                        callbackRef->Continue(requestedPermissions);
+                    } else {
+                        callbackRef->Cancel();
+                    }
+                });
+            });
+        if (bridged) {
             return true;
         }
 
@@ -5995,10 +6951,14 @@ public:
         if (browser && browser->GetMainFrame()) {
             pageUrl = browser->GetMainFrame()->GetURL().ToString();
         }
+        std::string frameUrl;
+        if (browser && browser->GetFocusedFrame()) {
+            frameUrl = browser->GetFocusedFrame()->GetURL().ToString();
+        }
 
         // The app shell is fully trusted. In production this is views://; in dev
         // the launcher is served from localhost with cachyWindow=launcher.
-        if (isTrustedAppShellURL(origin) || isTrustedAppShellURL(pageUrl)) {
+        if (isTrustedAppShellURL(origin) || isTrustedAppShellURL(pageUrl) || isTrustedAppShellURL(frameUrl)) {
             callback->Continue(CEF_PERMISSION_RESULT_ACCEPT);
             return true;
         }
@@ -6030,6 +6990,26 @@ public:
                 @"This page is requesting permission for: %s.\n\nDo you want to allow this?",
                 names.c_str()];
             title = @"Permission Request";
+        }
+
+        CefRefPtr<CefPermissionPromptCallback> callbackRef = callback;
+        NSString *originString = [NSString stringWithUTF8String:origin.c_str()];
+        NSString *pageUrlString = [NSString stringWithUTF8String:pageUrl.c_str()];
+        NSString *frameUrlString = [NSString stringWithUTF8String:frameUrl.c_str()];
+        bool bridged = emitPermissionRequest(
+            webview_event_handler_,
+            webview_id_,
+            originString,
+            pageUrlString,
+            frameUrlString,
+            permissionTypesForCefPermissions(requested_permissions),
+            [callbackRef](bool allowed) {
+                dispatch_async(dispatch_get_main_queue(), ^{
+                    callbackRef->Continue(allowed ? CEF_PERMISSION_RESULT_ACCEPT : CEF_PERMISSION_RESULT_DENY);
+                });
+            });
+        if (bridged) {
+            return true;
         }
 
         // Check cache first
@@ -7091,6 +8071,18 @@ CefRefPtr<CefRequestContext> CreateRequestContextForPartition(const char* partit
         }
     }
 
+    - (BOOL)printPage {
+        if (!self.browser) return NO;
+        CefRefPtr<CefBrowserHost> host = self.browser->GetHost();
+        if (!host) return NO;
+        host->Print();
+        return YES;
+    }
+
+    - (BOOL)savePageAs:(const char*)suggestedName format:(const char*)format {
+        return NO;
+    }
+
     - (void)openDevTools {
         // Use existing remote debugger approach for CEF
         dispatch_async(dispatch_get_main_queue(), ^{
@@ -7213,7 +8205,11 @@ CefRefPtr<CefRequestContext> CreateRequestContextForPartition(const char* partit
             }
         }
 
-        if (self.resizeHandler) {
+        BOOL suppressBoundsEvent = self.isInNativeFullscreenTransition ||
+            self.isInNativeFullscreen ||
+            (([window styleMask] & NSWindowStyleMaskFullScreen) == NSWindowStyleMaskFullScreen);
+
+        if (self.resizeHandler && !suppressBoundsEvent) {
             NSScreen *primaryScreen = [NSScreen screens][0];
             NSRect screenFrame = [primaryScreen frame];
             windowFrame.origin.y = screenFrame.size.height - windowFrame.origin.y - windowFrame.size.height;
@@ -7229,6 +8225,7 @@ CefRefPtr<CefRequestContext> CreateRequestContextForPartition(const char* partit
         }
     }
     - (void)windowWillExitFullScreen:(NSNotification *)notification {
+        self.isInNativeFullscreenTransition = YES;
         if (self.hasCustomButtonPosition) {
             NSWindow *window = [notification object];
             [[window standardWindowButton:NSWindowCloseButton] setHidden:YES];
@@ -7237,12 +8234,27 @@ CefRefPtr<CefRequestContext> CreateRequestContextForPartition(const char* partit
         }
     }
     - (void)windowWillEnterFullScreen:(NSNotification *)notification {
+        self.isInNativeFullscreenTransition = YES;
         NSWindow *window = [notification object];
         if (getConfiguredWindowCornerRadius(window) > 0) {
             applyWindowCornerRadius(window, 0);
         }
     }
+    - (void)windowDidEnterFullScreen:(NSNotification *)notification {
+        self.isInNativeFullscreenTransition = NO;
+        self.isInNativeFullscreen = YES;
+
+        NSWindow *window = [notification object];
+        if (self.hasCustomButtonPosition) {
+            applyWindowButtonPosition(window, self.buttonPositionX, self.buttonPositionY);
+        } else {
+            applyTrafficLightOffsetFromDefault(window);
+        }
+    }
     - (void)windowDidExitFullScreen:(NSNotification *)notification {
+        self.isInNativeFullscreenTransition = NO;
+        self.isInNativeFullscreen = NO;
+
         NSWindow *window = [notification object];
         double cornerRadius = getConfiguredWindowCornerRadius(window);
         if (cornerRadius > 0) {
@@ -7258,8 +8270,12 @@ CefRefPtr<CefRequestContext> CreateRequestContextForPartition(const char* partit
         }
     }
     - (void)windowDidMove:(NSNotification *)notification {
-        if (self.moveHandler) {
-            NSWindow *window = [notification object];
+        NSWindow *window = [notification object];
+        BOOL suppressBoundsEvent = self.isInNativeFullscreenTransition ||
+            self.isInNativeFullscreen ||
+            (([window styleMask] & NSWindowStyleMaskFullScreen) == NSWindowStyleMaskFullScreen);
+
+        if (self.moveHandler && !suppressBoundsEvent) {
             NSRect windowFrame = [window frame];
             NSScreen *primaryScreen = [NSScreen screens][0];
             NSRect screenFrame = [primaryScreen frame];
@@ -7856,6 +8872,20 @@ extern "C" void evaluateJavaScriptWithNoCompletion(AbstractView *abstractView, c
 
 extern "C" const char* evaluateJavascriptSync(AbstractView *abstractView, const char *script) {
     return [abstractView evaluateJavaScriptSync:script];
+}
+
+extern "C" BOOL webviewPrint(AbstractView *abstractView) {
+    if (!abstractView) {
+        return NO;
+    }
+    return [abstractView printPage];
+}
+
+extern "C" BOOL webviewSavePageAs(AbstractView *abstractView, const char *suggestedName, const char *format) {
+    if (!abstractView) {
+        return NO;
+    }
+    return [abstractView savePageAs:suggestedName format:format];
 }
 
 extern "C" void testFFI(void *ptr) {              

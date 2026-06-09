@@ -6,7 +6,8 @@ type WebviewEventTypes =
 	| "did-commit-navigation"
 	| "dom-ready"
 	| "host-message"
-	| "new-window-open";
+	| "new-window-open"
+	| "permission-requested";
 
 /**
  * Interface representing an <electrobun-webview> custom element.

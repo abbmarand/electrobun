@@ -5,6 +5,8 @@ declare global {
 	interface Window {
 		__electrobunWebviewId: number;
 		__electrobunWindowId: number;
+		__electrobunPlatform: "darwin" | "linux" | "win32";
+		__electrobunRenderer: "native" | "cef";
 		__electrobunRpcSocketPort: number;
 		__electrobunSecretKeyBytes: number[];
 		// Event-only bridge (all webviews, including sandboxed)

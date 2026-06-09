@@ -5,17 +5,19 @@ import {
 	type ElectrobunRPCSchema,
 	type ElectrobunRPCConfig,
 	type RPCWithTransport,
-	defineElectrobunRPC,
+	defineElectrobunRPC
 } from "../../shared/rpc.js";
 import { Updater } from "./Updater";
 import { BuildConfig } from "./BuildConfig";
-import {
-	rpcPort,
-	sendMessageToWebviewViaSocket,
-	removeSocketForWebview,
-} from "./Socket";
+import { rpcPort, sendMessageToWebviewViaSocket, removeSocketForWebview } from "./Socket";
 import { randomBytes } from "crypto";
 import { type Pointer } from "bun:ffi";
+import type ElectrobunEvent from "../events/event";
+import type {
+	BrowserPermissionPlatform,
+	BrowserPermissionRequestDetail,
+	BrowserPermissionType
+} from "../events/webviewEvents";
 
 const BrowserViewMap: {
 	[id: number]: BrowserView<any>;
@@ -67,12 +69,42 @@ const defaultOptions: Partial<BrowserViewOptions> = {
 		x: 0,
 		y: 0,
 		width: 800,
-		height: 600,
-	},
+		height: 600
+	}
 };
 // Note: we use the build's hash to separate from different apps and different builds
 // but we also want a randomId to separate different instances of the same app
 const randomId = Math.random().toString(36).substring(7);
+
+export type { BrowserPermissionPlatform, BrowserPermissionRequestDetail, BrowserPermissionType };
+export type BrowserPermissionResponseDecision = "allow" | "block";
+export type BrowserViewSavePageFormat = "webarchive" | "pdf";
+export type BrowserViewSavePageOptions = {
+	suggestedName?: string;
+	format?: BrowserViewSavePageFormat;
+};
+type BrowserViewEventName =
+	| "will-navigate"
+	| "did-navigate"
+	| "did-navigate-in-page"
+	| "did-commit-navigation"
+	| "dom-ready"
+	| "new-window-open"
+	| "host-message"
+	| "download-started"
+	| "download-progress"
+	| "download-completed"
+	| "download-failed"
+	| "page-title-updated"
+	| "favicon-updated"
+	| "permission-requested";
+export type BrowserPermissionRequestEvent = ElectrobunEvent<
+	{ detail: BrowserPermissionRequestDetail },
+	Record<string, never>
+>;
+type BrowserViewEvent<Name extends BrowserViewEventName> = Name extends "permission-requested"
+	? BrowserPermissionRequestEvent
+	: unknown;
 
 export class BrowserView<T extends RPCWithTransport = RPCWithTransport> {
 	id: number = nextWebviewId++;
@@ -95,7 +127,7 @@ export class BrowserView<T extends RPCWithTransport = RPCWithTransport> {
 		x: 0,
 		y: 0,
 		width: 800,
-		height: 600,
+		height: 600
 	};
 	pipePrefix!: string;
 	inStream!: fs.WriteStream;
@@ -122,7 +154,7 @@ export class BrowserView<T extends RPCWithTransport = RPCWithTransport> {
 			x: options.frame?.x ?? defaultOptions.frame!.x,
 			y: options.frame?.y ?? defaultOptions.frame!.y,
 			width: options.frame?.width ?? defaultOptions.frame!.width,
-			height: options.frame?.height ?? defaultOptions.frame!.height,
+			height: options.frame?.height ?? defaultOptions.frame!.height
 		};
 		this.rpc = options.rpc;
 		this.secretKey = new Uint8Array(randomBytes(32));
@@ -173,14 +205,14 @@ export class BrowserView<T extends RPCWithTransport = RPCWithTransport> {
 				width: this.frame.width,
 				height: this.frame.height,
 				x: this.frame.x,
-				y: this.frame.y,
+				y: this.frame.y
 			},
 			autoResize: this.autoResize,
 			navigationRules: this.navigationRules,
 			sandbox: this.sandbox,
 			startTransparent: this.startTransparent,
 			startPassthrough: this.startPassthrough,
-			contentBlocker: this.contentBlocker,
+			contentBlocker: this.contentBlocker
 			// transparent is looked up from parent window in native.ts
 		});
 	}
@@ -189,7 +221,7 @@ export class BrowserView<T extends RPCWithTransport = RPCWithTransport> {
 		if (!this.rpc) {
 			// eslint-disable-next-line @typescript-eslint/no-explicit-any
 			this.rpc = BrowserView.defineRPC({
-				handlers: { requests: {}, messages: {} },
+				handlers: { requests: {}, messages: {} }
 			}) as any;
 		}
 
@@ -198,9 +230,7 @@ export class BrowserView<T extends RPCWithTransport = RPCWithTransport> {
 
 	sendMessageToWebviewViaExecute(jsonMessage: unknown) {
 		const stringifiedMessage =
-			typeof jsonMessage === "string"
-				? jsonMessage
-				: JSON.stringify(jsonMessage);
+			typeof jsonMessage === "string" ? jsonMessage : JSON.stringify(jsonMessage);
 		// todo (yoav): make this a shared const with the browser api
 		const wrappedMessage = `window.__electrobun.receiveMessageFromBun(${stringifiedMessage})`;
 		this.executeJavascript(wrappedMessage);
@@ -208,9 +238,7 @@ export class BrowserView<T extends RPCWithTransport = RPCWithTransport> {
 
 	sendInternalMessageViaExecute(jsonMessage: unknown) {
 		const stringifiedMessage =
-			typeof jsonMessage === "string"
-				? jsonMessage
-				: JSON.stringify(jsonMessage);
+			typeof jsonMessage === "string" ? jsonMessage : JSON.stringify(jsonMessage);
 		// todo (yoav): make this a shared const with the browser api
 		const wrappedMessage = `window.__electrobun.receiveInternalMessageFromBun(${stringifiedMessage})`;
 		this.executeJavascript(wrappedMessage);
@@ -229,6 +257,24 @@ export class BrowserView<T extends RPCWithTransport = RPCWithTransport> {
 
 	executeJavascriptSync(js: string): string | null {
 		return ffi.request.evaluateJavascriptSync({ id: this.id, js });
+	}
+
+	print(): boolean {
+		if (!this.ptr || this.isRemoved) {
+			return false;
+		}
+		return ffi.request.printWebview({ id: this.id });
+	}
+
+	savePageAs(options: BrowserViewSavePageOptions = {}): boolean {
+		if (!this.ptr || this.isRemoved) {
+			return false;
+		}
+		return ffi.request.saveWebviewPageAs({
+			id: this.id,
+			suggestedName: options.suggestedName ?? "Page",
+			format: options.format ?? "webarchive"
+		});
 	}
 
 	loadURL(url: string) {
@@ -272,18 +318,10 @@ export class BrowserView<T extends RPCWithTransport = RPCWithTransport> {
 		native!.symbols.setAppAppearance(toCString(mode));
 	}
 
-	findInPage(
-		searchText: string,
-		options?: { forward?: boolean; matchCase?: boolean },
-	) {
+	findInPage(searchText: string, options?: { forward?: boolean; matchCase?: boolean }) {
 		const forward = options?.forward ?? true;
 		const matchCase = options?.matchCase ?? false;
-		native!.symbols.webviewFindInPage(
-			this.ptr,
-			toCString(searchText),
-			forward,
-			matchCase,
-		);
+		native!.symbols.webviewFindInPage(this.ptr, toCString(searchText), forward, matchCase);
 	}
 
 	stopFindInPage() {
@@ -322,24 +360,23 @@ export class BrowserView<T extends RPCWithTransport = RPCWithTransport> {
 	// name should only allow browserView events
 	// Note: normalize event names to willNavigate instead of ['will-navigate'] to save
 	// 5 characters per usage and allow minification to be more effective.
-	on(
-		name:
-			| "will-navigate"
-			| "did-navigate"
-			| "did-navigate-in-page"
-			| "did-commit-navigation"
-			| "dom-ready"
-			| "new-window-open"
-			| "download-started"
-			| "download-progress"
-			| "download-completed"
-			| "download-failed"
-			| "page-title-updated"
-			| "favicon-updated",
-		handler: (event: unknown) => void,
+	on<Name extends BrowserViewEventName>(
+		name: Name,
+		handler: (event: BrowserViewEvent<Name>) => void
 	) {
 		const specificName = `${name}-${this.id}`;
 		electrobunEventEmitter.on(specificName, handler);
+	}
+
+	static respondToPermissionRequest(
+		requestId: string,
+		decision: BrowserPermissionResponseDecision
+	) {
+		native!.symbols.webviewRespondToPermissionRequest(toCString(requestId), toCString(decision));
+	}
+
+	respondToPermissionRequest(requestId: string, decision: BrowserPermissionResponseDecision) {
+		BrowserView.respondToPermissionRequest(requestId, decision);
 	}
 
 	createTransport = () => {
@@ -370,7 +407,7 @@ export class BrowserView<T extends RPCWithTransport = RPCWithTransport> {
 					that.rpc?.setTransport(that.createTransport());
 					handler(msg);
 				};
-			},
+			}
 		};
 	};
 
@@ -406,13 +443,13 @@ export class BrowserView<T extends RPCWithTransport = RPCWithTransport> {
 		this.rpc?.setTransport({
 			send() {},
 			registerHandler() {},
-			unregisterHandler() {},
+			unregisterHandler() {}
 		});
 		this.rpcHandler = undefined;
-    
-    this.rpcHandler = undefined;
-    this.ptr = null;
-    native!.symbols.webviewRemove(ptr);
+
+		this.rpcHandler = undefined;
+		this.ptr = null;
+		native!.symbols.webviewRemove(ptr);
 	}
 
 	static getById(id: number) {
@@ -423,9 +460,7 @@ export class BrowserView<T extends RPCWithTransport = RPCWithTransport> {
 		return Object.values(BrowserViewMap);
 	}
 
-	static defineRPC<Schema extends ElectrobunRPCSchema>(
-		config: ElectrobunRPCConfig<Schema, "bun">,
-	) {
+	static defineRPC<Schema extends ElectrobunRPCSchema>(config: ElectrobunRPCConfig<Schema, "bun">) {
 		return defineElectrobunRPC("bun", config);
 	}
 }

@@ -3,6 +3,36 @@
 import { defineTest, expect, type TitleBarStyle } from "../test-framework/types";
 import { BrowserWindow } from "electrobun/bun";
 
+function parsePopupResult(raw: string | null) {
+  if (!raw) {
+    throw new Error("Expected popup result JSON, got empty result");
+  }
+
+  const parsed: unknown = JSON.parse(raw);
+  if (parsed === null || typeof parsed !== "object") {
+    throw new Error(`Expected popup result object, got ${raw}`);
+  }
+  if (
+    !("opener" in parsed) ||
+    typeof parsed.opener !== "boolean" ||
+    !("canWrite" in parsed) ||
+    typeof parsed.canWrite !== "boolean" ||
+    !("sameNamedWindow" in parsed) ||
+    typeof parsed.sameNamedWindow !== "boolean" ||
+    !("text" in parsed) ||
+    typeof parsed.text !== "string"
+  ) {
+    throw new Error(`Malformed popup result: ${raw}`);
+  }
+
+  return {
+    opener: parsed.opener,
+    canWrite: parsed.canWrite,
+    sameNamedWindow: parsed.sameNamedWindow,
+    text: parsed.text,
+  };
+}
+
 export const windowTests = [
   defineTest({
     name: "Window creation with URL",
@@ -138,6 +168,55 @@ export const windowTests = [
       }
 
       log(`Webview zoom reported: ${zoom}`);
+    },
+  }),
+
+  defineTest({
+    name: "Native window.open auxiliary context",
+    category: "BrowserWindow",
+    description: "Test WKWebView window.open creates a real auxiliary browsing context",
+    async run({ createWindow, log }) {
+      if (process.platform !== "darwin") {
+        log("Skipping WKWebView-specific popup test on non-macOS platform");
+        return;
+      }
+
+      const win = await createWindow({
+        html: "<!doctype html><title>Popup opener</title><main>opener</main>",
+        title: "Native Popup Test",
+        width: 500,
+        height: 360,
+        renderer: "native",
+      });
+
+      await new Promise((resolve) => setTimeout(resolve, 300));
+
+      const raw = win.webview.executeJavascriptSync(`
+(() => {
+  const popup = window.open("", "electrobunPopupReuseTest", "width=420,height=320,left=120,top=120");
+  if (!popup) return JSON.stringify({ opener: false, canWrite: false, sameNamedWindow: false, text: "missing" });
+
+  const opener = popup.opener === window;
+  const startsBlank = popup.location.href === "about:blank";
+  popup.document.open();
+  popup.document.write("<!doctype html><title>Popup Child</title><p id='status'>written</p>");
+  popup.document.close();
+  const text = popup.document.getElementById("status")?.textContent || "";
+
+  const same = window.open("about:blank", "electrobunPopupReuseTest");
+  const sameNamedWindow = same === popup;
+  popup.close();
+
+  return JSON.stringify({ opener, canWrite: startsBlank && text === "written", sameNamedWindow, text });
+})()
+      `);
+
+      const result = parsePopupResult(raw);
+      expect(result.opener).toBe(true);
+      expect(result.canWrite).toBe(true);
+      expect(result.sameNamedWindow).toBe(true);
+      expect(result.text).toBe("written");
+      log("Native window.open returned a writable popup with opener and named-window reuse");
     },
   }),
 

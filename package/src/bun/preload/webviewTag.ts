@@ -19,7 +19,8 @@ type WebviewEventType =
 	| "download-failed"
 	| "load-started"
 	| "load-committed"
-	| "load-finished";
+	| "load-finished"
+	| "permission-requested";
 
 // Registry for webview instances (for event routing from bun)
 export const webviewRegistry: Record<number, ElectrobunWebviewTag> = {};

@@ -14,7 +14,7 @@ namespace electrobun {
 // NOTE: Bun's FFIType.true doesn't play well with Objective-C's YES/NO char booleans
 // so when sending booleans from JSCallbacks we use uint32_t
 typedef uint32_t (*DecideNavigationCallback)(uint32_t webviewId, const char* url);
-typedef void (*WebviewEventHandler)(uint32_t webviewId, const char* type, const char* url);
+typedef uint32_t (*WebviewEventHandler)(uint32_t webviewId, const char* type, const char* url);
 typedef uint32_t (*HandlePostMessage)(uint32_t webviewId, const char* message);
 typedef const char* (*HandlePostMessageWithReply)(uint32_t webviewId, const char* message);
 typedef void (*AsyncJavascriptCompletionHandler)(const char* messageId, uint32_t webviewId, uint32_t hostWebviewId, const char* responseJSON);

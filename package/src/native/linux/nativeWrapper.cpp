@@ -8542,6 +8542,18 @@ ELECTROBUN_EXPORT void evaluateJavaScriptWithNoCompletion(AbstractView* abstract
     }
 }
 
+ELECTROBUN_EXPORT bool webviewPrint(AbstractView* abstractView) {
+    (void)abstractView;
+    return false;
+}
+
+ELECTROBUN_EXPORT bool webviewSavePageAs(AbstractView* abstractView, const char* suggestedName, const char* format) {
+    (void)abstractView;
+    (void)suggestedName;
+    (void)format;
+    return false;
+}
+
 void webviewSetTransparent(AbstractView* abstractView, bool transparent) {
     if (abstractView) {
         dispatch_sync_main_void([&]() {
@@ -8642,6 +8654,10 @@ ELECTROBUN_EXPORT void webviewSetPageZoom(AbstractView* abstractView, double zoo
 ELECTROBUN_EXPORT double webviewGetPageZoom(AbstractView* abstractView) {
     // pageZoom is WebKit-specific, not available on Linux CEF
     return 1.0;
+}
+
+ELECTROBUN_EXPORT void webviewRespondToPermissionRequest(const char* requestId, const char* decision) {
+    // Linux permission prompts still use the native fallback path.
 }
 
 ELECTROBUN_EXPORT void updatePreloadScriptToWebView(AbstractView* abstractView, const char* scriptIdentifier, const char* scriptContent, bool forMainFrameOnly) {

@@ -1,6 +1,6 @@
 import { ffi } from "../proc/native";
 import electrobunEventEmitter from "../events/eventEmitter";
-import { BrowserView } from "./BrowserView";
+import { BrowserView, type BrowserViewSavePageOptions } from "./BrowserView";
 import { type Pointer } from "bun:ffi";
 import { BuildConfig } from "./BuildConfig";
 import { quit } from "./Utils";
@@ -407,6 +407,14 @@ export class BrowserWindow<T extends RPCWithTransport = RPCWithTransport> {
 	getSize(): { width: number; height: number } {
 		const frame = this.getFrame();
 		return { width: frame.width, height: frame.height };
+	}
+
+	print(): boolean {
+		return this.webview?.print() ?? false;
+	}
+
+	savePageAs(options: BrowserViewSavePageOptions = {}): boolean {
+		return this.webview?.savePageAs(options) ?? false;
 	}
 
 	/**

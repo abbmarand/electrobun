@@ -12,8 +12,7 @@ export function emitWebviewEvent(eventName: string, detail: string) {
 	setTimeout(() => {
 		// Prefer eventBridge (available on all webviews), fall back to internalBridge
 		// (for backwards compatibility until native code adds eventBridge handler)
-		const bridge =
-			window.__electrobunEventBridge || window.__electrobunInternalBridge;
+		const bridge = window.__electrobunEventBridge || window.__electrobunInternalBridge;
 		bridge?.postMessage(
 			JSON.stringify({
 				id: "webviewEvent",
@@ -21,15 +20,31 @@ export function emitWebviewEvent(eventName: string, detail: string) {
 				payload: {
 					id: window.__electrobunWebviewId,
 					eventName,
-					detail,
-				},
-			}),
+					detail
+				}
+			})
 		);
 	});
 }
 
 // Set up standard lifecycle event listeners
 export function initLifecycleEvents() {
+	function emitInPageNavigation() {
+		emitWebviewEvent("did-navigate-in-page", window.location.href);
+	}
+
+	function wrapHistoryMethod(method: "pushState" | "replaceState") {
+		const original = history[method];
+		history[method] = function (data: unknown, unused: string, url?: string | URL | null) {
+			const result = original.call(history, data, unused, url);
+			emitInPageNavigation();
+			return result;
+		};
+	}
+
+	wrapHistoryMethod("pushState");
+	wrapHistoryMethod("replaceState");
+
 	// Emit dom-ready when page loads (top-level window only)
 	window.addEventListener("load", () => {
 		if (window === window.top) {
@@ -39,123 +54,65 @@ export function initLifecycleEvents() {
 
 	// Track in-page navigation
 	window.addEventListener("popstate", () => {
-		emitWebviewEvent("did-navigate-in-page", window.location.href);
+		emitInPageNavigation();
 	});
 
 	window.addEventListener("hashchange", () => {
-		emitWebviewEvent("did-navigate-in-page", window.location.href);
+		emitInPageNavigation();
 	});
 }
 
-// Track cmd key state for SPA navigation detection
-let cmdKeyHeld = false;
-let cmdKeyTimestamp = 0;
-const CMD_KEY_THRESHOLD_MS = 500;
+function getModifierFlags(event: MouseEvent): number {
+	let flags = 0;
+	if (event.shiftKey) flags |= 1;
+	if (event.ctrlKey) flags |= 2;
+	if (event.altKey) flags |= 4;
+	if (event.metaKey) flags |= 8;
+	return flags;
+}
 
-export function isCmdHeld(): boolean {
-	if (cmdKeyHeld) return true;
-	return (
-		Date.now() - cmdKeyTimestamp < CMD_KEY_THRESHOLD_MS && cmdKeyTimestamp > 0
-	);
+function isNativeMacWebKit(): boolean {
+	return window.__electrobunPlatform === "darwin" && window.__electrobunRenderer === "native";
+}
+
+function closestAnchor(target: EventTarget | null): HTMLAnchorElement | null {
+	if (!(target instanceof Element)) return null;
+	const anchor = target.closest("a[href]");
+	return anchor instanceof HTMLAnchorElement ? anchor : null;
 }
 
 // Set up cmd+click detection for opening links in new windows
 export function initCmdClickHandling() {
-	window.addEventListener(
-		"keydown",
-		(event) => {
-			if (event.key === "Meta" || event.metaKey) {
-				cmdKeyHeld = true;
-				cmdKeyTimestamp = Date.now();
-			}
-		},
-		true,
-	);
-
-	window.addEventListener(
-		"keyup",
-		(event) => {
-			if (event.key === "Meta") {
-				cmdKeyHeld = false;
-				cmdKeyTimestamp = Date.now();
-			}
-		},
-		true,
-	);
-
-	window.addEventListener("blur", () => {
-		cmdKeyHeld = false;
-	});
+	if (isNativeMacWebKit()) return;
 
 	// Intercept cmd+clicks on anchors before SPA frameworks can handle them
 	window.addEventListener(
 		"click",
 		(event) => {
-			if (event.metaKey || event.ctrlKey) {
-				const anchor = (event.target as HTMLElement)?.closest?.("a");
-				if (anchor && (anchor as HTMLAnchorElement).href) {
-					event.preventDefault();
-					event.stopPropagation();
-					event.stopImmediatePropagation();
-					emitWebviewEvent(
-						"new-window-open",
-						JSON.stringify({
-							url: (anchor as HTMLAnchorElement).href,
-							isCmdClick: true,
-							isSPANavigation: false,
-						}),
-					);
-				}
-			}
+			if (!event.metaKey && !event.ctrlKey) return;
+			const anchor = closestAnchor(event.target);
+			if (!anchor?.href) return;
+
+			event.preventDefault();
+			event.stopPropagation();
+			event.stopImmediatePropagation();
+			emitWebviewEvent(
+				"new-window-open",
+				JSON.stringify({
+					source: "preload-anchor",
+					url: anchor.href,
+					isCmdClick: true,
+					isSPANavigation: false,
+					navigationType: "link-activated",
+					modifierFlags: getModifierFlags(event),
+					isUserGesture: event.isTrusted,
+					targetFrame: "main-frame",
+					button: event.button
+				})
+			);
 		},
-		true,
+		true
 	);
-}
-
-// Intercept SPA navigation (history.pushState/replaceState) when cmd is held
-export function initSPANavigationInterception() {
-	const originalPushState = history.pushState;
-	const originalReplaceState = history.replaceState;
-
-	history.pushState = function (
-		state: unknown,
-		title: string,
-		url?: string | URL | null,
-	) {
-		if (isCmdHeld() && url) {
-			const resolvedUrl = new URL(String(url), window.location.href).href;
-			emitWebviewEvent(
-				"new-window-open",
-				JSON.stringify({
-					url: resolvedUrl,
-					isCmdClick: true,
-					isSPANavigation: true,
-				}),
-			);
-			return;
-		}
-		return originalPushState.apply(this, [state, title, url]);
-	};
-
-	history.replaceState = function (
-		state: unknown,
-		title: string,
-		url?: string | URL | null,
-	) {
-		if (isCmdHeld() && url) {
-			const resolvedUrl = new URL(String(url), window.location.href).href;
-			emitWebviewEvent(
-				"new-window-open",
-				JSON.stringify({
-					url: resolvedUrl,
-					isCmdClick: true,
-					isSPANavigation: true,
-				}),
-			);
-			return;
-		}
-		return originalReplaceState.apply(this, [state, title, url]);
-	};
 }
 
 // Prevent overscroll bounce effect
@@ -163,9 +120,7 @@ export function initOverscrollPrevention() {
 	document.addEventListener("DOMContentLoaded", () => {
 		const style = document.createElement("style");
 		style.type = "text/css";
-		style.appendChild(
-			document.createTextNode("html, body { overscroll-behavior: none; }"),
-		);
+		style.appendChild(document.createTextNode("html, body { overscroll-behavior: none; }"));
 		document.head.appendChild(style);
 	});
 }

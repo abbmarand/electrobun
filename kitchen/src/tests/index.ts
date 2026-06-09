@@ -18,6 +18,7 @@ import { preloadTests } from "./preload.test";
 import { updaterTests } from "./updater.test";
 import { sandboxTests } from "./sandbox.test";
 import { trayApiTests } from "./tray-api.test";
+import { authBrowserRegressionTests } from "./auth-browser-regression.test";
 
 // Interactive tests
 import { dialogTests } from "./interactive/dialogs.test";
@@ -36,43 +37,46 @@ import { wgpuViewTests } from "./interactive/wgpu-view.test";
 import { wgpuTagTests } from "./interactive/wgpu-tag.test";
 import { fullsizeFrameReproTests } from "./interactive/fullsize-frame-repro.test";
 import { permissionTests } from "./interactive/permissions.test";
+import { fullscreenPipTests } from "./interactive/fullscreen-pip.test";
 
 // Collect all tests
 export const allTests: TestDefinition[] = [
-  // Automated tests (run in parallel)
-  ...rpcTests,
-  ...windowTests,
-  ...navigationTests,
-  ...utilsTests,
-  ...screenTests,
-  ...sessionTests,
-  ...eventsTests,
-  ...preloadTests,
-  ...updaterTests,
-  ...sandboxTests,
-  ...trayApiTests,
-  ...wgpuFfiTests,
-  ...wgpuAdapterTests,
-  ...babylonAdapterTests,
-  ...wgpuAdapterExtendedTests,
+	// Automated tests (run in parallel)
+	...rpcTests,
+	...windowTests,
+	...navigationTests,
+	...utilsTests,
+	...screenTests,
+	...sessionTests,
+	...eventsTests,
+	...preloadTests,
+	...updaterTests,
+	...sandboxTests,
+	...trayApiTests,
+	...authBrowserRegressionTests,
+	...wgpuFfiTests,
+	...wgpuAdapterTests,
+	...babylonAdapterTests,
+	...wgpuAdapterExtendedTests,
 
-  // Interactive tests (run sequentially, require user)
-  ...dialogTests,
-  ...trayTests,
-  ...shortcutTests,
-  ...webviewTagTests,
-  ...clipboardInteractiveTests,
-  ...menuTests,
-  ...windowEventTests,
-  ...chromelessTests,
-  ...multiwindowCefTests,
-  ...quitTests,
-  ...webviewSettingsTests,
-  ...webviewCleanupTests,
-  ...wgpuViewTests,
-  ...wgpuTagTests,
-  ...fullsizeFrameReproTests,
-  ...permissionTests,
+	// Interactive tests (run sequentially, require user)
+	...dialogTests,
+	...trayTests,
+	...shortcutTests,
+	...webviewTagTests,
+	...clipboardInteractiveTests,
+	...menuTests,
+	...windowEventTests,
+	...chromelessTests,
+	...multiwindowCefTests,
+	...quitTests,
+	...webviewSettingsTests,
+	...webviewCleanupTests,
+	...wgpuViewTests,
+	...wgpuTagTests,
+	...fullsizeFrameReproTests,
+	...permissionTests,
+	...fullscreenPipTests
 ];
 
 // Export by category for selective running
@@ -81,35 +85,37 @@ export const interactiveTests: TestDefinition[] = allTests.filter((t) => t.inter
 
 // Export individual test suites for reference
 export {
-  rpcTests,
-  windowTests,
-  navigationTests,
-  utilsTests,
-  screenTests,
-  sessionTests,
-  eventsTests,
-  preloadTests,
-  updaterTests,
-  sandboxTests,
-  trayApiTests,
-  wgpuFfiTests,
-  wgpuAdapterTests,
-  babylonAdapterTests,
-  wgpuAdapterExtendedTests,
-  dialogTests,
-  trayTests,
-  shortcutTests,
-  webviewTagTests,
-  clipboardInteractiveTests,
-  menuTests,
-  windowEventTests,
-  chromelessTests,
-  multiwindowCefTests,
-  quitTests,
-  webviewSettingsTests,
-  webviewCleanupTests,
-  wgpuViewTests,
-  wgpuTagTests,
-  fullsizeFrameReproTests,
-  permissionTests,
+	rpcTests,
+	windowTests,
+	navigationTests,
+	utilsTests,
+	screenTests,
+	sessionTests,
+	eventsTests,
+	preloadTests,
+	updaterTests,
+	sandboxTests,
+	trayApiTests,
+	authBrowserRegressionTests,
+	wgpuFfiTests,
+	wgpuAdapterTests,
+	babylonAdapterTests,
+	wgpuAdapterExtendedTests,
+	dialogTests,
+	trayTests,
+	shortcutTests,
+	webviewTagTests,
+	clipboardInteractiveTests,
+	menuTests,
+	windowEventTests,
+	chromelessTests,
+	multiwindowCefTests,
+	quitTests,
+	webviewSettingsTests,
+	webviewCleanupTests,
+	wgpuViewTests,
+	wgpuTagTests,
+	fullsizeFrameReproTests,
+	permissionTests,
+	fullscreenPipTests
 };

@@ -65,6 +65,11 @@ const PERMISSION_PAGE_HTML = `<!DOCTYPE html>
   <button id="mic">Microphone<br><code>navigator.mediaDevices.getUserMedia({audio:true})</code></button>
   <button id="notify">Notifications<br><code>Notification.requestPermission()</code></button>
 
+  <h2>Display media</h2>
+  <button id="display-screen">Screen video<br><code>navigator.mediaDevices.getDisplayMedia({video:true})</code></button>
+  <button id="display-window">Window preferred video<br><code>navigator.mediaDevices.getDisplayMedia({video:{displaySurface:'window'}})</code></button>
+  <button id="display-audio">Screen video and audio<br><code>navigator.mediaDevices.getDisplayMedia({video:true,audio:true})</code></button>
+
   <h2>Chromium-only</h2>
   <button id="midi">MIDI sysex<br><code>navigator.requestMIDIAccess({sysex:true})</code></button>
   <button id="idle">Idle detection<br><code>IdleDetector.requestPermission()</code></button>
@@ -90,6 +95,36 @@ const PERMISSION_PAGE_HTML = `<!DOCTYPE html>
       return;
     }
     btn.addEventListener('click', handler);
+  }
+
+  function getDisplayMedia() {
+    if (!navigator.mediaDevices || typeof navigator.mediaDevices.getDisplayMedia !== 'function') return null;
+    return navigator.mediaDevices.getDisplayMedia.bind(navigator.mediaDevices);
+  }
+
+  function describeTrack(track) {
+    const settings = typeof track.getSettings === 'function' ? track.getSettings() : {};
+    const details = [];
+    if (settings.displaySurface) details.push('displaySurface=' + settings.displaySurface);
+    if (settings.width && settings.height) details.push(settings.width + 'x' + settings.height);
+    return track.kind + ' "' + (track.label || 'unlabeled') + '"' + (details.length ? ' (' + details.join(', ') + ')' : '');
+  }
+
+  async function requestDisplayMedia(label, constraints) {
+    const callGetDisplayMedia = getDisplayMedia();
+    if (!callGetDisplayMedia) {
+      log('Requesting ' + label + '... unavailable: getDisplayMedia is not exposed');
+      return;
+    }
+
+    log('Requesting ' + label + '...');
+    try {
+      const stream = await callGetDisplayMedia(constraints);
+      log('  → granted: ' + stream.getTracks().map(describeTrack).join('; '));
+      stream.getTracks().forEach((t) => t.stop());
+    } catch (e) {
+      log('  → denied/error: ' + (e && e.name ? e.name + ': ' : '') + (e && e.message || e));
+    }
   }
 
   setup('geo',
@@ -142,6 +177,21 @@ const PERMISSION_PAGE_HTML = `<!DOCTYPE html>
         log('  → error: ' + (e && e.message || e));
       }
     },
+  );
+
+  setup('display-screen',
+    !!getDisplayMedia(),
+    () => requestDisplayMedia('screen video', { video: true, audio: false }),
+  );
+
+  setup('display-window',
+    !!getDisplayMedia(),
+    () => requestDisplayMedia('window preferred video', { video: { displaySurface: 'window' }, audio: false }),
+  );
+
+  setup('display-audio',
+    !!getDisplayMedia(),
+    () => requestDisplayMedia('screen video and audio', { video: true, audio: true }),
   );
 
   setup('midi',

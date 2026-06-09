@@ -1,6 +1,14 @@
 import electobunEventEmmitter from "./events/eventEmitter";
 import { BrowserWindow, type WindowOptionsType } from "./core/BrowserWindow";
-import { BrowserView, type BrowserViewOptions } from "./core/BrowserView";
+import {
+	BrowserView,
+	type BrowserPermissionPlatform,
+	type BrowserPermissionRequestEvent,
+	type BrowserPermissionRequestDetail,
+	type BrowserPermissionResponseDecision,
+	type BrowserPermissionType,
+	type BrowserViewOptions
+} from "./core/BrowserView";
 import { GpuWindow, type GpuWindowOptionsType } from "./core/GpuWindow";
 import { WGPUView, type WGPUViewOptions } from "./core/WGPUView";
 import { Tray, type TrayOptions } from "./core/Tray";
@@ -10,19 +18,15 @@ import {
 	Updater,
 	type UpdateStatusType,
 	type UpdateStatusEntry,
-	type UpdateStatusDetails,
+	type UpdateStatusDetails
 } from "./core/Updater";
 import * as Utils from "./core/Utils";
-import type {
-	MessageBoxOptions,
-	MessageBoxResponse,
-	NotificationOptions,
-} from "./core/Utils";
+import type { MessageBoxOptions, MessageBoxResponse, NotificationOptions } from "./core/Utils";
 import {
 	type RPCSchema,
 	type ElectrobunRPCSchema,
 	createRPC,
-	defineElectrobunRPC,
+	defineElectrobunRPC
 } from "../shared/rpc.js";
 import type ElectrobunEvent from "./events/event";
 import * as PATHS from "./core/Paths";
@@ -41,16 +45,26 @@ import type {
 	CookieFilter,
 	StorageType,
 	MenuItemConfig,
-	ApplicationMenuItemConfig,
+	ApplicationMenuItemConfig
 } from "./proc/native";
 import { BuildConfig, type BuildConfigType } from "./core/BuildConfig";
 import { bridge, hasFFI } from "./proc/native";
 
 // Carrot boot state — populated from __bunnyCarrotBootstrap injected by Bunny Ears
 let _carrotManifest: Record<string, unknown> | null = null;
-let _carrotContext: { currentDir?: string; statePath?: string; logsPath?: string; permissions?: string[]; grantedPermissions?: Record<string, unknown>; authToken?: string | null; channel?: string } | null = null;
+let _carrotContext: {
+	currentDir?: string;
+	statePath?: string;
+	logsPath?: string;
+	permissions?: string[];
+	grantedPermissions?: Record<string, unknown>;
+	authToken?: string | null;
+	channel?: string;
+} | null = null;
 
-const _bootstrap = (globalThis as any).__bunnyCarrotBootstrap as { manifest?: any; context?: any } | undefined;
+const _bootstrap = (globalThis as any).__bunnyCarrotBootstrap as
+	| { manifest?: any; context?: any }
+	| undefined;
 if (_bootstrap) {
 	_carrotManifest = _bootstrap.manifest ?? null;
 	_carrotContext = _bootstrap.context ?? null;
@@ -91,30 +105,58 @@ export const Carrots = {
 		carrotId: string,
 		method: string,
 		params?: unknown,
-		options?: { windowId?: string },
+		options?: { windowId?: string }
 	): Promise<T> {
-		if (!bridge) throw new Error("Carrots.invoke() is only available when running as a carrot inside Bunny Ears");
-		return bridge.requestHost<T>("invoke-carrot", { carrotId, method, params, windowId: options?.windowId });
+		if (!bridge)
+			throw new Error(
+				"Carrots.invoke() is only available when running as a carrot inside Bunny Ears"
+			);
+		return bridge.requestHost<T>("invoke-carrot", {
+			carrotId,
+			method,
+			params,
+			windowId: options?.windowId
+		});
 	},
 	emit(carrotId: string, name: string, payload?: unknown) {
-		if (!bridge) throw new Error("Carrots.emit() is only available when running as a carrot inside Bunny Ears");
+		if (!bridge)
+			throw new Error(
+				"Carrots.emit() is only available when running as a carrot inside Bunny Ears"
+			);
 		bridge.sendAction("emit-carrot-event", { carrotId, name, payload });
 	},
 	async list() {
-		if (!bridge) throw new Error("Carrots.list() is only available when running as a carrot inside Bunny Ears");
-		return bridge.requestHost<Array<{
-			id: string; name: string; description: string; version: string;
-			mode: string; permissions: string[]; status: string; devMode: boolean;
-		}>>("list-carrots");
+		if (!bridge)
+			throw new Error(
+				"Carrots.list() is only available when running as a carrot inside Bunny Ears"
+			);
+		return bridge.requestHost<
+			Array<{
+				id: string;
+				name: string;
+				description: string;
+				version: string;
+				mode: string;
+				permissions: string[];
+				status: string;
+				devMode: boolean;
+			}>
+		>("list-carrots");
 	},
 	async start(carrotId: string) {
-		if (!bridge) throw new Error("Carrots.start() is only available when running as a carrot inside Bunny Ears");
+		if (!bridge)
+			throw new Error(
+				"Carrots.start() is only available when running as a carrot inside Bunny Ears"
+			);
 		return bridge.requestHost<{ ok: boolean }>("start-carrot", { id: carrotId });
 	},
 	async stop(carrotId: string) {
-		if (!bridge) throw new Error("Carrots.stop() is only available when running as a carrot inside Bunny Ears");
+		if (!bridge)
+			throw new Error(
+				"Carrots.stop() is only available when running as a carrot inside Bunny Ears"
+			);
 		return bridge.requestHost<{ ok: boolean }>("stop-carrot", { id: carrotId });
-	},
+	}
 };
 
 export const app = {
@@ -178,8 +220,11 @@ export const app = {
 	},
 	async getWindowFrame(windowId?: string) {
 		if (!bridge) return null;
-		return bridge.requestHost<{ x: number; y: number; width: number; height: number } | null>("window-get-frame", { windowId });
-	},
+		return bridge.requestHost<{ x: number; y: number; width: number; height: number } | null>(
+			"window-get-frame",
+			{ windowId }
+		);
+	}
 };
 
 const ContentBlocker = {
@@ -209,7 +254,7 @@ const ContentBlocker = {
 	},
 	getLoadFailureCount(): number {
 		return ffi.request.getContentBlockerLoadFailureCount();
-	},
+	}
 };
 
 // Named Exports
@@ -221,6 +266,11 @@ export {
 	type BuildConfigType,
 	type WindowOptionsType,
 	type BrowserViewOptions,
+	type BrowserPermissionPlatform,
+	type BrowserPermissionRequestEvent,
+	type BrowserPermissionRequestDetail,
+	type BrowserPermissionResponseDecision,
+	type BrowserPermissionType,
 	type GpuWindowOptionsType,
 	type WGPUViewOptions,
 	type TrayOptions,
@@ -260,9 +310,8 @@ export {
 	Screen,
 	Session,
 	WGPUBridge,
-
 	BuildConfig,
-	ContentBlocker,
+	ContentBlocker
 };
 
 // Default Export
@@ -290,7 +339,7 @@ const Electrobun = {
 	WGPU,
 	webgpu,
 	three,
-	babylon,
+	babylon
 };
 
 // Electrobun

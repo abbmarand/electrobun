@@ -64,6 +64,7 @@ struct DownloadEvent {
         }
         if (!destinationPath.empty()) {
             ss << ",\"destinationPath\":\"" << escapeJson(destinationPath) << "\"";
+            ss << ",\"path\":\"" << escapeJson(destinationPath) << "\"";
         }
 
         ss << ",\"totalBytes\":" << totalBytes;
