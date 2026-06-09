@@ -374,6 +374,10 @@ export const native = (() => {
 				args: [FFIType.ptr],
 				returns: FFIType.void
 			},
+			webviewCancelDownload: {
+				args: [FFIType.ptr, FFIType.u32],
+				returns: FFIType.void
+			},
 			webviewRemove: {
 				args: [FFIType.ptr],
 				returns: FFIType.void

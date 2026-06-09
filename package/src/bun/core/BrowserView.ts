@@ -423,6 +423,10 @@ export class BrowserView<T extends RPCWithTransport = RPCWithTransport> {
 		native!.symbols.webviewReload(this.ptr);
 	}
 
+	cancelDownload(downloadId: number) {
+		native!.symbols.webviewCancelDownload(this.ptr, downloadId);
+	}
+
 	canGoBack(): boolean {
 		return native!.symbols.webviewCanGoBack(this.ptr);
 	}

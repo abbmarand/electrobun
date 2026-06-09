@@ -8398,6 +8398,12 @@ ELECTROBUN_EXPORT void webviewReload(AbstractView* abstractView) {
     }
 }
 
+ELECTROBUN_EXPORT void webviewCancelDownload(AbstractView* abstractView, uint32_t downloadId) {
+    // Download cancellation is currently only implemented on macOS.
+    (void)abstractView;
+    (void)downloadId;
+}
+
 ELECTROBUN_EXPORT void webviewRemove(AbstractView* abstractView) {
     if (abstractView) {
         // Get the webview ID before scheduling async removal

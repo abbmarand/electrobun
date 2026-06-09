@@ -9072,8 +9072,14 @@ ELECTROBUN_EXPORT void webviewReload(AbstractView *abstractView) {
         ::log("ERROR: Invalid AbstractView or webview in webviewReload");
         return;
     }
-    
+
     abstractView->reload();
+}
+
+ELECTROBUN_EXPORT void webviewCancelDownload(AbstractView *abstractView, uint32_t downloadId) {
+    // Download cancellation is currently only implemented on macOS.
+    (void)abstractView;
+    (void)downloadId;
 }
 
 ELECTROBUN_EXPORT void webviewRemove(AbstractView *abstractView) {

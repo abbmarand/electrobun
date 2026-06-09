@@ -1081,6 +1081,7 @@ static NSMutableDictionary<NSString *, NativePopupWindowController *> *globalNam
     @property (nonatomic, strong) NSMutableDictionary<NSValue *, NSString *> *downloadMimeTypes;
     @property (nonatomic, strong) NSMutableDictionary<NSValue *, NSNumber *> *downloadTotalBytes;
     @property (nonatomic, strong) NSMutableSet<WKDownload *> *observedDownloads;
+    - (BOOL)cancelDownloadWithId:(uint32_t)downloadId API_AVAILABLE(macos(11.3));
     - (void)detectAndApplyThemeColor:(WKWebView *)webView;
 @end
 
@@ -2696,6 +2697,74 @@ extern "C" void webviewRespondToPermissionRequest(const char *requestId, const c
         [self.downloadUrls removeObjectForKey:key];
         [self.downloadMimeTypes removeObjectForKey:key];
         [self.downloadTotalBytes removeObjectForKey:key];
+    }
+
+    - (WKDownload *)downloadForId:(uint32_t)downloadId API_AVAILABLE(macos(11.3)) {
+        for (NSValue *key in self.downloadIds) {
+            NSNumber *candidate = [self.downloadIds objectForKey:key];
+            if (candidate && [candidate unsignedIntValue] == downloadId) {
+                return (WKDownload *)[key nonretainedObjectValue];
+            }
+        }
+        return nil;
+    }
+
+    - (BOOL)cancelDownloadWithId:(uint32_t)downloadId API_AVAILABLE(macos(11.3)) {
+        WKDownload *download = [self downloadForId:downloadId];
+        if (!download) {
+            NSLog(@"DEBUG WKWebView Download: Cancel requested for unknown download %u", downloadId);
+            return NO;
+        }
+
+        // Remove KVO observer before the download stops reporting progress
+        if ([self.observedDownloads containsObject:download]) {
+            [download.progress removeObserver:self forKeyPath:@"fractionCompleted"];
+            [self.observedDownloads removeObject:download];
+        }
+
+        NSLog(@"DEBUG WKWebView Download: Canceling download %u", downloadId);
+        __weak MyNavigationDelegate *weakSelf = self;
+        [download cancel:^(NSData *resumeData) {
+            MyNavigationDelegate *strongSelf = weakSelf;
+            if (!strongSelf) return;
+
+            // Skip the cancel event if the download already reported failure
+            NSValue *downloadKey = [strongSelf downloadKey:download];
+            if (!strongSelf.downloadIds || ![strongSelf.downloadIds objectForKey:downloadKey]) return;
+
+            // Send download-failed event so listeners see the canceled state
+            if (strongSelf.zigEventHandler) {
+                NSString *path = [strongSelf.downloadPaths objectForKey:downloadKey] ?: @"";
+                NSString *filename = [path lastPathComponent] ?: @"";
+                NSString *sourceUrl = [strongSelf.downloadUrls objectForKey:downloadKey] ?: @"";
+                NSString *mimeType = [strongSelf.downloadMimeTypes objectForKey:downloadKey] ?: @"";
+                long long totalBytes = [[strongSelf.downloadTotalBytes objectForKey:downloadKey] longLongValue];
+                long long receivedBytes = download.progress.completedUnitCount;
+                if (receivedBytes < 0) receivedBytes = 0;
+                NSString *eventData = jsonStringFromObject(@{
+                    @"downloadId": @(downloadId),
+                    @"filename": filename,
+                    @"path": path,
+                    @"destinationPath": path,
+                    @"url": sourceUrl,
+                    @"mimeType": mimeType,
+                    @"totalBytes": @(totalBytes),
+                    @"receivedBytes": @(receivedBytes),
+                    @"percentComplete": @((int)(download.progress.fractionCompleted * 100)),
+                    @"progress": @((int)(download.progress.fractionCompleted * 100)),
+                    @"canResume": @(resumeData != nil),
+                    @"error": @"Download canceled",
+                    @"errorMessage": @"Download canceled",
+                    @"errorDomain": NSURLErrorDomain,
+                    @"errorCode": @(NSURLErrorCancelled)
+                });
+                strongSelf.zigEventHandler(strongSelf.webviewId, strdup("download-failed"), strdup([eventData UTF8String]));
+            }
+
+            // Clean up
+            [strongSelf cleanupDownloadMetadata:download];
+        }];
+        return YES;
     }
 
     - (void)webView:(WKWebView *)webView
@@ -8808,6 +8877,30 @@ extern "C" void webviewReload(AbstractView *abstractView) {
     
     dispatch_async(dispatch_get_main_queue(), ^{
         [abstractView reload];
+    });
+}
+
+extern "C" void webviewCancelDownload(AbstractView *abstractView, uint32_t downloadId) {
+    if (!abstractView) {
+        NSLog(@"webviewCancelDownload: abstractView is null");
+        return;
+    }
+
+    // Check if webview still exists in global tracking
+    if (!globalAbstractViews[@(abstractView.webviewId)]) {
+        NSLog(@"webviewCancelDownload: webview %u not in tracking, skipping", abstractView.webviewId);
+        return;
+    }
+
+    dispatch_async(dispatch_get_main_queue(), ^{
+        if (@available(macOS 11.3, *)) {
+            if (![abstractView isKindOfClass:[WKWebViewImpl class]]) return;
+            WKWebViewImpl *wkImpl = (WKWebViewImpl *)abstractView;
+            if (!wkImpl.webView) return;
+            id navigationDelegate = wkImpl.webView.navigationDelegate;
+            if (![navigationDelegate isKindOfClass:[MyNavigationDelegate class]]) return;
+            [(MyNavigationDelegate *)navigationDelegate cancelDownloadWithId:downloadId];
+        }
     });
 }
 
