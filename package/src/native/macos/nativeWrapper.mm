@@ -3585,6 +3585,270 @@ static void showWebviewSaveFailure(NSError *error) {
     }
 @end
 
+// =============================================================================
+// NativePermissionSheet — native AppKit permission prompt
+// =============================================================================
+
+static NSMutableSet<id> *gActivePermissionSheets = nil;
+
+@interface NativePermissionSheetController : NSObject
+@property (nonatomic, copy) NSString *requestId;
+@property (nonatomic) WebviewEventHandler eventHandler;
+@property (nonatomic) uint32_t webviewId;
+@property (nonatomic, strong) NSWindow *sheet;
+@end
+
+@implementation NativePermissionSheetController
+
+- (instancetype)initWithRequestId:(NSString *)requestId
+                           origin:(NSString *)origin
+                       faviconUrl:(NSString *)faviconUrl
+                  permissionsJson:(NSString *)permissionsJson
+                     eventHandler:(WebviewEventHandler)eventHandler
+                        webviewId:(uint32_t)webviewId {
+    self = [super init];
+    if (!self) return nil;
+    self.requestId = requestId;
+    self.eventHandler = eventHandler;
+    self.webviewId = webviewId;
+
+    // Parse origin / permissions
+    NSURL *originUrl = [NSURL URLWithString:origin];
+    NSString *host = originUrl.host ?: origin;
+    NSData *jsonData = [permissionsJson dataUsingEncoding:NSUTF8StringEncoding];
+    NSArray *permissions = ([NSJSONSerialization JSONObjectWithData:jsonData options:0 error:nil]) ?: @[];
+
+    // ----- Build sheet window -----
+    CGFloat W = 360;
+    NSWindow *sheet = [[NSWindow alloc]
+        initWithContentRect:NSMakeRect(0, 0, W, 200)
+                  styleMask:NSWindowStyleMaskTitled | NSWindowStyleMaskClosable
+                    backing:NSBackingStoreBuffered
+                      defer:NO];
+    sheet.title = @"";
+    sheet.titleVisibility = NSWindowTitleHidden;
+    sheet.titlebarAppearsTransparent = YES;
+    sheet.movableByWindowBackground = NO;
+    self.sheet = sheet;
+
+    // Root stack (vertical, full width)
+    NSStackView *root = [[NSStackView alloc] initWithFrame:NSMakeRect(0, 0, W, 200)];
+    root.orientation = NSUserInterfaceLayoutOrientationVertical;
+    root.alignment = NSLayoutAttributeLeft;
+    root.spacing = 0;
+    root.edgeInsets = NSEdgeInsetsMake(20, 20, 16, 20);
+    sheet.contentView = root;
+    [root setHuggingPriority:NSLayoutPriorityRequired forOrientation:NSLayoutConstraintOrientationVertical];
+
+    // ---- Header row: icon + labels ----
+    NSStackView *header = [NSStackView stackViewWithViews:@[]];
+    header.orientation = NSUserInterfaceLayoutOrientationHorizontal;
+    header.alignment = NSLayoutAttributeTop;
+    header.spacing = 12;
+
+    // Site icon — colored rounded square with initial
+    NSTextField *iconBox = [NSTextField labelWithString:host.length ? [host.uppercaseString substringToIndex:1] : @"?"];
+    iconBox.font = [NSFont systemFontOfSize:18 weight:NSFontWeightSemibold];
+    iconBox.textColor = NSColor.whiteColor;
+    iconBox.alignment = NSTextAlignmentCenter;
+    iconBox.wantsLayer = YES;
+    iconBox.layer.cornerRadius = 8;
+    iconBox.layer.masksToBounds = YES;
+    // Deterministic color from host hash
+    const char *hostCStr = host.UTF8String ?: "";
+    NSUInteger h = 5381;
+    for (NSUInteger i = 0; hostCStr[i]; i++) h = h * 33 ^ (unsigned char)hostCStr[i];
+    CGFloat hue = (CGFloat)(h % 360) / 360.0;
+    iconBox.layer.backgroundColor = [NSColor colorWithHue:hue saturation:0.6 brightness:0.75 alpha:1].CGColor;
+    [iconBox setFrameSize:NSMakeSize(40, 40)];
+    [iconBox addConstraint:[NSLayoutConstraint constraintWithItem:iconBox attribute:NSLayoutAttributeWidth relatedBy:NSLayoutRelationEqual toItem:nil attribute:NSLayoutAttributeNotAnAttribute multiplier:1 constant:40]];
+    [iconBox addConstraint:[NSLayoutConstraint constraintWithItem:iconBox attribute:NSLayoutAttributeHeight relatedBy:NSLayoutRelationEqual toItem:nil attribute:NSLayoutAttributeNotAnAttribute multiplier:1 constant:40]];
+
+    // Labels column
+    NSStackView *labels = [NSStackView stackViewWithViews:@[]];
+    labels.orientation = NSUserInterfaceLayoutOrientationVertical;
+    labels.alignment = NSLayoutAttributeLeft;
+    labels.spacing = 3;
+
+    NSTextField *titleLabel = [NSTextField labelWithString:[NSString stringWithFormat:@"“%@” would like to access:", host]];
+    titleLabel.font = [NSFont systemFontOfSize:13 weight:NSFontWeightSemibold];
+    titleLabel.lineBreakMode = NSLineBreakByWordWrapping;
+    titleLabel.maximumNumberOfLines = 2;
+    [titleLabel setContentCompressionResistancePriority:NSLayoutPriorityDefaultLow forOrientation:NSLayoutConstraintOrientationHorizontal];
+
+    // Permission chips (horizontal wrap-ish stack)
+    NSStackView *chips = [NSStackView stackViewWithViews:@[]];
+    chips.orientation = NSUserInterfaceLayoutOrientationHorizontal;
+    chips.alignment = NSLayoutAttributeCenterY;
+    chips.spacing = 6;
+
+    for (NSString *perm in permissions) {
+        NSString *label = nil;
+        NSString *sym = nil;
+        if ([perm isEqualToString:@"camera"])        { label = @"Camera";       sym = @"camera"; }
+        else if ([perm isEqualToString:@"microphone"])  { label = @"Microphone";   sym = @"mic"; }
+        else if ([perm isEqualToString:@"geolocation"]) { label = @"Location";     sym = @"location"; }
+        else if ([perm isEqualToString:@"notifications"]) { label = @"Notifications"; sym = @"bell"; }
+        else if ([perm isEqualToString:@"clipboardRead"])  { label = @"Read Clipboard"; sym = @"doc.on.clipboard"; }
+        else if ([perm isEqualToString:@"clipboardWrite"]) { label = @"Clipboard"; sym = @"doc.on.clipboard"; }
+        else if ([perm isEqualToString:@"screen"]) { label = @"Screen"; sym = @"display"; }
+        else if ([perm isEqualToString:@"midi"])   { label = @"MIDI";   sym = @"music.note"; }
+        else { label = perm; sym = @"lock.shield"; }
+
+        NSStackView *chip = [NSStackView stackViewWithViews:@[]];
+        chip.orientation = NSUserInterfaceLayoutOrientationHorizontal;
+        chip.alignment = NSLayoutAttributeCenterY;
+        chip.spacing = 4;
+        chip.edgeInsets = NSEdgeInsetsMake(4, 8, 4, 8);
+        chip.wantsLayer = YES;
+        chip.layer.cornerRadius = 6;
+        chip.layer.borderWidth = 1;
+        chip.layer.borderColor = [NSColor separatorColor].CGColor;
+        chip.layer.backgroundColor = [NSColor controlBackgroundColor].CGColor;
+
+        NSImageView *symView = [[NSImageView alloc] init];
+        NSImage *img = [NSImage imageWithSystemSymbolName:sym accessibilityDescription:nil];
+        NSImageSymbolConfiguration *cfg = [NSImageSymbolConfiguration configurationWithPointSize:11 weight:NSFontWeightRegular];
+        symView.image = [img imageWithSymbolConfiguration:cfg];
+        symView.contentTintColor = [NSColor secondaryLabelColor];
+        [symView setFrameSize:NSMakeSize(14, 14)];
+        [symView addConstraint:[NSLayoutConstraint constraintWithItem:symView attribute:NSLayoutAttributeWidth relatedBy:NSLayoutRelationEqual toItem:nil attribute:NSLayoutAttributeNotAnAttribute multiplier:1 constant:14]];
+        [symView addConstraint:[NSLayoutConstraint constraintWithItem:symView attribute:NSLayoutAttributeHeight relatedBy:NSLayoutRelationEqual toItem:nil attribute:NSLayoutAttributeNotAnAttribute multiplier:1 constant:14]];
+
+        NSTextField *chipLabel = [NSTextField labelWithString:label];
+        chipLabel.font = [NSFont systemFontOfSize:12];
+        [chip addArrangedSubview:symView];
+        [chip addArrangedSubview:chipLabel];
+        [chips addArrangedSubview:chip];
+    }
+
+    [labels addArrangedSubview:titleLabel];
+    [labels addArrangedSubview:chips];
+    [labels setHuggingPriority:NSLayoutPriorityDefaultLow forOrientation:NSLayoutConstraintOrientationHorizontal];
+
+    [header addArrangedSubview:iconBox];
+    [header addArrangedSubview:labels];
+    [header setHuggingPriority:NSLayoutPriorityRequired forOrientation:NSLayoutConstraintOrientationVertical];
+
+    // ---- Buttons row ----
+    NSButton *blockBtn = [NSButton buttonWithTitle:@"Don’t Allow" target:self action:@selector(onBlock)];
+    blockBtn.bezelStyle = NSBezelStyleRounded;
+    NSButton *onceBtn = [NSButton buttonWithTitle:@"Allow Once" target:self action:@selector(onAllowOnce)];
+    onceBtn.bezelStyle = NSBezelStyleRounded;
+    NSButton *alwaysBtn = [NSButton buttonWithTitle:@"Always Allow" target:self action:@selector(onAllow)];
+    alwaysBtn.bezelStyle = NSBezelStyleRounded;
+    [alwaysBtn setKeyEquivalent:@"\r"];
+
+    NSStackView *btnRow = [NSStackView stackViewWithViews:@[blockBtn]];
+    btnRow.orientation = NSUserInterfaceLayoutOrientationHorizontal;
+    btnRow.alignment = NSLayoutAttributeCenterY;
+    btnRow.spacing = 8;
+    // Push block to left, others to right
+    NSView *spacer = [[NSView alloc] init];
+    [spacer setContentHuggingPriority:NSLayoutPriorityDefaultLow forOrientation:NSLayoutConstraintOrientationHorizontal];
+    [btnRow addArrangedSubview:spacer];
+    [btnRow addArrangedSubview:onceBtn];
+    [btnRow addArrangedSubview:alwaysBtn];
+    [btnRow setHuggingPriority:NSLayoutPriorityRequired forOrientation:NSLayoutConstraintOrientationVertical];
+
+    // Separator
+    NSBox *sep = [[NSBox alloc] init];
+    sep.boxType = NSBoxSeparator;
+    [sep addConstraint:[NSLayoutConstraint constraintWithItem:sep attribute:NSLayoutAttributeHeight relatedBy:NSLayoutRelationEqual toItem:nil attribute:NSLayoutAttributeNotAnAttribute multiplier:1 constant:1]];
+
+    [root addArrangedSubview:header];
+    [root setCustomSpacing:16 afterView:header];
+    [root addArrangedSubview:sep];
+    [root setCustomSpacing:12 afterView:sep];
+    [root addArrangedSubview:btnRow];
+
+    // Fix width constraint
+    [root addConstraint:[NSLayoutConstraint constraintWithItem:root attribute:NSLayoutAttributeWidth relatedBy:NSLayoutRelationEqual toItem:nil attribute:NSLayoutAttributeNotAnAttribute multiplier:1 constant:W]];
+
+    [sheet layoutIfNeeded];
+    NSSize fittingSize = root.fittingSize;
+    [sheet setContentSize:NSMakeSize(W, fittingSize.height + 2)];
+
+    return self;
+}
+
+- (void)showOnParentWindow:(NSWindow *)parentWindow {
+    if (!gActivePermissionSheets) gActivePermissionSheets = [NSMutableSet set];
+    [gActivePermissionSheets addObject:self];
+    [parentWindow beginSheet:self.sheet completionHandler:^(NSModalResponse r) {
+        (void)r;
+    }];
+}
+
+- (void)decide:(NSString *)decision {
+    NSWindow *sheet = self.sheet;
+    NSWindow *parent = [sheet sheetParent];
+    if (parent) {
+        [parent endSheet:sheet];
+    } else {
+        [sheet orderOut:nil];
+    }
+    // Emit permission-decided event back to Bun
+    NSString *json = jsonStringFromObject(@{
+        @"requestId": self.requestId ?: @"",
+        @"decision": decision
+    });
+    dispatchWebviewEvent(self.eventHandler, self.webviewId, "permission-decided", json);
+    if (gActivePermissionSheets) [gActivePermissionSheets removeObject:self];
+}
+
+- (void)onBlock      { [self decide:@"block"]; }
+- (void)onAllowOnce  { [self decide:@"allowOnce"]; }
+- (void)onAllow      { [self decide:@"allow"]; }
+
+@end
+
+extern "C" void showNativePermissionSheet(AbstractView *abstractView,
+                                          const char *requestIdStr,
+                                          const char *originStr,
+                                          const char *faviconUrlStr,
+                                          const char *permissionsJsonStr) {
+    if (!abstractView || !requestIdStr) return;
+    NSView *view = abstractView.nsView;
+    if (!view) return;
+
+    NSString *requestId     = [NSString stringWithUTF8String:requestIdStr];
+    NSString *origin        = [NSString stringWithUTF8String:originStr ?: ""];
+    NSString *faviconUrl    = [NSString stringWithUTF8String:faviconUrlStr ?: ""];
+    NSString *permJson      = [NSString stringWithUTF8String:permissionsJsonStr ?: "[]"];
+
+    // Find the event handler for this webview
+    WebviewEventHandler handler = NULL;
+    uint32_t webviewId = abstractView.webviewId;
+    AbstractView *av = [globalAbstractViews objectForKey:@(webviewId)];
+    if (av && [av isKindOfClass:NSObject.class]) {
+        // Try to get handler from associated navigation delegate
+        WKWebView *wv = (WKWebView *)av.nsView;
+        if ([wv isKindOfClass:[WKWebView class]]) {
+            MyNavigationDelegate *nd = objc_getAssociatedObject(wv, "NavigationDelegate");
+            if (nd) handler = nd.zigEventHandler;
+            if (!handler) {
+                MyWebViewUIDelegate *ud = (MyWebViewUIDelegate *)wv.UIDelegate;
+                if ([ud isKindOfClass:[MyWebViewUIDelegate class]]) handler = ud.zigEventHandler;
+            }
+        }
+    }
+    if (!handler) return;
+
+    dispatch_async(dispatch_get_main_queue(), ^{
+        NSWindow *parentWindow = view.window;
+        if (!parentWindow) return;
+        NativePermissionSheetController *ctrl =
+            [[NativePermissionSheetController alloc] initWithRequestId:requestId
+                                                                origin:origin
+                                                            faviconUrl:faviconUrl
+                                                       permissionsJson:permJson
+                                                          eventHandler:handler
+                                                             webviewId:webviewId];
+        [ctrl showOnParentWindow:parentWindow];
+    });
+}
+
 @implementation MyWebViewUIDelegate
     - (WKWebView *)webView:(WKWebView *)webView
     createWebViewWithConfiguration:(WKWebViewConfiguration *)configuration

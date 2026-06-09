@@ -97,7 +97,8 @@ type BrowserViewEventName =
 	| "download-failed"
 	| "page-title-updated"
 	| "favicon-updated"
-	| "permission-requested";
+	| "permission-requested"
+	| "permission-decided";
 export type BrowserPermissionRequestEvent = ElectrobunEvent<
 	{ detail: BrowserPermissionRequestDetail },
 	Record<string, never>
@@ -377,6 +378,22 @@ export class BrowserView<T extends RPCWithTransport = RPCWithTransport> {
 
 	respondToPermissionRequest(requestId: string, decision: BrowserPermissionResponseDecision) {
 		BrowserView.respondToPermissionRequest(requestId, decision);
+	}
+
+	showNativePermissionSheet(
+		requestId: string,
+		origin: string,
+		faviconUrl: string,
+		permissionsJson: string
+	) {
+		if (!this.ptr) return;
+		native!.symbols.showNativePermissionSheet(
+			this.ptr,
+			toCString(requestId),
+			toCString(origin),
+			toCString(faviconUrl),
+			toCString(permissionsJson)
+		);
 	}
 
 	createTransport = () => {

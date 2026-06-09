@@ -478,6 +478,10 @@ export const native = (() => {
 				args: [FFIType.cstring, FFIType.cstring],
 				returns: FFIType.void
 			},
+			showNativePermissionSheet: {
+				args: [FFIType.ptr, FFIType.cstring, FFIType.cstring, FFIType.cstring, FFIType.cstring],
+				returns: FFIType.void
+			},
 			wgpuViewSetFrame: {
 				args: [FFIType.ptr, FFIType.f64, FFIType.f64, FFIType.f64, FFIType.f64],
 				returns: FFIType.void
