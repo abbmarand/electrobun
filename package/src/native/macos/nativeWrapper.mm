@@ -36,6 +36,7 @@ static bool wgpuDebugEnabled() {
 #import <ApplicationServices/ApplicationServices.h>
 #import <Vision/Vision.h>
 #import <CoreImage/CoreImage.h>
+#import <UniformTypeIdentifiers/UniformTypeIdentifiers.h>
 #include <sys/socket.h>
 #include <netinet/in.h>
 #include <unistd.h>
@@ -3359,51 +3360,48 @@ static void addOpenPanelExtension(NSMutableOrderedSet<NSString *> *extensions, N
     }
 }
 
-static NSArray<NSString *> *extensionsForOpenPanelMIMEType(NSString *mimeType) {
-    if (!mimeType) return @[];
-
-    NSString *normalized = [[mimeType stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceAndNewlineCharacterSet]] lowercaseString];
-    if (normalized.length == 0 || [normalized isEqualToString:@"*/*"]) return @[];
-
-    NSDictionary<NSString *, NSArray<NSString *> *> *knownMIMETypes = @{
-        @"image/*": @[ @"jpg", @"jpeg", @"png", @"gif", @"webp", @"heic", @"heif", @"tif", @"tiff", @"bmp", @"svg" ],
-        @"video/*": @[ @"mp4", @"mov", @"m4v", @"webm", @"avi", @"mkv" ],
-        @"audio/*": @[ @"mp3", @"m4a", @"aac", @"wav", @"aiff", @"flac", @"ogg" ],
-        @"text/*": @[ @"txt", @"text", @"md", @"markdown", @"csv", @"tsv", @"html", @"css", @"js", @"json", @"xml" ],
-        @"application/pdf": @[ @"pdf" ],
-        @"application/json": @[ @"json" ],
-        @"text/csv": @[ @"csv" ],
-        @"text/plain": @[ @"txt", @"text" ],
-        @"text/markdown": @[ @"md", @"markdown" ],
-        @"application/zip": @[ @"zip" ],
-        @"application/vnd.ms-excel": @[ @"xls" ],
-        @"application/vnd.openxmlformats-officedocument.spreadsheetml.sheet": @[ @"xlsx" ],
-        @"application/msword": @[ @"doc" ],
-        @"application/vnd.openxmlformats-officedocument.wordprocessingml.document": @[ @"docx" ],
-        @"application/vnd.ms-powerpoint": @[ @"ppt" ],
-        @"application/vnd.openxmlformats-officedocument.presentationml.presentation": @[ @"pptx" ]
-    };
-
-    NSArray<NSString *> *extensions = knownMIMETypes[normalized];
-    return extensions ?: @[];
-}
-
-static NSArray<NSString *> *acceptedOpenPanelFileTypes(WKOpenPanelParameters *parameters) {
-    NSMutableOrderedSet<NSString *> *fileTypes = [NSMutableOrderedSet orderedSet];
-
+// Maps the page's accept filters (exposed by WebKit through private
+// WKOpenPanelParameters selectors, guarded by respondsToSelector) to UTTypes
+// for NSOpenPanel.allowedContentTypes. Returns an empty array whenever any
+// accept token cannot be mapped so the panel falls back to allowing all files
+// instead of over-restricting what the user can pick.
+static NSArray<UTType *> *acceptedOpenPanelContentTypes(WKOpenPanelParameters *parameters) {
+    NSMutableOrderedSet<NSString *> *extensions = [NSMutableOrderedSet orderedSet];
     for (NSString *extension in stringArrayFromOpenPanelParameterSelector(parameters, @"_allowedFileExtensions")) {
-        addOpenPanelExtension(fileTypes, extension);
+        addOpenPanelExtension(extensions, extension);
     }
     for (NSString *extension in stringArrayFromOpenPanelParameterSelector(parameters, @"_acceptedFileExtensions")) {
-        addOpenPanelExtension(fileTypes, extension);
-    }
-    for (NSString *mimeType in stringArrayFromOpenPanelParameterSelector(parameters, @"_acceptedMIMETypes")) {
-        for (NSString *extension in extensionsForOpenPanelMIMEType(mimeType)) {
-            addOpenPanelExtension(fileTypes, extension);
-        }
+        addOpenPanelExtension(extensions, extension);
     }
 
-    return fileTypes.array;
+    NSMutableArray<UTType *> *contentTypes = [NSMutableArray array];
+    for (NSString *extension in extensions) {
+        UTType *type = [UTType typeWithFilenameExtension:extension];
+        if (!type) return @[];
+        [contentTypes addObject:type];
+    }
+
+    NSDictionary<NSString *, UTType *> *wildcardMIMETypes = @{
+        @"image/*": UTTypeImage,
+        @"video/*": UTTypeMovie,
+        @"audio/*": UTTypeAudio,
+        @"text/*": UTTypeText
+    };
+
+    for (NSString *mimeType in stringArrayFromOpenPanelParameterSelector(parameters, @"_acceptedMIMETypes")) {
+        NSString *normalized = [[mimeType stringByTrimmingCharactersInSet:[NSCharacterSet whitespaceAndNewlineCharacterSet]] lowercaseString];
+        if (normalized.length == 0) continue;
+        if ([normalized isEqualToString:@"*/*"]) return @[];
+
+        UTType *type = wildcardMIMETypes[normalized];
+        if (!type && ![normalized hasSuffix:@"/*"]) {
+            type = [UTType typeWithMIMEType:normalized];
+        }
+        if (!type) return @[];
+        [contentTypes addObject:type];
+    }
+
+    return contentTypes;
 }
 
 static NSString *safeWebviewSavePanelName(NSString *suggestedName, NSString *fileExtension) {
@@ -3653,26 +3651,37 @@ runOpenPanelWithParameters:(WKOpenPanelParameters *)parameters
  completionHandler:(void (^)(NSArray<NSURL *> * _Nullable URLs))completionHandler {
         
         NSOpenPanel *openPanel = [NSOpenPanel openPanel];
-        
+
         // Configure the panel based on parameters
+        BOOL allowsDirectories = parameters.allowsDirectories;
         [openPanel setAllowsMultipleSelection:parameters.allowsMultipleSelection];
-        [openPanel setCanChooseDirectories:parameters.allowsDirectories];
-        [openPanel setCanChooseFiles:YES];
-        
-        NSArray<NSString *> *acceptedFileTypes = acceptedOpenPanelFileTypes(parameters);
-        if (acceptedFileTypes.count > 0) {
-            #pragma clang diagnostic push
-            #pragma clang diagnostic ignored "-Wdeprecated-declarations"
-            [openPanel setAllowedFileTypes:acceptedFileTypes];
-            #pragma clang diagnostic pop
+        [openPanel setCanChooseDirectories:allowsDirectories];
+        // Directory uploads (webkitdirectory) expect directory URLs, so restrict
+        // the panel to folders the same way Safari and Chrome do.
+        [openPanel setCanChooseFiles:!allowsDirectories];
+
+        if (!allowsDirectories) {
+            NSArray<UTType *> *contentTypes = acceptedOpenPanelContentTypes(parameters);
+            if (contentTypes.count > 0) {
+                [openPanel setAllowedContentTypes:contentTypes];
+            }
         }
-        
-        // Run the panel synchronously to avoid block capture issues
-        NSInteger response = [openPanel runModal];
-        if (response == NSModalResponseOK) {
-            completionHandler(openPanel.URLs);
+
+        void (^completionHandlerCopy)(NSArray<NSURL *> * _Nullable) = [completionHandler copy];
+        void (^finish)(NSModalResponse) = ^(NSModalResponse response) {
+            if (response == NSModalResponseOK) {
+                completionHandlerCopy(openPanel.URLs);
+            } else {
+                // Cancellation must deliver nil so the page never sees stale files.
+                completionHandlerCopy(nil);
+            }
+        };
+
+        NSWindow *window = webView.window;
+        if (window) {
+            [openPanel beginSheetModalForWindow:window completionHandler:finish];
         } else {
-            completionHandler(nil);
+            finish([openPanel runModal]);
         }
     }
     
