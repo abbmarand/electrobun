@@ -28,7 +28,7 @@ inline const char* downloadEventTypeToString(DownloadEventType type) {
         case DownloadEventType::STARTED:   return "download-started";
         case DownloadEventType::PROGRESS:  return "download-progress";
         case DownloadEventType::COMPLETED: return "download-completed";
-        case DownloadEventType::CANCELLED: return "download-cancelled";
+        case DownloadEventType::CANCELLED: return "download-canceled";
         case DownloadEventType::FAILED:    return "download-failed";
         default: return "download-unknown";
     }
@@ -52,9 +52,11 @@ struct DownloadEvent {
         std::ostringstream ss;
         ss << "{";
         ss << "\"downloadId\":" << downloadId;
+        ss << ",\"id\":\"" << downloadId << "\"";
 
         if (!url.empty()) {
             ss << ",\"url\":\"" << escapeJson(url) << "\"";
+            ss << ",\"sourceUrl\":\"" << escapeJson(url) << "\"";
         }
         if (!filename.empty()) {
             ss << ",\"filename\":\"" << escapeJson(filename) << "\"";
@@ -70,9 +72,11 @@ struct DownloadEvent {
         ss << ",\"totalBytes\":" << totalBytes;
         ss << ",\"receivedBytes\":" << receivedBytes;
         ss << ",\"percentComplete\":" << percentComplete;
+        ss << ",\"progress\":" << percentComplete;
         ss << ",\"canResume\":" << (canResume ? "true" : "false");
 
         if (!errorMessage.empty()) {
+            ss << ",\"error\":\"" << escapeJson(errorMessage) << "\"";
             ss << ",\"errorMessage\":\"" << escapeJson(errorMessage) << "\"";
         }
 

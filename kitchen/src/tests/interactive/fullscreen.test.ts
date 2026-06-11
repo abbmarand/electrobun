@@ -1,13 +1,13 @@
-// Interactive Fullscreen / Picture-in-Picture Tests
+// Interactive fullscreen tests
 
 import { BrowserWindow } from "electrobun/bun";
 import { defineTest } from "../../test-framework/types";
 
-const FULLSCREEN_PIP_TEST_HTML = `<!DOCTYPE html>
+const FULLSCREEN_TEST_HTML = `<!DOCTYPE html>
 <html lang="en">
 <head>
 <meta charset="UTF-8">
-<title>Fullscreen PiP Regression</title>
+<title>Fullscreen Regression</title>
 <style>
   body {
     margin: 0;
@@ -116,8 +116,8 @@ const FULLSCREEN_PIP_TEST_HTML = `<!DOCTYPE html>
 </style>
 </head>
 <body>
-<h1>Fullscreen PiP Regression</h1>
-<p>Use these controls to verify browser-style fullscreen, Escape exit, frame restore, and picture-in-picture in native site windows.</p>
+<h1>Fullscreen Regression</h1>
+<p>Use these controls to verify browser-style fullscreen, Escape exit, and frame restore in native site windows.</p>
 <main>
   <section>
     <h2>YouTube-style video page</h2>
@@ -127,8 +127,6 @@ const FULLSCREEN_PIP_TEST_HTML = `<!DOCTYPE html>
     <div class="actions">
       <button id="start-video">Start Video</button>
       <button id="video-fullscreen">Video Fullscreen</button>
-      <button id="start-pip">Start PiP</button>
-      <button id="exit-pip">Exit PiP</button>
     </div>
   </section>
 
@@ -239,44 +237,11 @@ const FULLSCREEN_PIP_TEST_HTML = `<!DOCTYPE html>
     }
   }
 
-  async function startPip() {
-    if (!video.srcObject) await startVideo();
-    try {
-      if (!document.pictureInPictureEnabled || !hasFunction(video, 'requestPictureInPicture')) {
-        log('PiP API unavailable.');
-        return;
-      }
-      await video.requestPictureInPicture();
-      log('requestPictureInPicture resolved.');
-    } catch (error) {
-      log('PiP failed: ' + (error && error.message || error));
-    }
-  }
-
-  async function exitPip() {
-    try {
-      if (hasFunction(document, 'exitPictureInPicture')) {
-        await document.exitPictureInPicture();
-        log('exitPictureInPicture resolved.');
-      } else {
-        log('Exit PiP API unavailable.');
-      }
-    } catch (error) {
-      log('Exit PiP failed: ' + (error && error.message || error));
-    }
-  }
-
   document.getElementById('start-video').addEventListener('click', function() {
     void startVideo();
   });
   document.getElementById('video-fullscreen').addEventListener('click', function() {
     void requestFullscreen(video, 'Video');
-  });
-  document.getElementById('start-pip').addEventListener('click', function() {
-    void startPip();
-  });
-  document.getElementById('exit-pip').addEventListener('click', function() {
-    void exitPip();
   });
   document.getElementById('stage-fullscreen').addEventListener('click', function() {
     void requestFullscreen(stage, 'Stage');
@@ -294,12 +259,6 @@ const FULLSCREEN_PIP_TEST_HTML = `<!DOCTYPE html>
   document.addEventListener('webkitfullscreenchange', function() {
     log('webkitfullscreenchange: ' + (document.webkitFullscreenElement ? 'entered' : 'exited'));
   });
-  video.addEventListener('enterpictureinpicture', function() {
-    log('enterpictureinpicture fired.');
-  });
-  video.addEventListener('leavepictureinpicture', function() {
-    log('leavepictureinpicture fired.');
-  });
   document.addEventListener('keydown', function(event) {
     if (event.key === 'Escape') log('Escape keydown observed.');
   });
@@ -307,12 +266,12 @@ const FULLSCREEN_PIP_TEST_HTML = `<!DOCTYPE html>
 </body>
 </html>`;
 
-function startFullscreenPipServer(): ReturnType<typeof Bun.serve> {
+function startFullscreenServer(): ReturnType<typeof Bun.serve> {
 	return Bun.serve({
 		hostname: "127.0.0.1",
 		port: 0,
 		fetch() {
-			return new Response(FULLSCREEN_PIP_TEST_HTML, {
+			return new Response(FULLSCREEN_TEST_HTML, {
 				headers: { "Content-Type": "text/html; charset=utf-8" }
 			});
 		}
@@ -331,17 +290,16 @@ function frameStillRestored(
 	);
 }
 
-export const fullscreenPipTests = [
+export const fullscreenTests = [
 	defineTest({
-		name: "YouTube-style video fullscreen and PiP (native macOS)",
-		category: "Fullscreen/PiP (Interactive)",
-		description:
-			"Verify native WK video fullscreen, Escape exit, PiP, and window frame restoration.",
+		name: "YouTube-style video fullscreen Escape restore (native macOS)",
+		category: "Fullscreen (Interactive)",
+		description: "Verify native WK video fullscreen, Escape exit, and window frame restoration.",
 		interactive: true,
 		timeout: 300000,
 		async run({ log, showInstructions, waitForUserVerification }) {
 			if (process.platform !== "darwin") {
-				log("Skipping native WK fullscreen/PiP regression on non-macOS platform");
+				log("Skipping native WK fullscreen regression on non-macOS platform");
 				return;
 			}
 
@@ -349,14 +307,13 @@ export const fullscreenPipTests = [
 				"A native WK test page will open with a YouTube-style video surface.",
 				"Click Start Video, then Video Fullscreen.",
 				"Press Escape and verify the video exits fullscreen and the native toolbar/window frame returns.",
-				"Click Start PiP, verify a picture-in-picture window appears, then click Exit PiP.",
-				"Click Pass if fullscreen, Escape, PiP, and frame restore all work."
+				"Click Pass if fullscreen, Escape, and frame restore all work."
 			]);
 
-			const server = startFullscreenPipServer();
+			const server = startFullscreenServer();
 			const url = `http://127.0.0.1:${server.port}/`;
 			const win = new BrowserWindow({
-				title: "YouTube-style Fullscreen PiP Regression",
+				title: "YouTube-style Fullscreen Regression",
 				url,
 				renderer: "native",
 				frame: { width: 980, height: 720, x: 180, y: 90 }
@@ -366,19 +323,15 @@ export const fullscreenPipTests = [
 			try {
 				const result = await waitForUserVerification();
 				if (result.action === "fail") {
-					throw new Error(
-						result.notes || "User marked YouTube-style fullscreen/PiP test as failed"
-					);
+					throw new Error(result.notes || "User marked YouTube-style fullscreen test as failed");
 				}
 				if (result.action === "retest") {
-					throw new Error(
-						"RETEST: User requested to run the YouTube-style fullscreen/PiP test again"
-					);
+					throw new Error("RETEST: User requested to run the YouTube-style fullscreen test again");
 				}
 
 				const restoredFrame = win.getFrame();
 				if (!frameStillRestored(initialFrame, restoredFrame)) {
-					throw new Error("Window frame did not restore after video fullscreen/PiP exercise");
+					throw new Error("Window frame did not restore after video fullscreen exercise");
 				}
 			} finally {
 				win.close();
@@ -389,7 +342,7 @@ export const fullscreenPipTests = [
 
 	defineTest({
 		name: "Google Meet-style document fullscreen Escape restore (native macOS)",
-		category: "Fullscreen/PiP (Interactive)",
+		category: "Fullscreen (Interactive)",
 		description:
 			"Verify native WK document fullscreen, Escape exit, toolbar restoration, and frame restoration.",
 		interactive: true,
@@ -407,7 +360,7 @@ export const fullscreenPipTests = [
 				"Click Pass if document fullscreen, Escape, and frame restore all work."
 			]);
 
-			const server = startFullscreenPipServer();
+			const server = startFullscreenServer();
 			const url = `http://127.0.0.1:${server.port}/`;
 			const win = new BrowserWindow({
 				title: "Meet-style Fullscreen Regression",

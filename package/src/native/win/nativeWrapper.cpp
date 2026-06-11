@@ -1144,6 +1144,7 @@ public:
         
         std::string origin = requesting_origin.ToString();
         printf("CEF: Media access permission requested for %s (permissions: %u)\n", origin.c_str(), requested_permissions);
+        std::vector<std::string> permissionTypes = electrobun::cefPermissionTypes(requested_permissions);
 
         // views:// is the app's own bundled-asset shell — always trusted, never prompt.
         if (origin.find("views://") == 0) {
@@ -1152,7 +1153,7 @@ public:
         }
 
         // Check cache first
-        PermissionStatus cachedStatus = getPermissionFromCache(origin, PermissionType::USER_MEDIA);
+        PermissionStatus cachedStatus = getPermissionFromCache(origin, permissionTypes);
         
         if (cachedStatus == PermissionStatus::ALLOWED) {
             printf("CEF: Using cached permission: User previously allowed media access for %s\n", origin.c_str());
@@ -1181,11 +1182,11 @@ public:
         // Handle response and cache the decision
         if (result == IDYES) {
             callback->Continue(requested_permissions); // Allow all requested permissions
-            cachePermission(origin, PermissionType::USER_MEDIA, PermissionStatus::ALLOWED);
+            cachePermission(origin, permissionTypes, PermissionStatus::ALLOWED);
             printf("CEF: User allowed media access for %s (cached)\n", origin.c_str());
         } else {
             callback->Cancel();
-            cachePermission(origin, PermissionType::USER_MEDIA, PermissionStatus::DENIED);
+            cachePermission(origin, permissionTypes, PermissionStatus::DENIED);
             printf("CEF: User blocked media access for %s (cached)\n", origin.c_str());
         }
         
@@ -1201,6 +1202,7 @@ public:
         
         std::string origin = requesting_origin.ToString();
         printf("CEF: Permission prompt requested for %s (permissions: %u)\n", origin.c_str(), requested_permissions);
+        std::vector<std::string> permissionTypes = electrobun::cefPermissionTypes(requested_permissions);
 
         // views:// is the app's own bundled-asset shell — always trusted, never prompt.
         // This also covers Chromium's new Loopback/Local Network Access gate triggered
@@ -1210,35 +1212,31 @@ public:
             return true;
         }
 
-        // Handle different permission types
-        PermissionType permType = PermissionType::OTHER;
         std::string message;
         std::string title = "Permission Request";
 
-        // Check for specific permission types
-        if (requested_permissions & CEF_PERMISSION_TYPE_CAMERA_STREAM ||
-            requested_permissions & CEF_PERMISSION_TYPE_MIC_STREAM) {
-            permType = PermissionType::USER_MEDIA;
-            message = "This page wants to access your camera and/or microphone.\n\nDo you want to allow this?";
+        message = "This page is requesting permission for: " +
+                  electrobun::describeCefPermissions(requested_permissions) +
+                  ".\n\nDo you want to allow this?";
+        if (permissionTypes.size() == 2 &&
+            std::find(permissionTypes.begin(), permissionTypes.end(), "camera") != permissionTypes.end() &&
+            std::find(permissionTypes.begin(), permissionTypes.end(), "microphone") != permissionTypes.end()) {
             title = "Camera & Microphone Access";
-        } else if (requested_permissions & CEF_PERMISSION_TYPE_GEOLOCATION) {
-            permType = PermissionType::GEOLOCATION;
-            message = "This page wants to access your location.\n\nDo you want to allow this?";
-            title = "Location Access";
-        } else if (requested_permissions & CEF_PERMISSION_TYPE_NOTIFICATIONS) {
-            permType = PermissionType::NOTIFICATIONS;
-            message = "This page wants to show notifications.\n\nDo you want to allow this?";
-            title = "Notification Permission";
-        } else {
-            // Unrecognized permission type — name what's being requested instead of
-            // a generic "additional permissions" dialog so the user can decide.
-            message = "This page is requesting permission for: " +
-                      electrobun::describeCefPermissions(requested_permissions) +
-                      ".\n\nDo you want to allow this?";
+            message = "This page wants to access your camera and/or microphone.\n\nDo you want to allow this?";
+        } else if (permissionTypes.size() == 1) {
+            if (permissionTypes[0] == "camera" || permissionTypes[0] == "microphone") {
+                title = "Camera & Microphone Access";
+            } else if (permissionTypes[0] == "geolocation") {
+                title = "Location Access";
+                message = "This page wants to access your location.\n\nDo you want to allow this?";
+            } else if (permissionTypes[0] == "notifications") {
+                title = "Notification Permission";
+                message = "This page wants to show notifications.\n\nDo you want to allow this?";
+            }
         }
 
         // Check cache first
-        PermissionStatus cachedStatus = getPermissionFromCache(origin, permType);
+        PermissionStatus cachedStatus = getPermissionFromCache(origin, permissionTypes);
         
         if (cachedStatus == PermissionStatus::ALLOWED) {
             printf("CEF: Using cached permission: User previously allowed %s for %s\n", title.c_str(), origin.c_str());
@@ -1264,11 +1262,11 @@ public:
         // Handle response and cache the decision
         if (result == IDYES) {
             callback->Continue(CEF_PERMISSION_RESULT_ACCEPT);
-            cachePermission(origin, permType, PermissionStatus::ALLOWED);
+            cachePermission(origin, permissionTypes, PermissionStatus::ALLOWED);
             printf("CEF: User allowed %s for %s (cached)\n", title.c_str(), origin.c_str());
         } else {
             callback->Continue(CEF_PERMISSION_RESULT_DENY);
-            cachePermission(origin, permType, PermissionStatus::DENIED);
+            cachePermission(origin, permissionTypes, PermissionStatus::DENIED);
             printf("CEF: User blocked %s for %s (cached)\n", title.c_str(), origin.c_str());
         }
         
@@ -6514,26 +6512,29 @@ static std::shared_ptr<WebView2View> createWebView2View(uint32_t webviewId,
                                             }
                                             
                                             std::string origin = getOriginFromUrl(uri);
-                                            PermissionType permType = PermissionType::OTHER;
+                                            std::vector<std::string> permissionTypes = {"other"};
                                             std::string permissionName = "Permission";
                                             
                                             // Determine permission type
                                             switch (kind) {
                                                 case COREWEBVIEW2_PERMISSION_KIND_CAMERA:
+                                                    permissionTypes = {"camera"};
+                                                    permissionName = "Camera Access";
+                                                    break;
                                                 case COREWEBVIEW2_PERMISSION_KIND_MICROPHONE:
-                                                    permType = PermissionType::USER_MEDIA;
-                                                    permissionName = "Camera & Microphone Access";
+                                                    permissionTypes = {"microphone"};
+                                                    permissionName = "Microphone Access";
                                                     break;
                                                 case COREWEBVIEW2_PERMISSION_KIND_GEOLOCATION:
-                                                    permType = PermissionType::GEOLOCATION;
                                                     permissionName = "Location Access";
+                                                    permissionTypes = {"geolocation"};
                                                     break;
                                                 case COREWEBVIEW2_PERMISSION_KIND_NOTIFICATIONS:
-                                                    permType = PermissionType::NOTIFICATIONS;
                                                     permissionName = "Notification Permission";
+                                                    permissionTypes = {"notifications"};
                                                     break;
                                                 default:
-                                                    permType = PermissionType::OTHER;
+                                                    permissionTypes = {"other"};
                                                     permissionName = "Permission Request";
                                                     break;
                                             }
@@ -6541,7 +6542,17 @@ static std::shared_ptr<WebView2View> createWebView2View(uint32_t webviewId,
                                             printf("WebView2: %s requested for %s\n", permissionName.c_str(), origin.c_str());
                                             
                                             // Check cache first
-                                            PermissionStatus cachedStatus = getPermissionFromCache(origin, permType);
+                                            if (permissionTypes.empty()) {
+                                                permissionTypes = {"other"};
+                                            }
+
+                                            if (permissionTypes.size() == 2 &&
+                                                std::find(permissionTypes.begin(), permissionTypes.end(), "camera") != permissionTypes.end() &&
+                                                std::find(permissionTypes.begin(), permissionTypes.end(), "microphone") != permissionTypes.end()) {
+                                                permissionName = "Camera & Microphone Access";
+                                            }
+
+                                            PermissionStatus cachedStatus = getPermissionFromCache(origin, permissionTypes);
                                             
                                             if (cachedStatus == PermissionStatus::ALLOWED) {
                                                 printf("WebView2: Using cached permission: User previously allowed %s for %s\n", permissionName.c_str(), origin.c_str());
@@ -6586,11 +6597,11 @@ static std::shared_ptr<WebView2View> createWebView2View(uint32_t webviewId,
                                             // Handle response and cache the decision
                                             if (result == IDYES) {
                                                 args->put_State(COREWEBVIEW2_PERMISSION_STATE_ALLOW);
-                                                cachePermission(origin, permType, PermissionStatus::ALLOWED);
+                                                cachePermission(origin, permissionTypes, PermissionStatus::ALLOWED);
                                                 printf("WebView2: User allowed %s for %s (cached)\n", permissionName.c_str(), origin.c_str());
                                             } else {
                                                 args->put_State(COREWEBVIEW2_PERMISSION_STATE_DENY);
-                                                cachePermission(origin, permType, PermissionStatus::DENIED);
+                                                cachePermission(origin, permissionTypes, PermissionStatus::DENIED);
                                                 printf("WebView2: User blocked %s for %s (cached)\n", permissionName.c_str(), origin.c_str());
                                             }
                                             
@@ -9076,10 +9087,11 @@ ELECTROBUN_EXPORT void webviewReload(AbstractView *abstractView) {
     abstractView->reload();
 }
 
-ELECTROBUN_EXPORT void webviewCancelDownload(AbstractView *abstractView, uint32_t downloadId) {
+ELECTROBUN_EXPORT bool webviewCancelDownload(AbstractView *abstractView, uint32_t downloadId) {
     // Download cancellation is currently only implemented on macOS.
     (void)abstractView;
     (void)downloadId;
+    return false;
 }
 
 ELECTROBUN_EXPORT void webviewRemove(AbstractView *abstractView) {

@@ -12,6 +12,8 @@
 #include <string>
 #include <cstdint>
 #include <cstdio>
+#include <vector>
+#include <algorithm>
 
 namespace electrobun {
 
@@ -38,7 +40,10 @@ inline std::string describeCefPermissions(uint32_t mask) {
     if (mask & CEF_PERMISSION_TYPE_IDENTITY_PROVIDER) add("Identity provider");
     if (mask & CEF_PERMISSION_TYPE_IDLE_DETECTION) add("Idle detection");
     if (mask & CEF_PERMISSION_TYPE_MIC_STREAM) add("Microphone");
-    if (mask & CEF_PERMISSION_TYPE_MIDI_SYSEX) add("MIDI system-exclusive");
+    if (mask & CEF_PERMISSION_TYPE_MIDI_SYSEX) add("MIDI sysex");
+#ifdef CEF_PERMISSION_TYPE_MIDI
+    if (mask & CEF_PERMISSION_TYPE_MIDI) add("MIDI");
+#endif
     if (mask & CEF_PERMISSION_TYPE_MULTIPLE_DOWNLOADS) add("Multiple downloads");
     if (mask & CEF_PERMISSION_TYPE_NOTIFICATIONS) add("Notifications");
     if (mask & CEF_PERMISSION_TYPE_KEYBOARD_LOCK) add("Keyboard lock");
@@ -69,6 +74,155 @@ inline std::string describeCefPermissions(uint32_t mask) {
         out = buf;
     }
     return out;
+}
+
+inline void addCefPermissionType(std::vector<std::string> &types, const std::string& type) {
+    if (std::find(types.begin(), types.end(), type) == types.end()) {
+        types.push_back(type);
+    }
+}
+
+inline std::vector<std::string> cefPermissionTypes(uint32_t mask) {
+    std::vector<std::string> types;
+
+    if (mask & CEF_PERMISSION_TYPE_CAMERA_STREAM ||
+        mask & CEF_PERMISSION_TYPE_CAMERA_PAN_TILT_ZOOM) {
+        addCefPermissionType(types, "camera");
+    }
+    if (mask & CEF_PERMISSION_TYPE_MIC_STREAM) {
+        addCefPermissionType(types, "microphone");
+    }
+    if (mask & CEF_PERMISSION_TYPE_GEOLOCATION) {
+        addCefPermissionType(types, "geolocation");
+    }
+    if (mask & CEF_PERMISSION_TYPE_NOTIFICATIONS) {
+        addCefPermissionType(types, "notifications");
+    }
+    if (mask & CEF_PERMISSION_TYPE_MIDI_SYSEX) {
+        addCefPermissionType(types, "midi");
+        addCefPermissionType(types, "midiSysex");
+    }
+#ifdef CEF_PERMISSION_TYPE_MIDI
+    if (mask & CEF_PERMISSION_TYPE_MIDI) {
+        addCefPermissionType(types, "midi");
+    }
+#endif
+    if (mask & CEF_PERMISSION_TYPE_CLIPBOARD) {
+        addCefPermissionType(types, "clipboardRead");
+        addCefPermissionType(types, "clipboardWrite");
+    }
+    if (mask & CEF_PERMISSION_TYPE_CAPTURED_SURFACE_CONTROL) {
+        addCefPermissionType(types, "screen");
+    }
+#ifdef CEF_PERMISSION_TYPE_TOP_LEVEL_STORAGE_ACCESS
+    if (mask & CEF_PERMISSION_TYPE_TOP_LEVEL_STORAGE_ACCESS) {
+        addCefPermissionType(types, "topLevelStorageAccess");
+    }
+#endif
+#ifdef CEF_PERMISSION_TYPE_STORAGE_ACCESS
+    if (mask & CEF_PERMISSION_TYPE_STORAGE_ACCESS) {
+        addCefPermissionType(types, "storageAccess");
+    }
+#endif
+#ifdef CEF_PERMISSION_TYPE_DISK_QUOTA
+    if (mask & CEF_PERMISSION_TYPE_DISK_QUOTA) {
+        addCefPermissionType(types, "diskQuota");
+    }
+#endif
+#ifdef CEF_PERMISSION_TYPE_LOCAL_FONTS
+    if (mask & CEF_PERMISSION_TYPE_LOCAL_FONTS) {
+        addCefPermissionType(types, "localFonts");
+    }
+#endif
+#ifdef CEF_PERMISSION_TYPE_HAND_TRACKING
+    if (mask & CEF_PERMISSION_TYPE_HAND_TRACKING) {
+        addCefPermissionType(types, "handTracking");
+    }
+#endif
+#ifdef CEF_PERMISSION_TYPE_IDENTITY_PROVIDER
+    if (mask & CEF_PERMISSION_TYPE_IDENTITY_PROVIDER) {
+        addCefPermissionType(types, "identityProvider");
+    }
+#endif
+#ifdef CEF_PERMISSION_TYPE_IDLE_DETECTION
+    if (mask & CEF_PERMISSION_TYPE_IDLE_DETECTION) {
+        addCefPermissionType(types, "idleDetection");
+    }
+#endif
+#ifdef CEF_PERMISSION_TYPE_KEYBOARD_LOCK
+    if (mask & CEF_PERMISSION_TYPE_KEYBOARD_LOCK) {
+        addCefPermissionType(types, "keyboardLock");
+    }
+#endif
+#ifdef CEF_PERMISSION_TYPE_MULTIPLE_DOWNLOADS
+    if (mask & CEF_PERMISSION_TYPE_MULTIPLE_DOWNLOADS) {
+        addCefPermissionType(types, "multipleDownloads");
+    }
+#endif
+#ifdef CEF_PERMISSION_TYPE_POINTER_LOCK
+    if (mask & CEF_PERMISSION_TYPE_POINTER_LOCK) {
+        addCefPermissionType(types, "pointerLock");
+    }
+#endif
+#ifdef CEF_PERMISSION_TYPE_PROTECTED_MEDIA_IDENTIFIER
+    if (mask & CEF_PERMISSION_TYPE_PROTECTED_MEDIA_IDENTIFIER) {
+        addCefPermissionType(types, "protectedMediaIdentifier");
+    }
+#endif
+#ifdef CEF_PERMISSION_TYPE_REGISTER_PROTOCOL_HANDLER
+    if (mask & CEF_PERMISSION_TYPE_REGISTER_PROTOCOL_HANDLER) {
+        addCefPermissionType(types, "registerProtocolHandler");
+    }
+#endif
+#ifdef CEF_PERMISSION_TYPE_AR_SESSION
+    if (mask & CEF_PERMISSION_TYPE_AR_SESSION) {
+        addCefPermissionType(types, "arSession");
+    }
+#endif
+#ifdef CEF_PERMISSION_TYPE_VR_SESSION
+    if (mask & CEF_PERMISSION_TYPE_VR_SESSION) {
+        addCefPermissionType(types, "vrSession");
+    }
+#endif
+#ifdef CEF_PERMISSION_TYPE_WEB_APP_INSTALLATION
+    if (mask & CEF_PERMISSION_TYPE_WEB_APP_INSTALLATION) {
+        addCefPermissionType(types, "webAppInstallation");
+    }
+#endif
+#ifdef CEF_PERMISSION_TYPE_WINDOW_MANAGEMENT
+    if (mask & CEF_PERMISSION_TYPE_WINDOW_MANAGEMENT) {
+        addCefPermissionType(types, "windowManagement");
+    }
+#endif
+#ifdef CEF_PERMISSION_TYPE_FILE_SYSTEM_ACCESS
+    if (mask & CEF_PERMISSION_TYPE_FILE_SYSTEM_ACCESS) {
+        addCefPermissionType(types, "fileSystemAccess");
+    }
+#endif
+#if CEF_API_ADDED(13600)
+    if (mask & CEF_PERMISSION_TYPE_LOCAL_NETWORK_ACCESS) {
+        addCefPermissionType(types, "localNetworkAccess");
+    }
+#endif
+#if CEF_API_ADDED(14500)
+    if (mask & CEF_PERMISSION_TYPE_LOCAL_NETWORK) {
+        addCefPermissionType(types, "localNetwork");
+    }
+    if (mask & CEF_PERMISSION_TYPE_LOOPBACK_NETWORK) {
+        addCefPermissionType(types, "loopbackNetwork");
+    }
+#endif
+#ifdef CEF_PERMISSION_TYPE_SENSORS
+    if (mask & CEF_PERMISSION_TYPE_SENSORS) {
+        addCefPermissionType(types, "sensors");
+    }
+#endif
+
+    if (types.empty()) {
+        addCefPermissionType(types, "other");
+    }
+
+    return types;
 }
 
 } // namespace electrobun

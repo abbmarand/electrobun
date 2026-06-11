@@ -14,6 +14,7 @@ import { randomBytes } from "crypto";
 import { type Pointer } from "bun:ffi";
 import type ElectrobunEvent from "../events/event";
 import type {
+	BrowserDownloadEventDetail,
 	BrowserPermissionPlatform,
 	BrowserPermissionRequestDetail,
 	BrowserPermissionType
@@ -49,6 +50,8 @@ export type BrowserViewOptions<T = undefined> = {
 	sandbox: boolean;
 	// Set transparent on the AbstractView at creation (before first paint)
 	startTransparent: boolean;
+	// Make the web contents background transparent without hiding the view.
+	transparentBackground: boolean;
 	// Set passthrough on the AbstractView at creation (before first paint)
 	startPassthrough: boolean;
 	// Enable native content blocker (ad blocking) for this webview
@@ -76,8 +79,13 @@ const defaultOptions: Partial<BrowserViewOptions> = {
 // but we also want a randomId to separate different instances of the same app
 const randomId = Math.random().toString(36).substring(7);
 
-export type { BrowserPermissionPlatform, BrowserPermissionRequestDetail, BrowserPermissionType };
-export type BrowserPermissionResponseDecision = "allow" | "block";
+export type {
+	BrowserDownloadEventDetail,
+	BrowserPermissionPlatform,
+	BrowserPermissionRequestDetail,
+	BrowserPermissionType
+};
+export type BrowserPermissionResponseDecision = "allowOnce" | "allow" | "block";
 export type BrowserViewSavePageFormat = "webarchive" | "pdf";
 export type BrowserViewSavePageOptions = {
 	suggestedName?: string;
@@ -95,17 +103,38 @@ type BrowserViewEventName =
 	| "download-progress"
 	| "download-completed"
 	| "download-failed"
+	| "download-canceled"
 	| "page-title-updated"
 	| "favicon-updated"
 	| "permission-requested"
 	| "permission-decided";
+type BrowserDownloadEventName =
+	| "download-started"
+	| "download-progress"
+	| "download-completed"
+	| "download-failed"
+	| "download-canceled";
 export type BrowserPermissionRequestEvent = ElectrobunEvent<
 	{ detail: BrowserPermissionRequestDetail },
 	Record<string, never>
 >;
+type BrowserPermissionDecidedEvent = ElectrobunEvent<
+	{
+		detail: { requestId: string; decision: BrowserPermissionResponseDecision };
+	},
+	Record<string, never>
+>;
+export type BrowserDownloadEvent = ElectrobunEvent<
+	{ detail: BrowserDownloadEventDetail },
+	Record<string, never>
+>;
 type BrowserViewEvent<Name extends BrowserViewEventName> = Name extends "permission-requested"
 	? BrowserPermissionRequestEvent
-	: unknown;
+	: Name extends "permission-decided"
+		? BrowserPermissionDecidedEvent
+		: Name extends BrowserDownloadEventName
+			? BrowserDownloadEvent
+			: unknown;
 
 export class BrowserView<T extends RPCWithTransport = RPCWithTransport> {
 	id: number = nextWebviewId++;
@@ -140,6 +169,7 @@ export class BrowserView<T extends RPCWithTransport = RPCWithTransport> {
 	// Sandbox mode disables RPC and only allows event emission (for untrusted content)
 	sandbox: boolean = false;
 	startTransparent: boolean = false;
+	transparentBackground: boolean = false;
 	startPassthrough: boolean = false;
 	contentBlocker: boolean = false;
 	isRemoved: boolean = false;
@@ -170,6 +200,7 @@ export class BrowserView<T extends RPCWithTransport = RPCWithTransport> {
 		this.renderer = options.renderer ?? defaultOptions.renderer ?? "native";
 		this.sandbox = options.sandbox ?? false;
 		this.startTransparent = options.startTransparent ?? false;
+		this.transparentBackground = options.transparentBackground ?? false;
 		this.startPassthrough = options.startPassthrough ?? false;
 		this.contentBlocker = options.contentBlocker ?? false;
 
@@ -212,6 +243,7 @@ export class BrowserView<T extends RPCWithTransport = RPCWithTransport> {
 			navigationRules: this.navigationRules,
 			sandbox: this.sandbox,
 			startTransparent: this.startTransparent,
+			transparentBackground: this.transparentBackground,
 			startPassthrough: this.startPassthrough,
 			contentBlocker: this.contentBlocker
 			// transparent is looked up from parent window in native.ts
@@ -294,6 +326,43 @@ export class BrowserView<T extends RPCWithTransport = RPCWithTransport> {
 			// For WKWebView, load HTML content directly
 			native!.symbols.loadHTMLInWebView(this.ptr, toCString(html));
 		}
+	}
+
+	setFrame(
+		frame: { x: number; y: number; width: number; height: number },
+		masks: Array<{ x: number; y: number; width: number; height: number }> = []
+	) {
+		if (!this.ptr || this.isRemoved) {
+			return;
+		}
+		this.frame = {
+			x: frame.x,
+			y: frame.y,
+			width: frame.width,
+			height: frame.height
+		};
+		native!.symbols.resizeWebview(
+			this.ptr,
+			frame.x,
+			frame.y,
+			frame.width,
+			frame.height,
+			toCString(JSON.stringify(masks))
+		);
+	}
+
+	setHidden(hidden: boolean) {
+		if (!this.ptr || this.isRemoved) {
+			return;
+		}
+		native!.symbols.webviewSetHidden(this.ptr, hidden);
+	}
+
+	setPassthrough(enablePassthrough: boolean) {
+		if (!this.ptr || this.isRemoved) {
+			return;
+		}
+		native!.symbols.webviewSetPassthrough(this.ptr, enablePassthrough);
 	}
 
 	setNavigationRules(rules: string[]) {
@@ -440,8 +509,9 @@ export class BrowserView<T extends RPCWithTransport = RPCWithTransport> {
 		native!.symbols.webviewReload(this.ptr);
 	}
 
-	cancelDownload(downloadId: number) {
-		native!.symbols.webviewCancelDownload(this.ptr, downloadId);
+	cancelDownload(downloadId: number): boolean {
+		if (!this.ptr || this.isRemoved) return false;
+		return native!.symbols.webviewCancelDownload(this.ptr, downloadId);
 	}
 
 	canGoBack(): boolean {

@@ -37,7 +37,7 @@ import { wgpuViewTests } from "./interactive/wgpu-view.test";
 import { wgpuTagTests } from "./interactive/wgpu-tag.test";
 import { fullsizeFrameReproTests } from "./interactive/fullsize-frame-repro.test";
 import { permissionTests } from "./interactive/permissions.test";
-import { fullscreenPipTests } from "./interactive/fullscreen-pip.test";
+import { fullscreenTests } from "./interactive/fullscreen.test";
 import { fileUploadTests } from "./interactive/file-upload.test";
 
 // Collect all tests
@@ -77,7 +77,7 @@ export const allTests: TestDefinition[] = [
 	...wgpuTagTests,
 	...fullsizeFrameReproTests,
 	...permissionTests,
-	...fullscreenPipTests,
+	...fullscreenTests,
 	...fileUploadTests
 ];
 
@@ -119,6 +119,6 @@ export {
 	wgpuTagTests,
 	fullsizeFrameReproTests,
 	permissionTests,
-	fullscreenPipTests,
+	fullscreenTests,
 	fileUploadTests
 };

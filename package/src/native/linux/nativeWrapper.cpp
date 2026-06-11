@@ -192,11 +192,359 @@ extern "C" ELECTROBUN_EXPORT void setWebviewHTMLContent(uint32_t webviewId, cons
 // MIME type detection function is in shared/mime_types.h
 // Permission cache types and functions are in shared/permissions.h
 
-// Linux-specific permission request helper
-std::string getOriginFromPermissionRequest(WebKitPermissionRequest* request) {
-    // For views:// scheme, use a constant origin since these are local files
-    // For other schemes, you would use webkit_permission_request_get_requesting_origin() when available
-    return "views://";
+// Linux permission request bridge state
+struct PendingPermissionRequest {
+    std::function<void(bool)> respond;
+};
+
+static std::atomic<uint64_t> g_nextPermissionRequestId{1};
+static std::mutex g_pendingPermissionRequestsMutex;
+static std::map<std::string, PendingPermissionRequest> g_pendingPermissionRequests;
+
+static std::string escapeJsonString(const std::string& input) {
+    std::string output;
+    output.reserve(input.size() + input.size() / 4);
+
+    for (char c : input) {
+        switch (c) {
+            case '\\':
+                output += "\\\\";
+                break;
+            case '\"':
+                output += "\\\"";
+                break;
+            case '\b':
+                output += "\\b";
+                break;
+            case '\f':
+                output += "\\f";
+                break;
+            case '\n':
+                output += "\\n";
+                break;
+            case '\r':
+                output += "\\r";
+                break;
+            case '\t':
+                output += "\\t";
+                break;
+            default:
+                output += c;
+        }
+    }
+    return output;
+}
+
+static std::string permissionTypeDisplayName(const std::string& permissionType) {
+    if (permissionType == "clipboardRead" || permissionType == "clipboardWrite") {
+        return "clipboard";
+    }
+    if (permissionType == "topLevelStorageAccess") {
+        return "top-level storage access";
+    }
+    if (permissionType == "localNetworkAccess") {
+        return "local network access";
+    }
+    return permissionType;
+}
+
+static std::string permissionTypesListForMessage(const std::vector<std::string>& permissionTypes) {
+    if (permissionTypes.empty()) {
+        return "permissions";
+    }
+
+    std::string output;
+    for (size_t i = 0; i < permissionTypes.size(); i++) {
+        if (i > 0) {
+            if (i + 1 == permissionTypes.size()) {
+                output += " and ";
+            } else {
+                output += ", ";
+            }
+        }
+        output += permissionTypeDisplayName(permissionTypes[i]);
+    }
+    return output;
+}
+
+static std::string permissionPromptTitleForTypes(const std::vector<std::string>& permissionTypes) {
+    const bool hasCamera = permissionTypeListHas(permissionTypes, "camera");
+    const bool hasMicrophone = permissionTypeListHas(permissionTypes, "microphone");
+    const bool hasGeolocation = permissionTypeListHas(permissionTypes, "geolocation");
+    const bool hasNotifications = permissionTypeListHas(permissionTypes, "notifications");
+
+    if (hasCamera && hasMicrophone && permissionTypes.size() == 2) {
+        return "Camera & Microphone Access";
+    }
+
+    if (permissionTypes.size() == 1) {
+        if (hasCamera || hasMicrophone) return "Camera & Microphone Access";
+        if (hasGeolocation) return "Location Access";
+        if (hasNotifications) return "Notification Permission";
+    }
+
+    return "Permission Request";
+}
+
+static bool permissionTypeListHas(const std::vector<std::string>& permissionTypes, const std::string& permissionType) {
+    for (const auto& candidate : permissionTypes) {
+        if (candidate == permissionType) {
+            return true;
+        }
+    }
+    return false;
+}
+
+static void addPermissionType(std::vector<std::string>& types, const std::string& type) {
+    if (std::find(types.begin(), types.end(), type) == types.end()) {
+        types.push_back(type);
+    }
+}
+
+static std::string getOriginFromUrlString(const std::string& url) {
+    if (url.empty()) return "";
+    return electrobun::getOriginFromUrl(url);
+}
+
+static std::string getOriginFromWebViewUrl(WebKitWebView* webview) {
+    if (!webview) return "";
+    const char* uri = webkit_web_view_get_uri(webview);
+    if (!uri) return "";
+    return getOriginFromUrlString(uri);
+}
+
+static std::vector<std::string> permissionTypesForWebKitPermissionRequest(WebKitPermissionRequest* request) {
+    std::vector<std::string> permissionTypes;
+
+    if (WEBKIT_IS_USER_MEDIA_PERMISSION_REQUEST(request)) {
+        addPermissionType(permissionTypes, "camera");
+        addPermissionType(permissionTypes, "microphone");
+        return permissionTypes;
+    }
+
+    const char* requestType = G_OBJECT_TYPE_NAME(request);
+    if (!requestType) {
+        addPermissionType(permissionTypes, "other");
+        return permissionTypes;
+    }
+
+    std::string typeName(requestType);
+
+    if (typeName.find("Geolocation") != std::string::npos) {
+        addPermissionType(permissionTypes, "geolocation");
+    }
+    if (typeName.find("Notification") != std::string::npos) {
+        addPermissionType(permissionTypes, "notifications");
+    }
+    if (typeName.find("Clipboard") != std::string::npos) {
+        addPermissionType(permissionTypes, "clipboardRead");
+        addPermissionType(permissionTypes, "clipboardWrite");
+    }
+    if (typeName.find("Screen") != std::string::npos) {
+        addPermissionType(permissionTypes, "screen");
+    }
+    if (typeName.find("Sensors") != std::string::npos) {
+        addPermissionType(permissionTypes, "sensors");
+    }
+    if (typeName.find("Storage") != std::string::npos) {
+        if (typeName.find("TopLevel") != std::string::npos) {
+            addPermissionType(permissionTypes, "topLevelStorageAccess");
+        } else {
+            addPermissionType(permissionTypes, "storageAccess");
+        }
+    }
+    if (typeName.find("Pointer") != std::string::npos) {
+        addPermissionType(permissionTypes, "pointerLock");
+    }
+    if (typeName.find("Midi") != std::string::npos || typeName.find("MIDI") != std::string::npos) {
+        addPermissionType(permissionTypes, "midi");
+        if (typeName.find("Sysex") != std::string::npos || typeName.find("SYSEX") != std::string::npos) {
+            addPermissionType(permissionTypes, "midiSysex");
+        }
+    }
+    if (typeName.find("LocalNetwork") != std::string::npos) {
+        addPermissionType(permissionTypes, "localNetwork");
+    }
+    if (typeName.find("Loopback") != std::string::npos) {
+        addPermissionType(permissionTypes, "loopbackNetwork");
+    }
+    if (typeName.find("LocalNetworkAccess") != std::string::npos) {
+        addPermissionType(permissionTypes, "localNetworkAccess");
+    }
+    if (typeName.find("Keyboard") != std::string::npos) {
+        addPermissionType(permissionTypes, "keyboardLock");
+    }
+    if (typeName.find("Protocol") != std::string::npos) {
+        addPermissionType(permissionTypes, "registerProtocolHandler");
+    }
+    if (typeName.find("Window") != std::string::npos && typeName.find("Management") != std::string::npos) {
+        addPermissionType(permissionTypes, "windowManagement");
+    }
+    if (typeName.find("FileSystem") != std::string::npos) {
+        addPermissionType(permissionTypes, "fileSystemAccess");
+    }
+    if (typeName.find("Font") != std::string::npos) {
+        addPermissionType(permissionTypes, "localFonts");
+    }
+    if (typeName.find("Disk") != std::string::npos && typeName.find("Quota") != std::string::npos) {
+        addPermissionType(permissionTypes, "diskQuota");
+    }
+    if (typeName.find("Hand") != std::string::npos && typeName.find("Tracking") != std::string::npos) {
+        addPermissionType(permissionTypes, "handTracking");
+    }
+    if (typeName.find("Identity") != std::string::npos) {
+        addPermissionType(permissionTypes, "identityProvider");
+    }
+    if (typeName.find("Idle") != std::string::npos) {
+        addPermissionType(permissionTypes, "idleDetection");
+    }
+    if (typeName.find("Download") != std::string::npos) {
+        addPermissionType(permissionTypes, "multipleDownloads");
+    }
+    if (typeName.find("ProtectedMedia") != std::string::npos) {
+        addPermissionType(permissionTypes, "protectedMediaIdentifier");
+    }
+    if (typeName.find("VR") != std::string::npos) {
+        addPermissionType(permissionTypes, "vrSession");
+    }
+    if (typeName.find("AR") != std::string::npos) {
+        addPermissionType(permissionTypes, "arSession");
+    }
+    if (typeName.find("WebApp") != std::string::npos || typeName.find("Install") != std::string::npos) {
+        addPermissionType(permissionTypes, "webAppInstallation");
+    }
+
+    if (permissionTypes.empty()) {
+        addPermissionType(permissionTypes, "other");
+    }
+
+    return permissionTypes;
+}
+
+static bool emitPermissionRequest(WebviewEventHandler handler,
+                                  uint32_t webviewId,
+                                  const std::string& origin,
+                                  const std::string& pageUrl,
+                                  const std::string& frameUrl,
+                                  const std::vector<std::string>& permissionTypes,
+                                  std::function<void(bool)> responder) {
+    if (!handler) return false;
+
+    uint64_t requestId = g_nextPermissionRequestId.fetch_add(1);
+    std::string requestIdKey = std::to_string(requestId);
+    std::string permissionTypesJson = "[";
+    for (size_t i = 0; i < permissionTypes.size(); i++) {
+        if (i > 0) {
+            permissionTypesJson += ",";
+        }
+        permissionTypesJson += "\"" + escapeJsonString(permissionTypes[i]) + "\"";
+    }
+    permissionTypesJson += "]";
+
+    std::string payload = "{"
+        "\"requestId\":\"" + requestIdKey + "\"," +
+        "\"webviewId\":" + std::to_string(webviewId) + "," +
+        "\"origin\":\"" + escapeJsonString(origin) + "\"," +
+        "\"pageUrl\":\"" + escapeJsonString(pageUrl) + "\"," +
+        "\"frameUrl\":\"" + escapeJsonString(frameUrl) + "\"," +
+        "\"permissionTypes\":" + permissionTypesJson + "," +
+        "\"platform\":\"linux\""
+        "}";
+
+    {
+        std::lock_guard<std::mutex> lock(g_pendingPermissionRequestsMutex);
+        g_pendingPermissionRequests[requestIdKey] = {std::move(responder)};
+    }
+
+    uint32_t handled = handler(webviewId, strdup("permission-requested"), strdup(payload.c_str()));
+    if (handled != 0) return true;
+
+    {
+        std::lock_guard<std::mutex> lock(g_pendingPermissionRequestsMutex);
+        g_pendingPermissionRequests.erase(requestIdKey);
+    }
+    return false;
+}
+
+static void resolvePendingPermissionRequest(const char* requestId, bool allowed) {
+    if (!requestId) return;
+
+    std::function<void(bool)> responder;
+    {
+        std::lock_guard<std::mutex> lock(g_pendingPermissionRequestsMutex);
+        auto it = g_pendingPermissionRequests.find(requestId);
+        if (it == g_pendingPermissionRequests.end()) return;
+
+        responder = std::move(it->second.respond);
+        g_pendingPermissionRequests.erase(it);
+    }
+
+    if (responder) {
+        responder(allowed);
+    }
+}
+
+static void resolvePermissionRequestDecision(const char* requestId, const char* decision) {
+    if (!requestId || !decision) return;
+
+    if (strcmp(decision, "allow") == 0 || strcmp(decision, "allowOnce") == 0) {
+        resolvePendingPermissionRequest(requestId, true);
+        return;
+    }
+
+    if (strcmp(decision, "block") == 0) {
+        resolvePendingPermissionRequest(requestId, false);
+        return;
+    }
+
+    fprintf(stderr, "Linux permission request %s has invalid decision: %s\n", requestId, decision);
+}
+
+static gboolean onPermissionRequestDecision(gpointer userData) {
+    auto* state = static_cast<std::pair<WebKitPermissionRequest*, bool>*>(userData);
+    if (state && state->first) {
+        if (state->second) {
+            webkit_permission_request_allow(state->first);
+        } else {
+            webkit_permission_request_deny(state->first);
+        }
+        g_object_unref(state->first);
+        delete state;
+    }
+    return G_SOURCE_REMOVE;
+}
+
+struct CefMediaPermissionDecision {
+    CefRefPtr<CefMediaAccessCallback> callback;
+    uint32_t requestedPermissions;
+    bool allowed;
+};
+
+static gboolean runCefMediaPermissionDecision(gpointer userData) {
+    auto* state = static_cast<CefMediaPermissionDecision*>(userData);
+    if (state && state->callback) {
+        if (state->allowed) {
+            state->callback->Continue(state->requestedPermissions);
+        } else {
+            state->callback->Cancel();
+        }
+        delete state;
+    }
+    return G_SOURCE_REMOVE;
+}
+
+struct CefPermissionPromptDecision {
+    CefRefPtr<CefPermissionPromptCallback> callback;
+    bool allowed;
+};
+
+static gboolean runCefPermissionPromptDecision(gpointer userData) {
+    auto* state = static_cast<CefPermissionPromptDecision*>(userData);
+    if (state && state->callback) {
+        state->callback->Continue(state->allowed ? CEF_PERMISSION_RESULT_ACCEPT : CEF_PERMISSION_RESULT_DENY);
+        delete state;
+    }
+    return G_SOURCE_REMOVE;
 }
 
 // Menu JSON structure is now defined in shared/json_menu_parser.h
@@ -1684,14 +2032,43 @@ public:
         std::string origin = requesting_origin.ToString();
         printf("CEF: Media access permission requested for %s (permissions: %u)\n", origin.c_str(), requested_permissions);
 
+        std::string pageUrl;
+        if (browser && browser->GetMainFrame()) {
+            pageUrl = browser->GetMainFrame()->GetURL().ToString();
+        }
+        std::string frameUrl;
+        if (frame) {
+            frameUrl = frame->GetURL().ToString();
+        }
+        if (pageUrl.empty()) pageUrl = origin;
+        if (frameUrl.empty()) frameUrl = pageUrl;
+
         // views:// is the app's own bundled-asset shell — always trusted, never prompt.
         if (origin.find("views://") == 0) {
             callback->Continue(requested_permissions);
             return true;
         }
 
-        // Check cache first
-        PermissionStatus cachedStatus = getPermissionFromCache(origin, PermissionType::USER_MEDIA);
+        std::vector<std::string> permissionTypes = electrobun::cefPermissionTypes(requested_permissions);
+        CefRefPtr<CefMediaAccessCallback> callbackRef = callback;
+        uint32_t requestedPermissions = requested_permissions;
+
+        bool bridged = emitPermissionRequest(
+            webview_event_handler_,
+            webview_id_,
+            origin,
+            pageUrl,
+            frameUrl,
+            permissionTypes,
+            [callbackRef, requestedPermissions](bool allowed) {
+                auto* state = new CefMediaPermissionDecision{callbackRef, requestedPermissions, allowed};
+                g_idle_add(runCefMediaPermissionDecision, state);
+            });
+        if (bridged) {
+            return true;
+        }
+
+        PermissionStatus cachedStatus = getPermissionFromCache(origin, permissionTypes);
         
         if (cachedStatus == PermissionStatus::ALLOWED) {
             printf("CEF: Using cached permission: User previously allowed media access for %s\n", origin.c_str());
@@ -1740,11 +2117,11 @@ public:
         // Handle response and cache the decision
         if (response == GTK_RESPONSE_YES) {
             callback->Continue(requested_permissions); // Allow all requested permissions
-            cachePermission(origin, PermissionType::USER_MEDIA, PermissionStatus::ALLOWED);
+            cachePermission(origin, permissionTypes, PermissionStatus::ALLOWED);
             printf("CEF: User allowed media access for %s (cached)\n", origin.c_str());
         } else {
             callback->Cancel();
-            cachePermission(origin, PermissionType::USER_MEDIA, PermissionStatus::DENIED);
+            cachePermission(origin, permissionTypes, PermissionStatus::DENIED);
             printf("CEF: User blocked media access for %s (cached)\n", origin.c_str());
         }
         
@@ -1761,6 +2138,17 @@ public:
         std::string origin = requesting_origin.ToString();
         printf("CEF: Permission prompt requested for %s (permissions: %u)\n", origin.c_str(), requested_permissions);
 
+        std::string pageUrl;
+        if (browser && browser->GetMainFrame()) {
+            pageUrl = browser->GetMainFrame()->GetURL().ToString();
+        }
+        std::string frameUrl;
+        if (browser && browser->GetFocusedFrame()) {
+            frameUrl = browser->GetFocusedFrame()->GetURL().ToString();
+        }
+        if (pageUrl.empty()) pageUrl = origin;
+        if (frameUrl.empty()) frameUrl = pageUrl;
+
         // views:// is the app's own bundled-asset shell — always trusted, never prompt.
         // This also covers Chromium's new Loopback/Local Network Access gate triggered
         // by the per-webview RPC websocket to ws://localhost:<port>.
@@ -1769,36 +2157,43 @@ public:
             return true;
         }
 
-        // Handle different permission types
-        PermissionType permType = PermissionType::OTHER;
-        std::string message;
+        std::vector<std::string> permissionTypes = electrobun::cefPermissionTypes(requested_permissions);
+        std::string permissionList = permissionTypesListForMessage(permissionTypes);
+        std::string message = "This page is requesting permission for: " + permissionList + ".\n\nDo you want to allow this?";
         std::string title = "Permission Request";
 
-        // Check for specific permission types
-        if (requested_permissions & CEF_PERMISSION_TYPE_CAMERA_STREAM ||
-            requested_permissions & CEF_PERMISSION_TYPE_MIC_STREAM) {
-            permType = PermissionType::USER_MEDIA;
-            message = "This page wants to access your camera and/or microphone.\n\nDo you want to allow this?";
+        if (permissionTypes.size() == 2 && permissionTypeListHas(permissionTypes, "camera") &&
+            permissionTypeListHas(permissionTypes, "microphone")) {
             title = "Camera & Microphone Access";
-        } else if (requested_permissions & CEF_PERMISSION_TYPE_GEOLOCATION) {
-            permType = PermissionType::GEOLOCATION;
-            message = "This page wants to access your location.\n\nDo you want to allow this?";
-            title = "Location Access";
-        } else if (requested_permissions & CEF_PERMISSION_TYPE_NOTIFICATIONS) {
-            permType = PermissionType::NOTIFICATIONS;
-            message = "This page wants to show notifications.\n\nDo you want to allow this?";
-            title = "Notification Permission";
-        } else {
-            // Unrecognized permission type — name what's being requested instead of
-            // a generic "additional permissions" dialog so the user can decide.
-            message = "This page is requesting permission for: " +
-                      electrobun::describeCefPermissions(requested_permissions) +
-                      ".\n\nDo you want to allow this?";
+        } else if (permissionTypes.size() == 1) {
+            if (permissionTypeListHas(permissionTypes, "camera") || permissionTypeListHas(permissionTypes, "microphone")) {
+                title = "Camera & Microphone Access";
+            } else if (permissionTypeListHas(permissionTypes, "geolocation")) {
+                title = "Location Access";
+            } else if (permissionTypeListHas(permissionTypes, "notifications")) {
+                title = "Notification Permission";
+            }
         }
 
-        // Check cache first
-        PermissionStatus cachedStatus = getPermissionFromCache(origin, permType);
-        
+        CefRefPtr<CefPermissionPromptCallback> callbackRef = callback;
+        bool bridged = emitPermissionRequest(
+            webview_event_handler_,
+            webview_id_,
+            origin,
+            pageUrl,
+            frameUrl,
+            permissionTypes,
+            [callbackRef](bool allowed) {
+                auto* state = new CefPermissionPromptDecision{callbackRef, allowed};
+                g_idle_add(runCefPermissionPromptDecision, state);
+            });
+        if (bridged) {
+            return true;
+        }
+
+        // Handle different permission types
+        PermissionStatus cachedStatus = getPermissionFromCache(origin, permissionTypes);
+
         if (cachedStatus == PermissionStatus::ALLOWED) {
             printf("CEF: Using cached permission: User previously allowed %s for %s\n", title.c_str(), origin.c_str());
             callback->Continue(CEF_PERMISSION_RESULT_ACCEPT);
@@ -1842,11 +2237,11 @@ public:
         // Handle response and cache the decision
         if (response == GTK_RESPONSE_YES) {
             callback->Continue(CEF_PERMISSION_RESULT_ACCEPT);
-            cachePermission(origin, permType, PermissionStatus::ALLOWED);
+            cachePermission(origin, permissionTypes, PermissionStatus::ALLOWED);
             printf("CEF: User allowed %s for %s (cached)\n", title.c_str(), origin.c_str());
         } else {
             callback->Continue(CEF_PERMISSION_RESULT_DENY);
-            cachePermission(origin, permType, PermissionStatus::DENIED);
+            cachePermission(origin, permissionTypes, PermissionStatus::DENIED);
             printf("CEF: User blocked %s for %s (cached)\n", title.c_str(), origin.c_str());
         }
         
@@ -3333,77 +3728,60 @@ public:
     
     static gboolean onPermissionRequest(WebKitWebView* webview, WebKitPermissionRequest* request, gpointer user_data) {
         WebKitWebViewImpl* impl = static_cast<WebKitWebViewImpl*>(user_data);
+        if (!impl) return FALSE;
+
+        std::string origin = getOriginFromWebViewUrl(webview);
+        std::string pageUrl = webkit_web_view_get_uri(webview);
+        if (pageUrl.empty()) pageUrl = origin;
+        std::string frameUrl = pageUrl;
+        std::vector<std::string> permissionTypes = permissionTypesForWebKitPermissionRequest(request);
+        std::string permissionList = permissionTypesListForMessage(permissionTypes);
+        std::string title = permissionPromptTitleForTypes(permissionTypes);
+        std::string message = "This page is requesting permission for " + permissionList + ".\n\nDo you want to allow this?";
+
+        // views:// is the app's own bundled-asset shell — always trusted, never prompt.
+        if (origin.find("views://") == 0) {
+            webkit_permission_request_allow(request);
+            return TRUE;
+        }
+
+        WebKitPermissionRequest* requestRef = request;
+        g_object_ref(requestRef);
+        bool bridged = emitPermissionRequest(
+            impl->webviewEventHandler,
+            impl->webviewId,
+            origin,
+            pageUrl,
+            frameUrl,
+            permissionTypes,
+            [requestRef](bool allowed) {
+                auto* state = new std::pair<WebKitPermissionRequest*, bool>(requestRef, allowed);
+                g_idle_add(onPermissionRequestDecision, state);
+            });
+        if (bridged) {
+            return TRUE;
+        }
+
+        // We are on the GTK UI path only; if webview-specific handler is missing,
+        // fall back to old native dialog behavior.
+        g_object_unref(requestRef);
+
+        // Check cache first
+        PermissionStatus cachedStatus = getPermissionFromCache(origin, permissionTypes);
         
-        // Check if this is a user media permission request (camera/microphone)
-        if (WEBKIT_IS_USER_MEDIA_PERMISSION_REQUEST(request)) {
-            std::string origin = getOriginFromPermissionRequest(request);
-            
-            // Check cache first
-            PermissionStatus cachedStatus = getPermissionFromCache(origin, PermissionType::USER_MEDIA);
-            
-            if (cachedStatus == PermissionStatus::ALLOWED) {
-                printf("Using cached permission: User previously allowed camera/microphone access for %s\n", origin.c_str());
-                webkit_permission_request_allow(request);
-                return TRUE;
-            } else if (cachedStatus == PermissionStatus::DENIED) {
-                printf("Using cached permission: User previously blocked camera/microphone access for %s\n", origin.c_str());
-                webkit_permission_request_deny(request);
-                return TRUE;
-            }
-            
-            // No cached permission, show dialog
-            printf("No cached permission found for %s, showing dialog\n", origin.c_str());
-            
-            // Create camera/microphone permission dialog
-            std::string message = "This page wants to access your camera and/or microphone.\n\nDo you want to allow this?";
-            std::string title = "Camera & Microphone Access";
-            
-            // Create permission dialog with custom buttons
-            GtkWidget* dialog = gtk_dialog_new_with_buttons(
-                title.c_str(),
-                nullptr,
-                GTK_DIALOG_MODAL,
-                "Allow", GTK_RESPONSE_YES,
-                "Block", GTK_RESPONSE_NO,
-                nullptr
-            );
-            
-            // Add message label
-            GtkWidget* content_area = gtk_dialog_get_content_area(GTK_DIALOG(dialog));
-            GtkWidget* label = gtk_label_new(message.c_str());
-            gtk_label_set_line_wrap(GTK_LABEL(label), TRUE);
-            gtk_widget_set_margin_top(label, 10);
-            gtk_widget_set_margin_bottom(label, 10);
-            gtk_widget_set_margin_start(label, 10);
-            gtk_widget_set_margin_end(label, 10);
-            gtk_container_add(GTK_CONTAINER(content_area), label);
-            gtk_widget_show_all(dialog);
-            
-            gtk_window_set_position(GTK_WINDOW(dialog), GTK_WIN_POS_CENTER);
-            
-            // Show dialog and get response
-            gint response = gtk_dialog_run(GTK_DIALOG(dialog));
-            gtk_widget_destroy(dialog);
-            
-            // Handle response and cache the decision
-            if (response == GTK_RESPONSE_YES) {
-                webkit_permission_request_allow(request);
-                cachePermission(origin, PermissionType::USER_MEDIA, PermissionStatus::ALLOWED);
-                printf("User allowed camera/microphone access for %s (cached)\n", origin.c_str());
-            } else {
-                webkit_permission_request_deny(request);
-                cachePermission(origin, PermissionType::USER_MEDIA, PermissionStatus::DENIED);
-                printf("User blocked camera/microphone access for %s (cached)\n", origin.c_str());
-            }
-            
+        if (cachedStatus == PermissionStatus::ALLOWED) {
+            printf("Using cached permission: User previously allowed request for %s on %s\n", origin.c_str(), permissionList.c_str());
+            webkit_permission_request_allow(request);
+            return TRUE;
+        } else if (cachedStatus == PermissionStatus::DENIED) {
+            printf("Using cached permission: User previously blocked request for %s on %s\n", origin.c_str(), permissionList.c_str());
+            webkit_permission_request_deny(request);
             return TRUE;
         }
         
-        // For other permission types (geolocation, notifications, etc.)
-        std::string message = "This page is requesting additional permissions.\n\nDo you want to allow this?";
-        std::string title = "Permission Request";
+        // No cached permission, show dialog
+        printf("No cached permission found for %s, showing dialog\n", origin.c_str());
         
-        // Create permission dialog with custom buttons
         GtkWidget* dialog = gtk_dialog_new_with_buttons(
             title.c_str(),
             nullptr,
@@ -3413,7 +3791,6 @@ public:
             nullptr
         );
         
-        // Add message label
         GtkWidget* content_area = gtk_dialog_get_content_area(GTK_DIALOG(dialog));
         GtkWidget* label = gtk_label_new(message.c_str());
         gtk_label_set_line_wrap(GTK_LABEL(label), TRUE);
@@ -3428,13 +3805,15 @@ public:
         
         gint response = gtk_dialog_run(GTK_DIALOG(dialog));
         gtk_widget_destroy(dialog);
-        
+
         if (response == GTK_RESPONSE_YES) {
             webkit_permission_request_allow(request);
-            printf("User allowed permission request\n");
+            cachePermission(origin, permissionTypes, PermissionStatus::ALLOWED);
+            printf("User allowed permission request for %s (cached)\n", permissionList.c_str());
         } else {
             webkit_permission_request_deny(request);
-            printf("User blocked permission request\n");
+            cachePermission(origin, permissionTypes, PermissionStatus::DENIED);
+            printf("User blocked permission request for %s (cached)\n", permissionList.c_str());
         }
         
         return TRUE;
@@ -8398,10 +8777,11 @@ ELECTROBUN_EXPORT void webviewReload(AbstractView* abstractView) {
     }
 }
 
-ELECTROBUN_EXPORT void webviewCancelDownload(AbstractView* abstractView, uint32_t downloadId) {
+ELECTROBUN_EXPORT bool webviewCancelDownload(AbstractView* abstractView, uint32_t downloadId) {
     // Download cancellation is currently only implemented on macOS.
     (void)abstractView;
     (void)downloadId;
+    return false;
 }
 
 ELECTROBUN_EXPORT void webviewRemove(AbstractView* abstractView) {
@@ -8663,7 +9043,7 @@ ELECTROBUN_EXPORT double webviewGetPageZoom(AbstractView* abstractView) {
 }
 
 ELECTROBUN_EXPORT void webviewRespondToPermissionRequest(const char* requestId, const char* decision) {
-    // Linux permission prompts still use the native fallback path.
+    resolvePermissionRequestDecision(requestId, decision);
 }
 
 ELECTROBUN_EXPORT void updatePreloadScriptToWebView(AbstractView* abstractView, const char* scriptIdentifier, const char* scriptContent, bool forMainFrameOnly) {

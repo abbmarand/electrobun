@@ -3,6 +3,7 @@ import { dirname, join, resolve } from "path";
 import electrobunEventEmitter from "../events/eventEmitter";
 import ElectrobunEvent from "../events/event";
 import type {
+	BrowserDownloadEventDetail,
 	BrowserPermissionPlatform,
 	BrowserPermissionRequestDetail,
 	BrowserPermissionType
@@ -376,7 +377,7 @@ export const native = (() => {
 			},
 			webviewCancelDownload: {
 				args: [FFIType.ptr, FFIType.u32],
-				returns: FFIType.void
+				returns: FFIType.bool
 			},
 			webviewRemove: {
 				args: [FFIType.ptr],
@@ -784,6 +785,14 @@ export const native = (() => {
 			requestMacPermissionDragGuide: {
 				args: [FFIType.cstring, FFIType.cstring, FFIType.bool],
 				returns: FFIType.int
+			},
+			requestMacMediaPermission: {
+				args: [FFIType.cstring],
+				returns: FFIType.int
+			},
+			getCurrentLocationJson: {
+				args: [FFIType.f64],
+				returns: FFIType.cstring
 			},
 			closeMacPermissionDragGuide: {
 				args: [],
@@ -1623,6 +1632,7 @@ const _ffiImpl = {
 			navigationRules: string | null;
 			sandbox: boolean;
 			startTransparent: boolean;
+			transparentBackground: boolean;
 			startPassthrough: boolean;
 			contentBlocker: boolean;
 		}): FFIType.ptr => {
@@ -1644,6 +1654,7 @@ const _ffiImpl = {
 				navigationRules,
 				sandbox,
 				startTransparent,
+				transparentBackground,
 				startPassthrough,
 				contentBlocker
 			} = params;
@@ -1651,7 +1662,7 @@ const _ffiImpl = {
 			const parentWindow = BrowserWindow.getById(windowId);
 			const windowPtr = parentWindow?.ptr;
 			// Get transparent flag from parent window
-			const transparent = parentWindow?.transparent ?? false;
+			const transparent = (parentWindow?.transparent ?? false) || transparentBackground;
 
 			if (!windowPtr) {
 				throw `Can't add webview to window. window no longer exists`;
@@ -2215,6 +2226,20 @@ window.__electrobunBunBridge = window.__electrobunBunBridge || window.webkit?.me
 				ok: false,
 				error: "This macOS permission is not supported by the drag-to-Settings flow."
 			};
+		},
+		requestMacMediaPermission: (params: { kind: MacPermissionKind }): boolean => {
+			return native_.symbols.requestMacMediaPermission(toCString(params.kind)) === 1;
+		},
+		getCurrentLocation: (params: { timeoutSeconds?: number }): CurrentLocationResult => {
+			const result = native_.symbols.getCurrentLocationJson(params.timeoutSeconds ?? 8);
+			if (!result) {
+				return {
+					ok: false,
+					name: "PositionUnavailableError",
+					message: "Location is unavailable."
+				};
+			}
+			return readCurrentLocationResult(result.toString());
 		},
 		closeMacPermissionDragGuide: (): void => {
 			native_.symbols.closeMacPermissionDragGuide();
@@ -2812,6 +2837,28 @@ export interface Point {
 	y: number;
 }
 
+export type CurrentLocationCoordinates = {
+	latitude: number;
+	longitude: number;
+	accuracy: number;
+	altitude?: number;
+	altitudeAccuracy?: number;
+	heading?: number;
+	speed?: number;
+};
+
+export type CurrentLocationResult =
+	| {
+			ok: true;
+			coords: CurrentLocationCoordinates;
+			timestamp: number;
+	  }
+	| {
+			ok: false;
+			name: string;
+			message: string;
+	  };
+
 export type OnScreenWindowInfo = {
 	owner: string;
 	name: string;
@@ -2854,6 +2901,64 @@ export type MacPermissionKind =
 export type MacPermissionDragGuideResult =
 	| { ok: true; alreadyGranted: boolean }
 	| { ok: false; error: string };
+
+function numericRecordField(record: Record<string, unknown>, key: string): number | undefined {
+	const value = record[key];
+	return typeof value === "number" && Number.isFinite(value) ? value : undefined;
+}
+
+function stringRecordField(record: Record<string, unknown>, key: string): string | undefined {
+	const value = record[key];
+	return typeof value === "string" && value.length > 0 ? value : undefined;
+}
+
+function readCurrentLocationResult(json: string): CurrentLocationResult {
+	try {
+		const parsed: unknown = JSON.parse(json);
+		if (!isRecord(parsed)) {
+			return {
+				ok: false,
+				name: "PositionUnavailableError",
+				message: "Location is unavailable."
+			};
+		}
+
+		const coordsValue = parsed["coords"];
+		if (parsed["ok"] === true && isRecord(coordsValue)) {
+			const latitude = numericRecordField(coordsValue, "latitude");
+			const longitude = numericRecordField(coordsValue, "longitude");
+			const accuracy = numericRecordField(coordsValue, "accuracy");
+			if (latitude !== undefined && longitude !== undefined && accuracy !== undefined) {
+				const coords: CurrentLocationCoordinates = { latitude, longitude, accuracy };
+				const altitude = numericRecordField(coordsValue, "altitude");
+				const altitudeAccuracy = numericRecordField(coordsValue, "altitudeAccuracy");
+				const heading = numericRecordField(coordsValue, "heading");
+				const speed = numericRecordField(coordsValue, "speed");
+				if (altitude !== undefined) coords.altitude = altitude;
+				if (altitudeAccuracy !== undefined) coords.altitudeAccuracy = altitudeAccuracy;
+				if (heading !== undefined) coords.heading = heading;
+				if (speed !== undefined) coords.speed = speed;
+				return {
+					ok: true,
+					coords,
+					timestamp: numericRecordField(parsed, "timestamp") ?? Date.now()
+				};
+			}
+		}
+
+		return {
+			ok: false,
+			name: stringRecordField(parsed, "name") ?? "PositionUnavailableError",
+			message: stringRecordField(parsed, "message") ?? "Location is unavailable."
+		};
+	} catch {
+		return {
+			ok: false,
+			name: "PositionUnavailableError",
+			message: "Location is unavailable."
+		};
+	}
+}
 
 // Screen module for display and cursor information
 export const Screen = {
@@ -2964,10 +3069,24 @@ export const Screen = {
 	},
 
 	/**
+	 * Request macOS Camera or Microphone access using the native system prompt.
+	 */
+	requestMacMediaPermission: (kind: "camera" | "microphone"): boolean => {
+		return ffi.request.requestMacMediaPermission({ kind });
+	},
+
+	/**
 	 * Close the native draggable permission guide panel if it is visible.
 	 */
 	closeMacPermissionDragGuide: (): void => {
 		ffi.request.closeMacPermissionDragGuide();
+	},
+
+	/**
+	 * Request a one-shot native location fix through CoreLocation.
+	 */
+	getCurrentLocation: (timeoutSeconds = 8): CurrentLocationResult => {
+		return ffi.request.getCurrentLocation({ timeoutSeconds });
 	},
 
 	/**
@@ -3187,18 +3306,49 @@ function isBrowserPermissionType(value: unknown): value is BrowserPermissionType
 		case "clipboardRead":
 		case "clipboardWrite":
 		case "screen":
+		case "midiSysex":
+		case "topLevelStorageAccess":
+		case "storageAccess":
+		case "diskQuota":
+		case "localFonts":
+		case "handTracking":
+		case "identityProvider":
+		case "idleDetection":
+		case "multipleDownloads":
+		case "keyboardLock":
+		case "pointerLock":
+		case "protectedMediaIdentifier":
+		case "registerProtocolHandler":
+		case "vrSession":
+		case "webAppInstallation":
+		case "windowManagement":
+		case "fileSystemAccess":
+		case "localNetwork":
+		case "loopbackNetwork":
+		case "arSession":
+		case "sensors":
+		case "localNetworkAccess":
+		case "other":
 			return true;
-		default:
-			return false;
 	}
+	return false;
+}
+
+function parseBrowserPermissionType(value: unknown): BrowserPermissionType | null {
+	if (typeof value !== "string") return null;
+	if (isBrowserPermissionType(value)) return value;
+	return value.length > 0 ? "other" : null;
 }
 
 function readPermissionTypes(value: unknown): BrowserPermissionType[] | null {
 	if (!Array.isArray(value)) return null;
 	const types: BrowserPermissionType[] = [];
+	const seen = new Set<BrowserPermissionType>();
 	for (const item of value) {
-		if (!isBrowserPermissionType(item)) return null;
-		types.push(item);
+		const parsed = parseBrowserPermissionType(item);
+		if (!parsed || seen.has(parsed)) continue;
+		types.push(parsed);
+		seen.add(parsed);
 	}
 	return types.length > 0 ? types : null;
 }
@@ -3245,6 +3395,24 @@ function parsePermissionRequestDetail(detail: string): BrowserPermissionRequestD
 	};
 }
 
+type PermissionDecision = "allowOnce" | "allow" | "block";
+
+function parsePermissionDecision(value: unknown): PermissionDecision | null {
+	if (value === "allowOnce" || value === "allow" || value === "block") return value;
+	return null;
+}
+
+function parsePermissionDecidedDetail(
+	detail: string
+): { requestId: string; decision: PermissionDecision } | null {
+	const raw = parseJsonObject(detail);
+	if (!raw) return null;
+	const requestId = raw["requestId"];
+	const decision = parsePermissionDecision(raw["decision"]);
+	if (typeof requestId !== "string" || !decision) return null;
+	return { requestId, decision };
+}
+
 function parseJsonObject(detail: string): Record<string, unknown> | null {
 	try {
 		const raw: unknown = JSON.parse(detail);
@@ -3276,6 +3444,124 @@ function optionalStringOrNumberField(
 	const value = record[key];
 	if (typeof value === "string" || typeof value === "number") return value;
 	return undefined;
+}
+
+function optionalFiniteNumberField(
+	record: Record<string, unknown>,
+	key: string
+): number | undefined {
+	const value = record[key];
+	return typeof value === "number" && Number.isFinite(value) ? value : undefined;
+}
+
+function optionalByteField(record: Record<string, unknown>, key: string): number | undefined {
+	const value = optionalFiniteNumberField(record, key);
+	return value !== undefined && value >= 0 ? value : undefined;
+}
+
+function optionalProgressField(record: Record<string, unknown>, key: string): number | undefined {
+	const value = optionalFiniteNumberField(record, key);
+	if (value === undefined || value < 0) return undefined;
+	return value > 100 ? 100 : value;
+}
+
+function optionalNonEmptyStringField(
+	record: Record<string, unknown>,
+	key: string
+): string | undefined {
+	const value = optionalStringField(record, key);
+	return value && value.length > 0 ? value : undefined;
+}
+
+function readDownloadEventId(record: Record<string, unknown>): string | null {
+	const idValue = record["downloadId"] ?? record["id"];
+	if (typeof idValue === "string" && idValue.length > 0) return idValue;
+	if (typeof idValue === "number" && Number.isFinite(idValue)) return String(idValue);
+	return null;
+}
+
+function parseDownloadEventDetail(detail: string): BrowserDownloadEventDetail | null {
+	const raw = parseJsonObject(detail);
+	if (!raw) return null;
+
+	const id = readDownloadEventId(raw);
+	if (!id) return null;
+
+	const downloadId = optionalStringOrNumberField(raw, "downloadId");
+	const filename =
+		optionalNonEmptyStringField(raw, "filename") ??
+		optionalNonEmptyStringField(raw, "suggestedFilename");
+	const path =
+		optionalNonEmptyStringField(raw, "path") ??
+		optionalNonEmptyStringField(raw, "destinationPath") ??
+		optionalNonEmptyStringField(raw, "fullPath");
+	const destinationPath = optionalNonEmptyStringField(raw, "destinationPath") ?? path;
+	const sourceUrl =
+		optionalNonEmptyStringField(raw, "sourceUrl") ??
+		optionalNonEmptyStringField(raw, "url") ??
+		optionalNonEmptyStringField(raw, "originalUrl");
+	const url = optionalNonEmptyStringField(raw, "url") ?? sourceUrl;
+	const originalUrl = optionalNonEmptyStringField(raw, "originalUrl") ?? sourceUrl;
+	const mimeType = optionalNonEmptyStringField(raw, "mimeType");
+	const totalBytes =
+		optionalByteField(raw, "totalBytes") ?? optionalByteField(raw, "expectedBytes");
+	const receivedBytes =
+		optionalByteField(raw, "receivedBytes") ?? optionalByteField(raw, "completedBytes");
+	const progress =
+		optionalProgressField(raw, "progress") ?? optionalProgressField(raw, "percentComplete");
+	const percentComplete = optionalProgressField(raw, "percentComplete") ?? progress;
+	const canResume = optionalBooleanField(raw, "canResume");
+	const error =
+		optionalNonEmptyStringField(raw, "error") ?? optionalNonEmptyStringField(raw, "errorMessage");
+	const errorMessage = optionalNonEmptyStringField(raw, "errorMessage") ?? error;
+	const errorCode = optionalStringOrNumberField(raw, "errorCode");
+	const errorDomain = optionalNonEmptyStringField(raw, "errorDomain");
+
+	const parsed: BrowserDownloadEventDetail = { id };
+	if (downloadId !== undefined) parsed.downloadId = downloadId;
+	if (filename !== undefined) parsed.filename = filename;
+	if (path !== undefined) parsed.path = path;
+	if (destinationPath !== undefined) parsed.destinationPath = destinationPath;
+	if (url !== undefined) parsed.url = url;
+	if (sourceUrl !== undefined) parsed.sourceUrl = sourceUrl;
+	if (originalUrl !== undefined) parsed.originalUrl = originalUrl;
+	if (mimeType !== undefined) parsed.mimeType = mimeType;
+	if (totalBytes !== undefined) parsed.totalBytes = totalBytes;
+	if (receivedBytes !== undefined) parsed.receivedBytes = receivedBytes;
+	if (percentComplete !== undefined) parsed.percentComplete = percentComplete;
+	if (progress !== undefined) parsed.progress = progress;
+	if (canResume !== undefined) parsed.canResume = canResume;
+	if (error !== undefined) parsed.error = error;
+	if (errorMessage !== undefined) parsed.errorMessage = errorMessage;
+	if (errorCode !== undefined) parsed.errorCode = errorCode;
+	if (errorDomain !== undefined) parsed.errorDomain = errorDomain;
+	return parsed;
+}
+
+function createDownloadEvent(
+	eventName:
+		| "download-started"
+		| "download-progress"
+		| "download-completed"
+		| "download-failed"
+		| "download-canceled",
+	detail: string
+): ElectrobunEvent<unknown, unknown> | null {
+	const parsed = parseDownloadEventDetail(detail);
+	if (!parsed) return null;
+
+	switch (eventName) {
+		case "download-started":
+			return electrobunEventEmitter.events.webview.downloadStarted({ detail: parsed });
+		case "download-progress":
+			return electrobunEventEmitter.events.webview.downloadProgress({ detail: parsed });
+		case "download-completed":
+			return electrobunEventEmitter.events.webview.downloadCompleted({ detail: parsed });
+		case "download-failed":
+			return electrobunEventEmitter.events.webview.downloadFailed({ detail: parsed });
+		case "download-canceled":
+			return electrobunEventEmitter.events.webview.downloadCanceled({ detail: parsed });
+	}
 }
 
 function createNewWindowOpenEvent(detail: string): ElectrobunEvent<unknown, unknown> | null {
@@ -3322,13 +3608,15 @@ function createWebviewEvent(
 		case "host-message":
 			return electrobunEventEmitter.events.webview.hostMessage({ detail });
 		case "download-started":
-			return electrobunEventEmitter.events.webview.downloadStarted({ detail });
+			return createDownloadEvent("download-started", detail);
 		case "download-progress":
-			return electrobunEventEmitter.events.webview.downloadProgress({ detail });
+			return createDownloadEvent("download-progress", detail);
 		case "download-completed":
-			return electrobunEventEmitter.events.webview.downloadCompleted({ detail });
+			return createDownloadEvent("download-completed", detail);
 		case "download-failed":
-			return electrobunEventEmitter.events.webview.downloadFailed({ detail });
+			return createDownloadEvent("download-failed", detail);
+		case "download-canceled":
+			return createDownloadEvent("download-canceled", detail);
 		case "page-title-updated":
 			return electrobunEventEmitter.events.webview.pageTitleUpdated({ detail });
 		case "favicon-updated":
@@ -3339,6 +3627,30 @@ function createWebviewEvent(
 			return electrobunEventEmitter.events.webview.permissionRequested({
 				detail: permissionDetail
 			});
+		}
+		case "permission-decided": {
+			const permissionDecided = parsePermissionDecidedDetail(detail);
+			if (!permissionDecided) return null;
+			return electrobunEventEmitter.events.webview.permissionDecided({
+				detail: permissionDecided
+			});
+		}
+		default:
+			return null;
+	}
+}
+
+function downloadEventDetailForHostWebview(eventName: string, detail: string): string | null {
+	switch (eventName) {
+		case "download-started":
+		case "download-progress":
+		case "download-completed":
+		case "download-failed":
+		case "download-canceled": {
+			const parsed = parseDownloadEventDetail(detail);
+			if (!parsed) return null;
+			const json = JSON.stringify(parsed);
+			return typeof json === "string" ? json : null;
 		}
 		default:
 			return null;
@@ -3363,10 +3675,14 @@ const webviewEventHandler = (id: number, eventName: string, detail: string): num
 		// This is a webviewtag so we should send the event into the parent as well
 		// NOTE: for new-window-open and host-message the detail is a json string that needs to be parsed
 		let js;
-		if (
+		const downloadDetail = downloadEventDetailForHostWebview(eventName, detail);
+		if (downloadDetail) {
+			js = `document.querySelector('#electrobun-webview-${id}').emit(${JSON.stringify(eventName)}, ${downloadDetail});`;
+		} else if (
 			eventName === "new-window-open" ||
 			eventName === "host-message" ||
-			eventName === "permission-requested"
+			eventName === "permission-requested" ||
+			eventName === "permission-decided"
 		) {
 			// detail is already a JSON string that will be parsed as a JS object
 			js = `document.querySelector('#electrobun-webview-${id}').emit(${JSON.stringify(eventName)}, ${detail});`;

@@ -17,10 +17,18 @@ type WebviewEventType =
 	| "download-progress"
 	| "download-completed"
 	| "download-failed"
+	| "download-canceled"
 	| "load-started"
 	| "load-committed"
 	| "load-finished"
-	| "permission-requested";
+	| "permission-requested"
+	| "permission-decided";
+
+type WebviewRenderer = "native" | "cef";
+
+function readWebviewRenderer(value: string | null): WebviewRenderer {
+	return value === "cef" ? "cef" : "native";
+}
 
 // Registry for webview instances (for event routing from bun)
 export const webviewRegistry: Record<number, ElectrobunWebviewTag> = {};
@@ -34,8 +42,7 @@ export class ElectrobunWebviewTag extends HTMLElement {
 	hidden = false;
 	// Sandbox mode: when true, disables RPC and only allows event emission in the child webview
 	sandboxed = false;
-	private _eventListeners: Record<string, Array<(event: CustomEvent) => void>> =
-		{};
+	private _eventListeners: Record<string, Array<(event: CustomEvent) => void>> = {};
 
 	static get observedAttributes() {
 		return ["src", "html"];
@@ -49,11 +56,7 @@ export class ElectrobunWebviewTag extends HTMLElement {
 		requestAnimationFrame(() => this.initWebview());
 	}
 
-	attributeChangedCallback(
-		name: string,
-		oldValue: string | null,
-		newValue: string | null,
-	) {
+	attributeChangedCallback(name: string, oldValue: string | null, newValue: string | null) {
 		if (oldValue === newValue) return;
 		if (newValue === null) return;
 		if (this.webviewId === null) return;
@@ -75,16 +78,14 @@ export class ElectrobunWebviewTag extends HTMLElement {
 			x: rect.x,
 			y: rect.y,
 			width: rect.width,
-			height: rect.height,
+			height: rect.height
 		};
 
 		const url = this.getAttribute("src");
 		const html = this.getAttribute("html");
 		const preload = this.getAttribute("preload");
 		const partition = this.getAttribute("partition");
-		const renderer = (this.getAttribute("renderer") || "native") as
-			| "native"
-			| "cef";
+		const renderer = readWebviewRenderer(this.getAttribute("renderer"));
 		const masks = this.getAttribute("masks");
 		// Sandbox attribute: when present, the child webview is sandboxed (no RPC, events only)
 		const sandbox = this.hasAttribute("sandbox");
@@ -114,12 +115,12 @@ export class ElectrobunWebviewTag extends HTMLElement {
 					width: rect.width,
 					height: rect.height,
 					x: rect.x,
-					y: rect.y,
+					y: rect.y
 				},
 				navigationRules: null,
 				sandbox,
 				transparent,
-				passthrough,
+				passthrough
 			})) as number;
 
 			this.webviewId = webviewId;
@@ -157,7 +158,7 @@ export class ElectrobunWebviewTag extends HTMLElement {
 							x: mr.x - rect.x,
 							y: mr.y - rect.y,
 							width: mr.width,
-							height: mr.height,
+							height: mr.height
 						});
 					});
 				} catch (_e) {
@@ -173,13 +174,13 @@ export class ElectrobunWebviewTag extends HTMLElement {
 				send("webviewTagResize", {
 					id: this.webviewId,
 					frame: rect,
-					masks: masksJson,
+					masks: masksJson
 				});
 			},
 			getMasks,
 			burstIntervalMs: 10,
 			baseIntervalMs: 100,
-			burstDurationMs: 50,
+			burstDurationMs: 50
 		});
 		this._sync.setLastRect(initialRect);
 		this._sync.start();
@@ -205,31 +206,28 @@ export class ElectrobunWebviewTag extends HTMLElement {
 	}
 
 	reload() {
-		if (this.webviewId !== null)
-			send("webviewTagReload", { id: this.webviewId });
+		if (this.webviewId !== null) send("webviewTagReload", { id: this.webviewId });
 	}
 
 	goBack() {
-		if (this.webviewId !== null)
-			send("webviewTagGoBack", { id: this.webviewId });
+		if (this.webviewId !== null) send("webviewTagGoBack", { id: this.webviewId });
 	}
 
 	goForward() {
-		if (this.webviewId !== null)
-			send("webviewTagGoForward", { id: this.webviewId });
+		if (this.webviewId !== null) send("webviewTagGoForward", { id: this.webviewId });
 	}
 
 	async canGoBack(): Promise<boolean> {
 		if (this.webviewId === null) return false;
 		return (await request("webviewTagCanGoBack", {
-			id: this.webviewId,
+			id: this.webviewId
 		})) as boolean;
 	}
 
 	async canGoForward(): Promise<boolean> {
 		if (this.webviewId === null) return false;
 		return (await request("webviewTagCanGoForward", {
-			id: this.webviewId,
+			id: this.webviewId
 		})) as boolean;
 	}
 
@@ -240,18 +238,17 @@ export class ElectrobunWebviewTag extends HTMLElement {
 		this.style.opacity = this.transparent ? "0" : "";
 		send("webviewTagSetTransparent", {
 			id: this.webviewId,
-			transparent: this.transparent,
+			transparent: this.transparent
 		});
 	}
 
 	togglePassthrough(value?: boolean) {
 		if (this.webviewId === null) return;
-		this.passthroughEnabled =
-			value !== undefined ? value : !this.passthroughEnabled;
+		this.passthroughEnabled = value !== undefined ? value : !this.passthroughEnabled;
 		this.style.pointerEvents = this.passthroughEnabled ? "none" : "";
 		send("webviewTagSetPassthrough", {
 			id: this.webviewId,
-			enablePassthrough: this.passthroughEnabled,
+			enablePassthrough: this.passthroughEnabled
 		});
 	}
 
@@ -280,10 +277,7 @@ export class ElectrobunWebviewTag extends HTMLElement {
 	}
 
 	// Find in page
-	findInPage(
-		searchText: string,
-		options?: { forward?: boolean; matchCase?: boolean },
-	) {
+	findInPage(searchText: string, options?: { forward?: boolean; matchCase?: boolean }) {
 		if (this.webviewId === null) return;
 		const forward = options?.forward !== false;
 		const matchCase = options?.matchCase || false;
@@ -291,29 +285,25 @@ export class ElectrobunWebviewTag extends HTMLElement {
 			id: this.webviewId,
 			searchText,
 			forward,
-			matchCase,
+			matchCase
 		});
 	}
 
 	stopFindInPage() {
-		if (this.webviewId !== null)
-			send("webviewTagStopFind", { id: this.webviewId });
+		if (this.webviewId !== null) send("webviewTagStopFind", { id: this.webviewId });
 	}
 
 	// DevTools
 	openDevTools() {
-		if (this.webviewId !== null)
-			send("webviewTagOpenDevTools", { id: this.webviewId });
+		if (this.webviewId !== null) send("webviewTagOpenDevTools", { id: this.webviewId });
 	}
 
 	closeDevTools() {
-		if (this.webviewId !== null)
-			send("webviewTagCloseDevTools", { id: this.webviewId });
+		if (this.webviewId !== null) send("webviewTagCloseDevTools", { id: this.webviewId });
 	}
 
 	toggleDevTools() {
-		if (this.webviewId !== null)
-			send("webviewTagToggleDevTools", { id: this.webviewId });
+		if (this.webviewId !== null) send("webviewTagToggleDevTools", { id: this.webviewId });
 	}
 
 	// JavaScript execution

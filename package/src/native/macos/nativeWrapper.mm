@@ -126,6 +126,10 @@ static id mouseUpMonitor = nil;
 
 static int g_remoteDebugPort = 9222;
 
+static BOOL locationStatusIsAuthorized(CLAuthorizationStatus status);
+static const char* locationStatusName(CLAuthorizationStatus status);
+static BOOL locationDebugEnabled(void);
+
 // Menu role to selector mapping
 // This maps Electrobun role strings to their corresponding Objective-C selectors.
 // Roles are grouped by category for easier maintenance.
@@ -2549,6 +2553,19 @@ static void addPermissionType(NSMutableArray<NSString *> *types, NSString *type)
     }
 }
 
+static std::vector<std::string> permissionTypeVectorFromArray(NSArray<NSString *> *permissionTypes) {
+    std::vector<std::string> permissionTypeList;
+    for (NSString *permissionType in permissionTypes) {
+        if (permissionType) {
+            permissionTypeList.push_back(std::string([permissionType UTF8String]));
+        }
+    }
+    if (permissionTypeList.empty()) {
+        permissionTypeList.push_back("other");
+    }
+    return permissionTypeList;
+}
+
 static NSArray<NSString *> *permissionTypesForWKMediaCaptureType(WKMediaCaptureType type) {
     NSMutableArray<NSString *> *types = [NSMutableArray array];
     switch (type) {
@@ -2587,7 +2604,13 @@ static NSArray<NSString *> *permissionTypesForCefPermissions(uint32_t requestedP
     }
     if (requestedPermissions & CEF_PERMISSION_TYPE_MIDI_SYSEX) {
         addPermissionType(types, @"midi");
+        addPermissionType(types, @"midiSysex");
     }
+#ifdef CEF_PERMISSION_TYPE_MIDI
+    if (requestedPermissions & CEF_PERMISSION_TYPE_MIDI) {
+        addPermissionType(types, @"midi");
+    }
+#endif
     if (requestedPermissions & CEF_PERMISSION_TYPE_CLIPBOARD) {
         addPermissionType(types, @"clipboardRead");
         addPermissionType(types, @"clipboardWrite");
@@ -2595,7 +2618,263 @@ static NSArray<NSString *> *permissionTypesForCefPermissions(uint32_t requestedP
     if (requestedPermissions & CEF_PERMISSION_TYPE_CAPTURED_SURFACE_CONTROL) {
         addPermissionType(types, @"screen");
     }
+#ifdef CEF_PERMISSION_TYPE_TOP_LEVEL_STORAGE_ACCESS
+    if (requestedPermissions & CEF_PERMISSION_TYPE_TOP_LEVEL_STORAGE_ACCESS) {
+        addPermissionType(types, @"topLevelStorageAccess");
+    }
+#endif
+#ifdef CEF_PERMISSION_TYPE_STORAGE_ACCESS
+    if (requestedPermissions & CEF_PERMISSION_TYPE_STORAGE_ACCESS) {
+        addPermissionType(types, @"storageAccess");
+    }
+#endif
+#ifdef CEF_PERMISSION_TYPE_DISK_QUOTA
+    if (requestedPermissions & CEF_PERMISSION_TYPE_DISK_QUOTA) {
+        addPermissionType(types, @"diskQuota");
+    }
+#endif
+#ifdef CEF_PERMISSION_TYPE_LOCAL_FONTS
+    if (requestedPermissions & CEF_PERMISSION_TYPE_LOCAL_FONTS) {
+        addPermissionType(types, @"localFonts");
+    }
+#endif
+#ifdef CEF_PERMISSION_TYPE_HAND_TRACKING
+    if (requestedPermissions & CEF_PERMISSION_TYPE_HAND_TRACKING) {
+        addPermissionType(types, @"handTracking");
+    }
+#endif
+#ifdef CEF_PERMISSION_TYPE_IDENTITY_PROVIDER
+    if (requestedPermissions & CEF_PERMISSION_TYPE_IDENTITY_PROVIDER) {
+        addPermissionType(types, @"identityProvider");
+    }
+#endif
+#ifdef CEF_PERMISSION_TYPE_IDLE_DETECTION
+    if (requestedPermissions & CEF_PERMISSION_TYPE_IDLE_DETECTION) {
+        addPermissionType(types, @"idleDetection");
+    }
+#endif
+#ifdef CEF_PERMISSION_TYPE_KEYBOARD_LOCK
+    if (requestedPermissions & CEF_PERMISSION_TYPE_KEYBOARD_LOCK) {
+        addPermissionType(types, @"keyboardLock");
+    }
+#endif
+#ifdef CEF_PERMISSION_TYPE_MULTIPLE_DOWNLOADS
+    if (requestedPermissions & CEF_PERMISSION_TYPE_MULTIPLE_DOWNLOADS) {
+        addPermissionType(types, @"multipleDownloads");
+    }
+#endif
+#ifdef CEF_PERMISSION_TYPE_POINTER_LOCK
+    if (requestedPermissions & CEF_PERMISSION_TYPE_POINTER_LOCK) {
+        addPermissionType(types, @"pointerLock");
+    }
+#endif
+#ifdef CEF_PERMISSION_TYPE_PROTECTED_MEDIA_IDENTIFIER
+    if (requestedPermissions & CEF_PERMISSION_TYPE_PROTECTED_MEDIA_IDENTIFIER) {
+        addPermissionType(types, @"protectedMediaIdentifier");
+    }
+#endif
+#ifdef CEF_PERMISSION_TYPE_REGISTER_PROTOCOL_HANDLER
+    if (requestedPermissions & CEF_PERMISSION_TYPE_REGISTER_PROTOCOL_HANDLER) {
+        addPermissionType(types, @"registerProtocolHandler");
+    }
+#endif
+#ifdef CEF_PERMISSION_TYPE_AR_SESSION
+    if (requestedPermissions & CEF_PERMISSION_TYPE_AR_SESSION) {
+        addPermissionType(types, @"arSession");
+    }
+#endif
+#ifdef CEF_PERMISSION_TYPE_VR_SESSION
+    if (requestedPermissions & CEF_PERMISSION_TYPE_VR_SESSION) {
+        addPermissionType(types, @"vrSession");
+    }
+#endif
+#ifdef CEF_PERMISSION_TYPE_WEB_APP_INSTALLATION
+    if (requestedPermissions & CEF_PERMISSION_TYPE_WEB_APP_INSTALLATION) {
+        addPermissionType(types, @"webAppInstallation");
+    }
+#endif
+#ifdef CEF_PERMISSION_TYPE_WINDOW_MANAGEMENT
+    if (requestedPermissions & CEF_PERMISSION_TYPE_WINDOW_MANAGEMENT) {
+        addPermissionType(types, @"windowManagement");
+    }
+#endif
+#ifdef CEF_PERMISSION_TYPE_FILE_SYSTEM_ACCESS
+    if (requestedPermissions & CEF_PERMISSION_TYPE_FILE_SYSTEM_ACCESS) {
+        addPermissionType(types, @"fileSystemAccess");
+    }
+#endif
+#if CEF_API_ADDED(13600)
+    if (requestedPermissions & CEF_PERMISSION_TYPE_LOCAL_NETWORK_ACCESS) {
+        addPermissionType(types, @"localNetworkAccess");
+    }
+#endif
+#if CEF_API_ADDED(14500)
+    if (requestedPermissions & CEF_PERMISSION_TYPE_LOCAL_NETWORK) {
+        addPermissionType(types, @"localNetwork");
+    }
+    if (requestedPermissions & CEF_PERMISSION_TYPE_LOOPBACK_NETWORK) {
+        addPermissionType(types, @"loopbackNetwork");
+    }
+#endif
+#ifdef CEF_PERMISSION_TYPE_SENSORS
+    if (requestedPermissions & CEF_PERMISSION_TYPE_SENSORS) {
+        addPermissionType(types, @"sensors");
+    }
+#endif
+
+    if (types.count == 0) {
+        addPermissionType(types, @"other");
+    }
     return types;
+}
+
+static NSString *permissionTypeLabelForNativeSheet(NSString *permissionType) {
+    if ([permissionType isEqualToString:@"camera"]) return @"Camera";
+    if ([permissionType isEqualToString:@"microphone"]) return @"Microphone";
+    if ([permissionType isEqualToString:@"geolocation"]) return @"Location";
+    if ([permissionType isEqualToString:@"notifications"]) return @"Notifications";
+    if ([permissionType isEqualToString:@"clipboardRead"]) return @"Read Clipboard";
+    if ([permissionType isEqualToString:@"clipboardWrite"]) return @"Clipboard";
+    if ([permissionType isEqualToString:@"screen"]) return @"Screen";
+    if ([permissionType isEqualToString:@"midi"] ||
+        [permissionType isEqualToString:@"midiSysex"]) return @"MIDI";
+    if ([permissionType isEqualToString:@"topLevelStorageAccess"]) return @"Top-Level Storage Access";
+    if ([permissionType isEqualToString:@"storageAccess"]) return @"Storage Access";
+    if ([permissionType isEqualToString:@"diskQuota"]) return @"Disk Quota";
+    if ([permissionType isEqualToString:@"localFonts"]) return @"Local Fonts";
+    if ([permissionType isEqualToString:@"handTracking"]) return @"Hand Tracking";
+    if ([permissionType isEqualToString:@"identityProvider"]) return @"Identity Provider";
+    if ([permissionType isEqualToString:@"idleDetection"]) return @"Idle Detection";
+    if ([permissionType isEqualToString:@"multipleDownloads"]) return @"Multiple Downloads";
+    if ([permissionType isEqualToString:@"keyboardLock"]) return @"Keyboard Lock";
+    if ([permissionType isEqualToString:@"pointerLock"]) return @"Pointer Lock";
+    if ([permissionType isEqualToString:@"protectedMediaIdentifier"]) return @"Protected Media";
+    if ([permissionType isEqualToString:@"registerProtocolHandler"]) return @"Protocol Handler";
+    if ([permissionType isEqualToString:@"vrSession"]) return @"VR Session";
+    if ([permissionType isEqualToString:@"webAppInstallation"]) return @"Web App Installation";
+    if ([permissionType isEqualToString:@"windowManagement"]) return @"Window Management";
+    if ([permissionType isEqualToString:@"fileSystemAccess"]) return @"File System Access";
+    if ([permissionType isEqualToString:@"localNetwork"]) return @"Local Network";
+    if ([permissionType isEqualToString:@"loopbackNetwork"]) return @"Loopback Network";
+    if ([permissionType isEqualToString:@"arSession"]) return @"AR Session";
+    if ([permissionType isEqualToString:@"sensors"]) return @"Sensors";
+    if ([permissionType isEqualToString:@"localNetworkAccess"]) return @"Local Network Access";
+    return permissionType;
+}
+
+static NSString *permissionTypeSymbolForNativeSheet(NSString *permissionType) {
+    if ([permissionType isEqualToString:@"camera"]) return @"camera";
+    if ([permissionType isEqualToString:@"microphone"]) return @"mic";
+    if ([permissionType isEqualToString:@"geolocation"]) return @"location";
+    if ([permissionType isEqualToString:@"notifications"]) return @"bell";
+    if ([permissionType isEqualToString:@"clipboardRead"] ||
+        [permissionType isEqualToString:@"clipboardWrite"]) return @"doc.on.clipboard";
+    if ([permissionType isEqualToString:@"screen"]) return @"display";
+    if ([permissionType isEqualToString:@"midi"] ||
+        [permissionType isEqualToString:@"midiSysex"]) return @"music.note";
+    if ([permissionType isEqualToString:@"topLevelStorageAccess"] ||
+        [permissionType isEqualToString:@"storageAccess"] ||
+        [permissionType isEqualToString:@"fileSystemAccess"] ||
+        [permissionType isEqualToString:@"windowManagement"] ||
+        [permissionType isEqualToString:@"webAppInstallation"] ||
+        [permissionType isEqualToString:@"registerProtocolHandler"]) return @"folder";
+    if ([permissionType isEqualToString:@"diskQuota"] ||
+        [permissionType isEqualToString:@"localFonts"] ||
+        [permissionType isEqualToString:@"protectedMediaIdentifier"]) return @"doc.badge.gearshape";
+    if ([permissionType isEqualToString:@"handTracking"]) return @"hand.point.up";
+    if ([permissionType isEqualToString:@"identityProvider"] ||
+        [permissionType isEqualToString:@"idleDetection"]) return @"person.badge.key.fill";
+    if ([permissionType isEqualToString:@"multipleDownloads"]) return @"arrow.down.doc";
+    if ([permissionType isEqualToString:@"keyboardLock"]) return @"keyboard";
+    if ([permissionType isEqualToString:@"pointerLock"]) return @"cursorarrow.rays";
+    if ([permissionType isEqualToString:@"vrSession"]) return @"gamecontroller";
+    if ([permissionType isEqualToString:@"sensors"]) return @"waveform.path";
+    if ([permissionType isEqualToString:@"localNetwork"] ||
+        [permissionType isEqualToString:@"loopbackNetwork"] ||
+        [permissionType isEqualToString:@"localNetworkAccess"]) return @"wifi";
+    if ([permissionType isEqualToString:@"arSession"]) return @"camera.viewfinder";
+    if ([permissionType isEqualToString:@"other"]) return @"questionmark.app";
+    return @"lock.shield";
+}
+
+static NSString *displayNameForPermissionType(NSString *permissionType) {
+    if ([permissionType isEqualToString:@"camera"]) return @"camera";
+    if ([permissionType isEqualToString:@"microphone"]) return @"microphone";
+    if ([permissionType isEqualToString:@"geolocation"]) return @"location";
+    if ([permissionType isEqualToString:@"notifications"]) return @"notifications";
+    if ([permissionType isEqualToString:@"clipboardRead"]) return @"clipboard read";
+    if ([permissionType isEqualToString:@"clipboardWrite"]) return @"clipboard write";
+    if ([permissionType isEqualToString:@"screen"]) return @"screen sharing";
+    if ([permissionType isEqualToString:@"midi"] ||
+        [permissionType isEqualToString:@"midiSysex"]) return @"MIDI";
+    if ([permissionType isEqualToString:@"topLevelStorageAccess"]) return @"top-level storage access";
+    if ([permissionType isEqualToString:@"storageAccess"]) return @"storage access";
+    if ([permissionType isEqualToString:@"diskQuota"]) return @"disk quota";
+    if ([permissionType isEqualToString:@"localFonts"]) return @"local fonts";
+    if ([permissionType isEqualToString:@"handTracking"]) return @"hand tracking";
+    if ([permissionType isEqualToString:@"identityProvider"]) return @"identity provider";
+    if ([permissionType isEqualToString:@"idleDetection"]) return @"idle detection";
+    if ([permissionType isEqualToString:@"multipleDownloads"]) return @"multiple downloads";
+    if ([permissionType isEqualToString:@"keyboardLock"]) return @"keyboard lock";
+    if ([permissionType isEqualToString:@"pointerLock"]) return @"pointer lock";
+    if ([permissionType isEqualToString:@"protectedMediaIdentifier"]) return @"protected media identifier";
+    if ([permissionType isEqualToString:@"registerProtocolHandler"]) return @"protocol handler";
+    if ([permissionType isEqualToString:@"vrSession"]) return @"VR session";
+    if ([permissionType isEqualToString:@"webAppInstallation"]) return @"web app installation";
+    if ([permissionType isEqualToString:@"windowManagement"]) return @"window management";
+    if ([permissionType isEqualToString:@"fileSystemAccess"]) return @"file system access";
+    if ([permissionType isEqualToString:@"localNetwork"]) return @"local network access";
+    if ([permissionType isEqualToString:@"loopbackNetwork"]) return @"loopback network";
+    if ([permissionType isEqualToString:@"arSession"]) return @"AR session";
+    if ([permissionType isEqualToString:@"sensors"]) return @"sensors";
+    if ([permissionType isEqualToString:@"localNetworkAccess"]) return @"local network access";
+    return permissionType;
+}
+
+static NSString *permissionTypesDisplayList(NSArray<NSString *> *permissionTypes) {
+    if (permissionTypes.count == 0) return @"permissions";
+    if (permissionTypes.count == 1) {
+        return displayNameForPermissionType(permissionTypes[0]);
+    }
+    NSMutableArray<NSString *> *names = [NSMutableArray array];
+    for (NSString *permissionType in permissionTypes) {
+        [names addObject:displayNameForPermissionType(permissionType)];
+    }
+    if (names.count == 2) {
+        return [NSString stringWithFormat:@"%@ and %@", names[0], names[1]];
+    }
+    if (names.count == 3) {
+        return [NSString stringWithFormat:@"%@, %@ and %@", names[0], names[1], names[2]];
+    }
+    NSMutableArray<NSString *> *tail = [NSMutableArray array];
+    for (NSUInteger i = 0; i + 1 < names.count; i++) {
+        [tail addObject:names[i]];
+    }
+    NSString *prefix = [tail componentsJoinedByString:@", "];
+    return [NSString stringWithFormat:@"%@ and %@", prefix, names[names.count - 1]];
+}
+
+static NSString *permissionPromptTitleForTypes(NSArray<NSString *> *permissionTypes) {
+    bool hasCamera = [permissionTypes containsObject:@"camera"];
+    bool hasMicrophone = [permissionTypes containsObject:@"microphone"];
+    if (hasCamera && hasMicrophone && permissionTypes.count == 2) return @"Camera & Microphone Access";
+    if (permissionTypes.count == 1) {
+        NSString *permissionType = permissionTypes[0];
+        if ([permissionType isEqualToString:@"camera"]) return @"Camera Access";
+        if ([permissionType isEqualToString:@"microphone"]) return @"Microphone Access";
+        if ([permissionType isEqualToString:@"geolocation"]) return @"Location Access";
+        if ([permissionType isEqualToString:@"notifications"]) return @"Notification Permission";
+        if ([permissionType isEqualToString:@"screen"]) return @"Screen Access";
+        if ([permissionType isEqualToString:@"midi"] ||
+            [permissionType isEqualToString:@"midiSysex"]) return @"MIDI Access";
+        return @"Permission Request";
+    }
+    return @"Permission Request";
+}
+
+static NSString *permissionPromptMessageForTypes(NSArray<NSString *> *permissionTypes) {
+    NSString *permissionList = permissionTypesDisplayList(permissionTypes);
+    return [NSString stringWithFormat:@"This page is requesting permission for: %@.\n\nDo you want to allow this?", permissionList];
 }
 
 static bool emitPermissionRequest(WebviewEventHandler handler,
@@ -2655,10 +2934,12 @@ static void resolvePendingPermissionRequest(const char *requestId, bool allowed)
 
 extern "C" void webviewRespondToPermissionRequest(const char *requestId, const char *decision) {
     if (!requestId || !decision) return;
-    if (strcmp(decision, "allow") == 0) {
+    if (strcmp(decision, "allow") == 0 || strcmp(decision, "allowOnce") == 0) {
         resolvePendingPermissionRequest(requestId, true);
     } else if (strcmp(decision, "block") == 0) {
         resolvePendingPermissionRequest(requestId, false);
+    } else {
+        NSLog(@"WKWebView: Unknown permission decision received for request %s: %s", requestId, decision);
     }
 }
 
@@ -2744,10 +3025,12 @@ extern "C" void webviewRespondToPermissionRequest(const char *requestId, const c
                 if (receivedBytes < 0) receivedBytes = 0;
                 NSString *eventData = jsonStringFromObject(@{
                     @"downloadId": @(downloadId),
+                    @"id": [@(downloadId) stringValue],
                     @"filename": filename,
                     @"path": path,
                     @"destinationPath": path,
                     @"url": sourceUrl,
+                    @"sourceUrl": sourceUrl,
                     @"mimeType": mimeType,
                     @"totalBytes": @(totalBytes),
                     @"receivedBytes": @(receivedBytes),
@@ -2760,6 +3043,7 @@ extern "C" void webviewRespondToPermissionRequest(const char *requestId, const c
                     @"errorCode": @(NSURLErrorCancelled)
                 });
                 strongSelf.zigEventHandler(strongSelf.webviewId, strdup("download-failed"), strdup([eventData UTF8String]));
+                strongSelf.zigEventHandler(strongSelf.webviewId, strdup("download-canceled"), strdup([eventData UTF8String]));
             }
 
             // Clean up
@@ -3075,10 +3359,12 @@ extern "C" void webviewRespondToPermissionRequest(const char *requestId, const c
             if (self.zigEventHandler) {
                 NSString *eventData = jsonStringFromObject(@{
                     @"downloadId": downloadId,
+                    @"id": [downloadId stringValue],
                     @"filename": suggestedFilename ?: @"",
                     @"path": destinationPath ?: @"",
                     @"destinationPath": destinationPath ?: @"",
                     @"url": sourceUrl ?: @"",
+                    @"sourceUrl": sourceUrl ?: @"",
                     @"mimeType": mimeType ?: @"",
                     @"totalBytes": @(expectedBytes),
                     @"receivedBytes": @(0),
@@ -3118,10 +3404,12 @@ extern "C" void webviewRespondToPermissionRequest(const char *requestId, const c
             if (receivedBytes < 0) receivedBytes = 0;
             NSString *eventData = jsonStringFromObject(@{
                 @"downloadId": downloadId,
+                @"id": [downloadId stringValue],
                 @"filename": filename,
                 @"path": path ?: @"",
                 @"destinationPath": path ?: @"",
                 @"url": sourceUrl,
+                @"sourceUrl": sourceUrl,
                 @"mimeType": mimeType,
                 @"totalBytes": @(totalBytes),
                 @"receivedBytes": @(receivedBytes),
@@ -3158,10 +3446,12 @@ extern "C" void webviewRespondToPermissionRequest(const char *requestId, const c
             if (receivedBytes < 0) receivedBytes = 0;
             NSString *eventData = jsonStringFromObject(@{
                 @"downloadId": downloadId,
+                @"id": [downloadId stringValue],
                 @"filename": filename,
                 @"path": path ?: @"",
                 @"destinationPath": path ?: @"",
                 @"url": sourceUrl,
+                @"sourceUrl": sourceUrl,
                 @"mimeType": mimeType,
                 @"totalBytes": @(totalBytes),
                 @"receivedBytes": @(receivedBytes),
@@ -3205,10 +3495,12 @@ extern "C" void webviewRespondToPermissionRequest(const char *requestId, const c
                 if (receivedBytes < 0) receivedBytes = 0;
                 NSString *eventData = jsonStringFromObject(@{
                     @"downloadId": downloadId,
+                    @"id": [downloadId stringValue],
                     @"filename": path.length > 0 ? [path lastPathComponent] : @"",
                     @"path": path,
                     @"destinationPath": path,
                     @"url": sourceUrl,
+                    @"sourceUrl": sourceUrl,
                     @"mimeType": mimeType,
                     @"totalBytes": @(totalBytes),
                     @"receivedBytes": @(receivedBytes),
@@ -3683,17 +3975,8 @@ static NSMutableSet<id> *gActivePermissionSheets = nil;
     chips.spacing = 6;
 
     for (NSString *perm in permissions) {
-        NSString *label = nil;
-        NSString *sym = nil;
-        if ([perm isEqualToString:@"camera"])        { label = @"Camera";       sym = @"camera"; }
-        else if ([perm isEqualToString:@"microphone"])  { label = @"Microphone";   sym = @"mic"; }
-        else if ([perm isEqualToString:@"geolocation"]) { label = @"Location";     sym = @"location"; }
-        else if ([perm isEqualToString:@"notifications"]) { label = @"Notifications"; sym = @"bell"; }
-        else if ([perm isEqualToString:@"clipboardRead"])  { label = @"Read Clipboard"; sym = @"doc.on.clipboard"; }
-        else if ([perm isEqualToString:@"clipboardWrite"]) { label = @"Clipboard"; sym = @"doc.on.clipboard"; }
-        else if ([perm isEqualToString:@"screen"]) { label = @"Screen"; sym = @"display"; }
-        else if ([perm isEqualToString:@"midi"])   { label = @"MIDI";   sym = @"music.note"; }
-        else { label = perm; sym = @"lock.shield"; }
+        NSString *label = permissionTypeLabelForNativeSheet(perm);
+        NSString *sym = permissionTypeSymbolForNativeSheet(perm);
 
         NSStackView *chip = [NSStackView stackViewWithViews:@[]];
         chip.orientation = NSUserInterfaceLayoutOrientationHorizontal;
@@ -4002,6 +4285,8 @@ runOpenPanelWithParameters:(WKOpenPanelParameters *)parameters
             return;
         }
 
+        NSArray<NSString *> *permissionTypes = permissionTypesForWKMediaCaptureType(type);
+        std::vector<std::string> permissionTypeVec = permissionTypeVectorFromArray(permissionTypes);
         void (^decisionHandlerCopy)(WKPermissionDecision) = [decisionHandler copy];
         bool bridged = emitPermissionRequest(
             self.zigEventHandler,
@@ -4009,7 +4294,7 @@ runOpenPanelWithParameters:(WKOpenPanelParameters *)parameters
             originString,
             pageURLString,
             requestURLString,
-            permissionTypesForWKMediaCaptureType(type),
+            permissionTypes,
             [decisionHandlerCopy](bool allowed) {
                 dispatch_async(dispatch_get_main_queue(), ^{
                     decisionHandlerCopy(allowed ? WKPermissionDecisionGrant : WKPermissionDecisionDeny);
@@ -4020,7 +4305,7 @@ runOpenPanelWithParameters:(WKOpenPanelParameters *)parameters
         }
 
         // Check cache first
-        PermissionStatus cachedStatus = getPermissionFromCache(originStd, PermissionType::USER_MEDIA);
+        PermissionStatus cachedStatus = getPermissionFromCache(originStd, permissionTypeVec);
         
         if (cachedStatus == PermissionStatus::ALLOWED) {
             NSLog(@"WKWebView: Using cached permission: User previously allowed media access for %@", originString);
@@ -4070,11 +4355,11 @@ runOpenPanelWithParameters:(WKOpenPanelParameters *)parameters
         // Handle response and cache the decision
         if (response == NSAlertFirstButtonReturn) { // Allow
             decisionHandler(WKPermissionDecisionGrant);
-            cachePermission(originStd, PermissionType::USER_MEDIA, PermissionStatus::ALLOWED);
+            cachePermission(originStd, permissionTypeVec, PermissionStatus::ALLOWED);
             NSLog(@"WKWebView: User allowed media access for %@ (cached)", originString);
         } else { // Block
             decisionHandler(WKPermissionDecisionDeny);
-            cachePermission(originStd, PermissionType::USER_MEDIA, PermissionStatus::DENIED);
+            cachePermission(originStd, permissionTypeVec, PermissionStatus::DENIED);
             NSLog(@"WKWebView: User blocked media access for %@ (cached)", originString);
         }
     }
@@ -4098,6 +4383,8 @@ runOpenPanelWithParameters:(WKOpenPanelParameters *)parameters
             return;
         }
 
+        NSArray<NSString *> *permissionTypes = @[@"geolocation"];
+        std::vector<std::string> permissionTypeVec = permissionTypeVectorFromArray(permissionTypes);
         void (^decisionHandlerCopy)(WKPermissionDecision) = [decisionHandler copy];
         bool bridged = emitPermissionRequest(
             self.zigEventHandler,
@@ -4105,7 +4392,7 @@ runOpenPanelWithParameters:(WKOpenPanelParameters *)parameters
             originString,
             pageURLString,
             requestURLString,
-            @[ @"geolocation" ],
+            permissionTypes,
             [decisionHandlerCopy](bool allowed) {
                 dispatch_async(dispatch_get_main_queue(), ^{
                     decisionHandlerCopy(allowed ? WKPermissionDecisionGrant : WKPermissionDecisionDeny);
@@ -4116,7 +4403,7 @@ runOpenPanelWithParameters:(WKOpenPanelParameters *)parameters
         }
 
         // Check cache first
-        PermissionStatus cachedStatus = getPermissionFromCache(originStd, PermissionType::GEOLOCATION);
+        PermissionStatus cachedStatus = getPermissionFromCache(originStd, permissionTypeVec);
         
         if (cachedStatus == PermissionStatus::ALLOWED) {
             NSLog(@"WKWebView: Using cached permission: User previously allowed location access for %@", originString);
@@ -4147,11 +4434,11 @@ runOpenPanelWithParameters:(WKOpenPanelParameters *)parameters
         // Handle response and cache the decision
         if (response == NSAlertFirstButtonReturn) { // Allow
             decisionHandler(WKPermissionDecisionGrant);
-            cachePermission(originStd, PermissionType::GEOLOCATION, PermissionStatus::ALLOWED);
+            cachePermission(originStd, permissionTypeVec, PermissionStatus::ALLOWED);
             NSLog(@"WKWebView: User allowed location access for %@ (cached)", originString);
         } else { // Block
             decisionHandler(WKPermissionDecisionDeny);
-            cachePermission(originStd, PermissionType::GEOLOCATION, PermissionStatus::DENIED);
+            cachePermission(originStd, permissionTypeVec, PermissionStatus::DENIED);
             NSLog(@"WKWebView: User blocked location access for %@ (cached)", originString);
         }
     }
@@ -4246,7 +4533,7 @@ runOpenPanelWithParameters:(WKOpenPanelParameters *)parameters
                 // Normal site/app windows need WebKit's opaque background so pages
                 // that do not paint their own body background do not show native
                 // dark window chrome through the document.
-                if (autoResize && transparent) {
+                if (transparent) {
                     [self.webView setValue:@NO forKey:@"drawsBackground"];
                     self.webView.layer.backgroundColor = [[NSColor clearColor] CGColor];
                     self.webView.layer.opaque = NO;
@@ -6883,6 +7170,7 @@ public:
                     .toJson();
                 // Use strdup to create persistent copies for the FFI callback
                 webview_event_handler_(webview_id_, strdup("download-failed"), strdup(eventData.c_str()));
+                webview_event_handler_(webview_id_, strdup("download-canceled"), strdup(eventData.c_str()));
             }
 
             // Clean up
@@ -7243,6 +7531,14 @@ public:
             return true;
         }
 
+        NSArray<NSString *> *permissionTypes = permissionTypesForCefPermissions(requested_permissions);
+        std::vector<std::string> permissionTypeList;
+        for (NSString *permissionType in permissionTypes) {
+            permissionTypeList.push_back([permissionType UTF8String]);
+        }
+        if (permissionTypeList.empty()) {
+            permissionTypeList.push_back("other");
+        }
         CefRefPtr<CefMediaAccessCallback> callbackRef = callback;
         uint32_t requestedPermissions = requested_permissions;
         NSString *originString = [NSString stringWithUTF8String:origin.c_str()];
@@ -7269,7 +7565,7 @@ public:
         }
 
         // Check cache first
-        PermissionStatus cachedStatus = getPermissionFromCache(origin, PermissionType::USER_MEDIA);
+        PermissionStatus cachedStatus = getPermissionFromCache(origin, permissionTypeList);
         
         if (cachedStatus == PermissionStatus::ALLOWED) {
             NSLog(@"CEF: Using cached permission: User previously allowed media access for %s", origin.c_str());
@@ -7300,11 +7596,11 @@ public:
         // Handle response and cache the decision
         if (response == NSAlertFirstButtonReturn) { // Allow
             callback->Continue(requested_permissions); // Allow all requested permissions
-            cachePermission(origin, PermissionType::USER_MEDIA, PermissionStatus::ALLOWED);
+            cachePermission(origin, permissionTypeList, PermissionStatus::ALLOWED);
             NSLog(@"CEF: User allowed media access for %s (cached)", origin.c_str());
         } else { // Block
             callback->Cancel();
-            cachePermission(origin, PermissionType::USER_MEDIA, PermissionStatus::DENIED);
+            cachePermission(origin, permissionTypeList, PermissionStatus::DENIED);
             NSLog(@"CEF: User blocked media access for %s (cached)", origin.c_str());
         }
         
@@ -7337,34 +7633,9 @@ public:
             return true;
         }
 
-        // Handle different permission types
-        PermissionType permType = PermissionType::OTHER;
-        NSString *message = nil;
-        NSString *title = nil;
-
-        // Check for specific permission types
-        if (requested_permissions & CEF_PERMISSION_TYPE_CAMERA_STREAM ||
-            requested_permissions & CEF_PERMISSION_TYPE_MIC_STREAM) {
-            permType = PermissionType::USER_MEDIA;
-            message = @"This page wants to access your camera and/or microphone.\n\nDo you want to allow this?";
-            title = @"Camera & Microphone Access";
-        } else if (requested_permissions & CEF_PERMISSION_TYPE_GEOLOCATION) {
-            permType = PermissionType::GEOLOCATION;
-            message = @"This page wants to access your location.\n\nDo you want to allow this?";
-            title = @"Location Access";
-        } else if (requested_permissions & CEF_PERMISSION_TYPE_NOTIFICATIONS) {
-            permType = PermissionType::NOTIFICATIONS;
-            message = @"This page wants to show notifications.\n\nDo you want to allow this?";
-            title = @"Notification Permission";
-        } else {
-            // Unrecognized permission type — name what's being requested instead of
-            // a generic "additional permissions" dialog so the user can decide.
-            std::string names = electrobun::describeCefPermissions(requested_permissions);
-            message = [NSString stringWithFormat:
-                @"This page is requesting permission for: %s.\n\nDo you want to allow this?",
-                names.c_str()];
-            title = @"Permission Request";
-        }
+        NSArray<NSString *> *permissionTypes = permissionTypesForCefPermissions(requested_permissions);
+        NSString *message = permissionPromptMessageForTypes(permissionTypes);
+        NSString *title = permissionPromptTitleForTypes(permissionTypes);
 
         CefRefPtr<CefPermissionPromptCallback> callbackRef = callback;
         NSString *originString = [NSString stringWithUTF8String:origin.c_str()];
@@ -7376,7 +7647,7 @@ public:
             originString,
             pageUrlString,
             frameUrlString,
-            permissionTypesForCefPermissions(requested_permissions),
+            permissionTypes,
             [callbackRef](bool allowed) {
                 dispatch_async(dispatch_get_main_queue(), ^{
                     callbackRef->Continue(allowed ? CEF_PERMISSION_RESULT_ACCEPT : CEF_PERMISSION_RESULT_DENY);
@@ -7387,7 +7658,11 @@ public:
         }
 
         // Check cache first
-        PermissionStatus cachedStatus = getPermissionFromCache(origin, permType);
+        std::vector<std::string> permissionTypesVec;
+        for (NSString *permissionType in permissionTypes) {
+            permissionTypesVec.push_back([permissionType UTF8String]);
+        }
+        PermissionStatus cachedStatus = getPermissionFromCache(origin, permissionTypesVec);
         
         if (cachedStatus == PermissionStatus::ALLOWED) {
             NSLog(@"CEF: Using cached permission: User previously allowed %@ for %s", title, origin.c_str());
@@ -7415,11 +7690,11 @@ public:
         // Handle response and cache the decision
         if (response == NSAlertFirstButtonReturn) { // Allow
             callback->Continue(CEF_PERMISSION_RESULT_ACCEPT);
-            cachePermission(origin, permType, PermissionStatus::ALLOWED);
+            cachePermission(origin, permissionTypesVec, PermissionStatus::ALLOWED);
             NSLog(@"CEF: User allowed %@ for %s (cached)", title, origin.c_str());
         } else { // Block
             callback->Continue(CEF_PERMISSION_RESULT_DENY);
-            cachePermission(origin, permType, PermissionStatus::DENIED);
+            cachePermission(origin, permissionTypesVec, PermissionStatus::DENIED);
             NSLog(@"CEF: User blocked %@ for %s (cached)", title, origin.c_str());
         }
         
@@ -9185,28 +9460,37 @@ extern "C" void webviewReload(AbstractView *abstractView) {
     });
 }
 
-extern "C" void webviewCancelDownload(AbstractView *abstractView, uint32_t downloadId) {
+extern "C" bool webviewCancelDownload(AbstractView *abstractView, uint32_t downloadId) {
     if (!abstractView) {
         NSLog(@"webviewCancelDownload: abstractView is null");
-        return;
+        return false;
     }
 
     // Check if webview still exists in global tracking
     if (!globalAbstractViews[@(abstractView.webviewId)]) {
         NSLog(@"webviewCancelDownload: webview %u not in tracking, skipping", abstractView.webviewId);
-        return;
+        return false;
     }
 
-    dispatch_async(dispatch_get_main_queue(), ^{
+    __block BOOL canceled = NO;
+    void (^cancelBlock)(void) = ^{
         if (@available(macOS 11.3, *)) {
             if (![abstractView isKindOfClass:[WKWebViewImpl class]]) return;
             WKWebViewImpl *wkImpl = (WKWebViewImpl *)abstractView;
             if (!wkImpl.webView) return;
             id navigationDelegate = wkImpl.webView.navigationDelegate;
             if (![navigationDelegate isKindOfClass:[MyNavigationDelegate class]]) return;
-            [(MyNavigationDelegate *)navigationDelegate cancelDownloadWithId:downloadId];
+            canceled = [(MyNavigationDelegate *)navigationDelegate cancelDownloadWithId:downloadId];
         }
-    });
+    };
+
+    if ([NSThread isMainThread]) {
+        cancelBlock();
+    } else {
+        dispatch_sync(dispatch_get_main_queue(), cancelBlock);
+    }
+
+    return canceled == YES;
 }
 
 extern "C" void webviewRemove(AbstractView *abstractView) {
@@ -10838,7 +11122,7 @@ static BOOL isMacPermissionGranted(EBMacPermissionKind kind) {
         case EBMacPermissionKindLocation: {
             CLLocationManager *manager = [[CLLocationManager alloc] init];
             CLAuthorizationStatus status = manager.authorizationStatus;
-            return status == kCLAuthorizationStatusAuthorizedAlways;
+            return locationStatusIsAuthorized(status);
         }
         case EBMacPermissionKindCalendar: {
             EKAuthorizationStatus status = [EKEventStore authorizationStatusForEntityType:EKEntityTypeEvent];
@@ -11322,6 +11606,44 @@ extern "C" BOOL macPermissionStatus(const char *kind) {
     return isMacPermissionGranted(macPermissionKindFromCString(kind));
 }
 
+static int requestAVCapturePermission(AVMediaType mediaType) {
+    AVAuthorizationStatus status = [AVCaptureDevice authorizationStatusForMediaType:mediaType];
+    if (status == AVAuthorizationStatusAuthorized) return 1;
+    if (status == AVAuthorizationStatusDenied || status == AVAuthorizationStatusRestricted) return 0;
+    if (status != AVAuthorizationStatusNotDetermined) return 0;
+
+    dispatch_semaphore_t semaphore = dispatch_semaphore_create(0);
+    __block BOOL granted = NO;
+    [AVCaptureDevice requestAccessForMediaType:mediaType completionHandler:^(BOOL accessGranted) {
+        granted = accessGranted;
+        dispatch_semaphore_signal(semaphore);
+    }];
+
+    long waitResult = dispatch_semaphore_wait(
+        semaphore,
+        dispatch_time(DISPATCH_TIME_NOW, (int64_t)(60 * NSEC_PER_SEC))
+    );
+    if (waitResult != 0) return 0;
+    return granted ? 1 : 0;
+}
+
+// requestMacMediaPermission
+// Return codes:
+//   1  granted
+//   0  denied, restricted, or timed out
+//  -1  unsupported permission kind
+extern "C" int requestMacMediaPermission(const char *kindCString) {
+    EBMacPermissionKind kind = macPermissionKindFromCString(kindCString);
+    switch (kind) {
+        case EBMacPermissionKindCamera:
+            return requestAVCapturePermission(AVMediaTypeVideo);
+        case EBMacPermissionKindMicrophone:
+            return requestAVCapturePermission(AVMediaTypeAudio);
+        default:
+            return -1;
+    }
+}
+
 // requestMacPermissionDragGuide
 // Return codes:
 //   1  already granted
@@ -11585,6 +11907,203 @@ static const char* copyJsonCStringFromObject(id object) {
     if (!json) return NULL;
 
     return strdup([json UTF8String]);
+}
+
+@interface EBOneShotLocationDelegate : NSObject <CLLocationManagerDelegate>
+@property(nonatomic, strong) CLLocationManager *manager;
+@property(nonatomic, strong) CLLocation *location;
+@property(nonatomic, strong) NSError *error;
+@property(nonatomic) dispatch_semaphore_t semaphore;
+@property(nonatomic) BOOL completed;
+@end
+
+static BOOL locationStatusIsAuthorized(CLAuthorizationStatus status) {
+    return status == kCLAuthorizationStatusAuthorizedAlways ||
+           status == kCLAuthorizationStatusAuthorized;
+}
+
+static const char* locationStatusName(CLAuthorizationStatus status) {
+    switch (status) {
+        case kCLAuthorizationStatusNotDetermined:
+            return "notDetermined";
+        case kCLAuthorizationStatusRestricted:
+            return "restricted";
+        case kCLAuthorizationStatusDenied:
+            return "denied";
+        case kCLAuthorizationStatusAuthorizedAlways:
+            return "authorized";
+    }
+    return "unknown";
+}
+
+static BOOL locationDebugEnabled(void) {
+    const char* value = getenv("ELECTROBUN_LOCATION_DEBUG");
+    return value && strcmp(value, "1") == 0;
+}
+
+@implementation EBOneShotLocationDelegate
+
+- (void)finish {
+    if (self.completed) return;
+    self.completed = YES;
+    [self.manager stopUpdatingLocation];
+    dispatch_semaphore_signal(self.semaphore);
+}
+
+- (void)requestCurrentLocation {
+    CLLocation *cachedLocation = self.manager.location;
+    if (cachedLocation) {
+        NSTimeInterval age = fabs([cachedLocation.timestamp timeIntervalSinceNow]);
+        if (age <= 300.0 && cachedLocation.horizontalAccuracy >= 0) {
+            self.location = cachedLocation;
+            [self finish];
+            return;
+        }
+    }
+
+    [self.manager requestLocation];
+    [self.manager startUpdatingLocation];
+}
+
+- (void)locationManager:(CLLocationManager *)manager didUpdateLocations:(NSArray<CLLocation *> *)locations {
+    if (locationDebugEnabled()) {
+        NSLog(@"[CoreLocation] didUpdateLocations count=%lu", (unsigned long)[locations count]);
+    }
+    self.location = [locations lastObject];
+    [self finish];
+}
+
+- (void)locationManager:(CLLocationManager *)manager didFailWithError:(NSError *)error {
+    if (locationDebugEnabled()) {
+        NSLog(@"[CoreLocation] didFailWithError domain=%@ code=%ld description=%@",
+              error.domain,
+              (long)error.code,
+              error.localizedDescription);
+    }
+    self.error = error;
+    [self finish];
+}
+
+- (void)locationManagerDidChangeAuthorization:(CLLocationManager *)manager {
+    CLAuthorizationStatus status = manager.authorizationStatus;
+    if (locationDebugEnabled()) {
+        NSLog(@"[CoreLocation] authorizationChanged status=%d %s", (int)status, locationStatusName(status));
+    }
+    if (locationStatusIsAuthorized(status)) {
+        [self requestCurrentLocation];
+        return;
+    }
+    if (status == kCLAuthorizationStatusDenied || status == kCLAuthorizationStatusRestricted) {
+        self.error = [NSError errorWithDomain:kCLErrorDomain
+                                         code:kCLErrorDenied
+                                     userInfo:@{NSLocalizedDescriptionKey: @"Location access is denied."}];
+        [self finish];
+    }
+}
+
+@end
+
+static NSDictionary *locationErrorPayload(NSString *name, NSString *message) {
+    return @{
+        @"ok": @NO,
+        @"name": name ?: @"PositionUnavailableError",
+        @"message": message ?: @"Location is unavailable."
+    };
+}
+
+static NSDictionary *locationPayload(CLLocation *location) {
+    CLLocationCoordinate2D coordinate = location.coordinate;
+    NSMutableDictionary *coords = [@{
+        @"latitude": @(coordinate.latitude),
+        @"longitude": @(coordinate.longitude),
+        @"accuracy": @(location.horizontalAccuracy >= 0 ? location.horizontalAccuracy : 0)
+    } mutableCopy];
+
+    if (location.verticalAccuracy >= 0) coords[@"altitudeAccuracy"] = @(location.verticalAccuracy);
+    if (location.verticalAccuracy >= 0) coords[@"altitude"] = @(location.altitude);
+    if (location.speed >= 0) coords[@"speed"] = @(location.speed);
+    if (location.course >= 0) coords[@"heading"] = @(location.course);
+
+    NSTimeInterval timestamp = location.timestamp ? [location.timestamp timeIntervalSince1970] * 1000.0 : [[NSDate date] timeIntervalSince1970] * 1000.0;
+    return @{
+        @"ok": @YES,
+        @"coords": coords,
+        @"timestamp": @(timestamp)
+    };
+}
+
+extern "C" const char* getCurrentLocationJson(double timeoutSeconds) {
+    __block EBOneShotLocationDelegate *delegate = nil;
+    dispatch_semaphore_t semaphore = dispatch_semaphore_create(0);
+
+    dispatch_async(dispatch_get_main_queue(), ^{
+        delegate = [[EBOneShotLocationDelegate alloc] init];
+        delegate.semaphore = semaphore;
+        delegate.manager = [[CLLocationManager alloc] init];
+        delegate.manager.delegate = delegate;
+        delegate.manager.desiredAccuracy = kCLLocationAccuracyHundredMeters;
+
+        CLAuthorizationStatus status = delegate.manager.authorizationStatus;
+        if (locationDebugEnabled()) {
+            NSString *bundleIdentifier = [[NSBundle mainBundle] bundleIdentifier] ?: @"(none)";
+            NSString *bundlePath = [[NSBundle mainBundle] bundlePath] ?: @"(none)";
+            NSLog(@"[CoreLocation] request bundle=%@ path=%@ servicesEnabled=%@ status=%d %s",
+                  bundleIdentifier,
+                  bundlePath,
+                  [CLLocationManager locationServicesEnabled] ? @"YES" : @"NO",
+                  (int)status,
+                  locationStatusName(status));
+        }
+        if (status == kCLAuthorizationStatusDenied || status == kCLAuthorizationStatusRestricted) {
+            delegate.error = [NSError errorWithDomain:kCLErrorDomain
+                                                 code:kCLErrorDenied
+                                             userInfo:@{NSLocalizedDescriptionKey: @"Location access is denied."}];
+            [delegate finish];
+            return;
+        }
+
+        if (status == kCLAuthorizationStatusNotDetermined) {
+            if (locationDebugEnabled()) {
+                NSLog(@"[CoreLocation] requesting location authorization");
+            }
+            [delegate.manager requestAlwaysAuthorization];
+            return;
+        }
+
+        [delegate requestCurrentLocation];
+    });
+
+    double timeout = timeoutSeconds > 0 ? timeoutSeconds : 8.0;
+    dispatch_time_t deadline = dispatch_time(DISPATCH_TIME_NOW, (int64_t)(timeout * NSEC_PER_SEC));
+    long waitResult = dispatch_semaphore_wait(semaphore, deadline);
+
+    __block NSDictionary *payload = nil;
+    dispatch_sync(dispatch_get_main_queue(), ^{
+        if (waitResult != 0) {
+            [delegate.manager stopUpdatingLocation];
+            CLLocation *cachedLocation = delegate.location ?: delegate.manager.location;
+            if (cachedLocation) {
+                payload = locationPayload(cachedLocation);
+            } else {
+                if (locationDebugEnabled()) {
+                    NSLog(@"[CoreLocation] timed out without a cached location");
+                }
+                payload = locationErrorPayload(@"TimeoutError", @"Location timed out.");
+            }
+        } else if (delegate.location) {
+            payload = locationPayload(delegate.location);
+        } else if (delegate.error) {
+            NSString *message = delegate.error.localizedDescription ?: @"Location is unavailable.";
+            NSString *name = delegate.error.code == kCLErrorDenied ? @"PermissionDeniedError" : @"PositionUnavailableError";
+            payload = locationErrorPayload(name, message);
+        } else {
+            payload = locationErrorPayload(@"PositionUnavailableError", @"Location is unavailable.");
+        }
+        delegate.manager.delegate = nil;
+        delegate = nil;
+    });
+
+    return copyJsonCStringFromObject(payload);
 }
 
 // getRunningApplications - Return regular running GUI applications with bundle metadata.

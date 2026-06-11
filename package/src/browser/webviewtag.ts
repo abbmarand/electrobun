@@ -7,7 +7,13 @@ type WebviewEventTypes =
 	| "dom-ready"
 	| "host-message"
 	| "new-window-open"
-	| "permission-requested";
+	| "download-started"
+	| "download-progress"
+	| "download-completed"
+	| "download-failed"
+	| "download-canceled"
+	| "permission-requested"
+	| "permission-decided";
 
 /**
  * Interface representing an <electrobun-webview> custom element.
@@ -64,10 +70,7 @@ interface WebviewTagElement extends HTMLElement {
 	setNavigationRules(rules: string[]): void;
 
 	// Find in page
-	findInPage(
-		searchText: string,
-		options?: { forward?: boolean; matchCase?: boolean },
-	): void;
+	findInPage(searchText: string, options?: { forward?: boolean; matchCase?: boolean }): void;
 	stopFindInPage(): void;
 
 	// Developer tools
