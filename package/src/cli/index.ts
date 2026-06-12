@@ -1778,6 +1778,7 @@ async function createWindowsNsisInstaller(options: {
 	const appFileName = getAppFileName(appName, buildEnvironment);
 	const launcherFileName = getWindowsLauncherFileName(appFileName);
 	const launcherPath = `${appInstallDir}\\bin\\${launcherFileName}`;
+	const appPathsKey = `${appFileName}.exe`;
 	const uninstallKey = `${appIdentifier}.${buildEnvironment}`;
 	const iconPath = getWindowsIconPath(projectRoot, icon);
 	const iconLines = iconPath
@@ -1842,8 +1843,9 @@ Section "Install"
 
 	WriteUninstaller "$INSTDIR\\Uninstall.exe"
 
-	CreateDirectory "$SMPROGRAMS\\${escapeNsisString(shortcutName)}"
-	CreateShortcut "$SMPROGRAMS\\${escapeNsisString(shortcutName)}\\${escapeNsisString(shortcutName)}.lnk" "${launcherPath}" "" "${launcherPath}" 0
+	CreateShortcut "$SMPROGRAMS\\${escapeNsisString(shortcutName)}.lnk" "${launcherPath}" "" "${launcherPath}" 0
+	Delete "$SMPROGRAMS\\${escapeNsisString(shortcutName)}\\${escapeNsisString(shortcutName)}.lnk"
+	RMDir "$SMPROGRAMS\\${escapeNsisString(shortcutName)}"
 	CreateShortcut "$DESKTOP\\${escapeNsisString(shortcutName)}.lnk" "${launcherPath}" "" "${launcherPath}" 0
 
 	WriteRegStr HKCU "Software\\Microsoft\\Windows\\CurrentVersion\\Uninstall\\${escapeNsisString(uninstallKey)}" "DisplayName" "${escapeNsisString(shortcutName)}"
@@ -1854,6 +1856,8 @@ Section "Install"
 	WriteRegStr HKCU "Software\\Microsoft\\Windows\\CurrentVersion\\Uninstall\\${escapeNsisString(uninstallKey)}" "UninstallString" "$\\"$INSTDIR\\Uninstall.exe$\\""
 	WriteRegDWORD HKCU "Software\\Microsoft\\Windows\\CurrentVersion\\Uninstall\\${escapeNsisString(uninstallKey)}" "NoModify" 1
 	WriteRegDWORD HKCU "Software\\Microsoft\\Windows\\CurrentVersion\\Uninstall\\${escapeNsisString(uninstallKey)}" "NoRepair" 1
+	WriteRegStr HKCU "Software\\Microsoft\\Windows\\CurrentVersion\\App Paths\\${escapeNsisString(appPathsKey)}" "" "${launcherPath}"
+	WriteRegStr HKCU "Software\\Microsoft\\Windows\\CurrentVersion\\App Paths\\${escapeNsisString(appPathsKey)}" "Path" "${appInstallDir}\\bin"
 
 	IfSilent +2 0
 	Exec '"${launcherPath}"'
@@ -1863,6 +1867,7 @@ Section "Uninstall"
 	SetShellVarContext current
 	Call un.CloseRunningApp
 	Delete "$DESKTOP\\${escapeNsisString(shortcutName)}.lnk"
+	Delete "$SMPROGRAMS\\${escapeNsisString(shortcutName)}.lnk"
 	Delete "$SMPROGRAMS\\${escapeNsisString(shortcutName)}\\${escapeNsisString(shortcutName)}.lnk"
 	RMDir "$SMPROGRAMS\\${escapeNsisString(shortcutName)}"
 
@@ -1874,6 +1879,7 @@ Section "Uninstall"
 	Delete "$INSTDIR\\update.log"
 	Delete "$INSTDIR\\Uninstall.exe"
 	DeleteRegKey HKCU "Software\\Microsoft\\Windows\\CurrentVersion\\Uninstall\\${escapeNsisString(uninstallKey)}"
+	DeleteRegKey HKCU "Software\\Microsoft\\Windows\\CurrentVersion\\App Paths\\${escapeNsisString(appPathsKey)}"
 	RMDir "$INSTDIR"
 SectionEnd
 
