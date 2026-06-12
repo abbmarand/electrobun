@@ -275,6 +275,38 @@ function getWindowsPreferredLauncherPath(appBundlePath: string): string {
 	return join(appBundlePath, "bin", getWindowsLauncherFileName(localInfo.name));
 }
 
+type ParsedVersion = {
+	major: number;
+	minor: number;
+	patch: number;
+};
+
+function parseVersion(version: string): ParsedVersion | null {
+	const normalized = version.trim().replace(/^v/i, "").split("-")[0] ?? "";
+	const parts = normalized.split(".");
+	if (parts.length < 3) return null;
+	const [majorText, minorText, patchText] = parts;
+	if (majorText === undefined || minorText === undefined || patchText === undefined) {
+		return null;
+	}
+	const major = Number.parseInt(majorText, 10);
+	const minor = Number.parseInt(minorText, 10);
+	const patch = Number.parseInt(patchText, 10);
+	if (!Number.isFinite(major) || !Number.isFinite(minor) || !Number.isFinite(patch)) {
+		return null;
+	}
+	return { major, minor, patch };
+}
+
+function compareVersions(a: string, b: string): number | null {
+	const left = parseVersion(a);
+	const right = parseVersion(b);
+	if (!left || !right) return null;
+	if (left.major !== right.major) return left.major - right.major;
+	if (left.minor !== right.minor) return left.minor - right.minor;
+	return left.patch - right.patch;
+}
+
 const Updater = {
 	updateInfo: () => {
 		return updateInfo;
@@ -352,7 +384,19 @@ const Updater = {
 					};
 				}
 
-				if (updateInfo.hash !== localInfo.hash) {
+				const versionComparison = compareVersions(updateInfo.version, localInfo.version);
+				if (versionComparison !== null && versionComparison <= 0) {
+					updateInfo = {
+						version: localInfo.version,
+						hash: localInfo.hash,
+						updateAvailable: false,
+						updateReady: false,
+						error: "",
+					};
+					emitStatus("no-update", "Already on latest version", {
+						currentHash: localInfo.hash,
+					});
+				} else if (updateInfo.hash !== localInfo.hash) {
 					updateInfo.updateAvailable = true;
 					emitStatus(
 						"update-available",
@@ -401,7 +445,14 @@ const Updater = {
 		const appFileName = localInfo.name;
 
 		let currentHash = (await Updater.getLocalInfo()).hash;
-		let latestHash = (await Updater.checkForUpdate()).hash;
+		const latestUpdateInfo = await Updater.checkForUpdate();
+		if (!latestUpdateInfo.updateAvailable) {
+			emitStatus("no-update", "No update to download", {
+				currentHash,
+			});
+			return;
+		}
+		let latestHash = latestUpdateInfo.hash;
 
 		const extractionFolder = join(appDataFolder, "self-extraction");
 		if (!(await Bun.file(extractionFolder).exists())) {
