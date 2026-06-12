@@ -10,7 +10,11 @@ import {
 } from "fs";
 import { execFileSync, execSync } from "child_process";
 import { OS as currentOS, ARCH as currentArch } from "../../shared/platform";
-import { getPlatformPrefix, getTarballFileName } from "../../shared/naming";
+import {
+	getPlatformPrefix,
+	getTarballFileName,
+	getWindowsLauncherFileName,
+} from "../../shared/naming";
 import { quit } from "./Utils";
 
 // Update status types for granular progress tracking
@@ -248,6 +252,27 @@ function cleanupExtractionFolder(
 	} catch (e) {
 		// Ignore errors in cleanup
 	}
+}
+
+function getRunningAppBundlePath(appDataFolder: string): string {
+	if (currentOS === "macos") {
+		// On macOS, executable is at Contents/MacOS/binary inside .app bundle.
+		return resolve(dirname(process.execPath), "..", "..");
+	}
+	if (currentOS === "win") {
+		// On Windows, executable is at app/bin/{runtime}.exe. Deriving this
+		// from process.execPath lets installs move from the legacy app-data
+		// root to the Electron-style Programs root without breaking updates.
+		return resolve(dirname(process.execPath), "..");
+	}
+	if (currentOS === "linux") {
+		return join(appDataFolder, "app");
+	}
+	throw new Error(`Unsupported platform: ${currentOS}`);
+}
+
+function getWindowsPreferredLauncherPath(appBundlePath: string): string {
+	return join(appBundlePath, "bin", getWindowsLauncherFileName(localInfo.name));
 }
 
 const Updater = {
@@ -1023,18 +1048,8 @@ const Updater = {
 					newAppBundlePath = extractedAppPath;
 				}
 				// Platform-specific app path calculation
-				let runningAppBundlePath: string;
 				const appDataFolder = await Updater.appDataFolder();
-				
-				if (currentOS === "macos") {
-					// On macOS, executable is at Contents/MacOS/binary inside .app bundle
-					runningAppBundlePath = resolve(dirname(process.execPath), "..", "..");
-				} else if (currentOS === "linux" || currentOS === "win") {
-					// On Linux and Windows, use fixed 'app' folder to match extractor
-					runningAppBundlePath = join(appDataFolder, "app");
-				} else {
-					throw new Error(`Unsupported platform: ${currentOS}`);
-				}
+				const runningAppBundlePath = getRunningAppBundlePath(appDataFolder);
 				try {
 					emitStatus("replacing-app", "Removing old version...");
 
@@ -1097,17 +1112,17 @@ const Updater = {
 						const updateScriptPath = join(parentDir, "update.bat");
 						const updateLauncherScriptPath = join(parentDir, "update.vbs");
 						const updateLogPath = join(parentDir, "update.log");
-						const launcherPath = join(
-							runningAppBundlePath,
-							"bin",
-							"launcher.exe",
-						);
+						const launcherPath = getWindowsPreferredLauncherPath(runningAppBundlePath);
+						const legacyLauncherPath = join(runningAppBundlePath, "bin", "launcher.exe");
+						const appBinPath = join(runningAppBundlePath, "bin");
 
 						// Convert paths to Windows format
 						const runningAppWin = runningAppBundlePath.replace(/\//g, "\\");
 						const newAppWin = newAppBundlePath.replace(/\//g, "\\");
 						const extractionDirWin = extractionDir.replace(/\//g, "\\");
 						const launcherPathWin = launcherPath.replace(/\//g, "\\");
+						const legacyLauncherPathWin = legacyLauncherPath.replace(/\//g, "\\");
+						const appBinPathWin = appBinPath.replace(/\//g, "\\");
 						const scriptPathWin = updateScriptPath.replace(/\//g, "\\");
 						const launcherScriptPathWin = updateLauncherScriptPath.replace(/\//g, "\\");
 						const updateLogWin = updateLogPath.replace(/\//g, "\\");
@@ -1127,13 +1142,11 @@ set "UPDATE_LOG=${updateLogWin}"
 > "%UPDATE_LOG%" echo [%DATE% %TIME%] Starting update.
 
 :: Wait for the app and any CEF helper processes to fully exit.
-:: launcher.exe spawns bun.exe which spawns "bun Helper*.exe" processes that
-:: keep libcef.dll locked; if we proceed too early, rmdir partially fails.
+:: Limit the check to processes launched from this install's bin folder so an
+:: unrelated Bun or Electrobun app cannot block Cachy updates.
 :waitloop
-tasklist /FI "IMAGENAME eq launcher.exe" 2>NUL | find /I /N "launcher.exe">NUL && goto waitsleep
-tasklist /FI "IMAGENAME eq bun.exe" 2>NUL | find /I /N "bun.exe">NUL && goto waitsleep
-tasklist /FI "IMAGENAME eq bun Helper.exe" 2>NUL | find /I /N "bun Helper.exe">NUL && goto waitsleep
-tasklist 2>NUL | find /I "bun Helper">NUL && goto waitsleep
+powershell -NoProfile -ExecutionPolicy Bypass -Command "$ErrorActionPreference = 'SilentlyContinue'; $root = '${appBinPathWin}\\'; $running = Get-CimInstance Win32_Process | Where-Object { $_.ExecutablePath -and $_.ExecutablePath.StartsWith($root, [System.StringComparison]::OrdinalIgnoreCase) }; if ($running) { exit 1 } else { exit 0 }" >nul 2>&1
+if errorlevel 1 goto waitsleep
 goto waitdone
 :waitsleep
 timeout /t 1 /nobreak >nul
@@ -1163,8 +1176,10 @@ exit /b 1
 
 :: Move new app to current location (safe now that destination is gone)
 move /Y "${newAppWin}" "${runningAppWin}" >>"%UPDATE_LOG%" 2>&1
-if not exist "${launcherPathWin}" (
-    >> "%UPDATE_LOG%" echo [%DATE% %TIME%] Update failed: launcher not found at "${launcherPathWin}" after move.
+set "LAUNCHER_PATH=${launcherPathWin}"
+if not exist "%LAUNCHER_PATH%" set "LAUNCHER_PATH=${legacyLauncherPathWin}"
+if not exist "%LAUNCHER_PATH%" (
+    >> "%UPDATE_LOG%" echo [%DATE% %TIME%] Update failed: launcher not found after move.
     schtasks /delete /tn "${taskName}" /f >nul 2>&1
     del "${launcherScriptPathWin}" >nul 2>&1
     exit /b 1
@@ -1174,7 +1189,7 @@ if not exist "${launcherPathWin}" (
 rmdir /s /q "${extractionDirWin}" >>"%UPDATE_LOG%" 2>&1
 
 :: Launch the new app
-start "" "${launcherPathWin}"
+start "" "%LAUNCHER_PATH%"
 
 :: Clean up this scheduled task and helper files.
 schtasks /delete /tn "${taskName}" /f >nul 2>&1

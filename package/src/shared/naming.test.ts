@@ -5,6 +5,7 @@ import {
 	getBundleFileName,
 	getPlatformPrefix,
 	getTarballFileName,
+	getWindowsLauncherFileName,
 	getWindowsSetupFileName,
 	getLinuxAppImageBaseName,
 	getLinuxAppImageFileName,
@@ -158,6 +159,21 @@ describe("getWindowsSetupFileName", () => {
 		);
 		expect(getWindowsSetupFileName("My App", "canary")).toBe(
 			"My App-Setup-canary.exe",
+		);
+	});
+});
+
+describe("getWindowsLauncherFileName", () => {
+	it("uses an app-specific launcher name", () => {
+		expect(getWindowsLauncherFileName("Cachy")).toBe("CachyLauncher.exe");
+		expect(getWindowsLauncherFileName("Cachy-canary")).toBe(
+			"Cachy-canaryLauncher.exe",
+		);
+	});
+
+	it("replaces characters that are invalid in Windows file names", () => {
+		expect(getWindowsLauncherFileName('Bad<Name>:"/\\|?*')).toBe(
+			"Bad_Name________Launcher.exe",
 		);
 	});
 });

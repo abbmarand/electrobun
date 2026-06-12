@@ -26,6 +26,7 @@ import {
 	getBundleFileName,
 	getPlatformPrefix,
 	getTarballFileName,
+	getWindowsLauncherFileName,
 	getWindowsSetupFileName,
 	// eslint-disable-next-line @typescript-eslint/no-unused-vars
 	sanitizeVolumeNameForHdiutil as _sanitizeVolumeNameForHdiutil,
@@ -85,7 +86,7 @@ function removeBuildTree(absPath: string): void {
 				[
 					"-NoProfile",
 					"-Command",
-					`Get-Process -ErrorAction SilentlyContinue | Where-Object { $_.Path -and $_.Path.ToLower().StartsWith('${absPath.toLowerCase()}') } | Stop-Process -Force -ErrorAction SilentlyContinue`,
+					`Get-CimInstance Win32_Process | Where-Object { $_.ExecutablePath -and $_.ExecutablePath.ToLower().StartsWith('${absPath.toLowerCase()}') } | ForEach-Object { Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue }`,
 				],
 				{ stdio: "ignore" },
 			);
@@ -1682,13 +1683,17 @@ function escapePathForTerminal(path: string): string {
 
 function escapeNsisString(value: string): string {
 	return value
-		.replace(/\$/g, "$$")
+		.replace(/\$/g, "$$$$")
 		.replace(/"/g, '$\\"')
 		.replace(/\r?\n/g, " ");
 }
 
 function escapeNsisPath(value: string): string {
 	return escapeNsisString(value.replace(/\//g, "\\"));
+}
+
+function escapePowerShellSingleQuotedString(value: string): string {
+	return value.replace(/'/g, "''");
 }
 
 function getWindowsIconPath(
@@ -1764,15 +1769,42 @@ async function createWindowsNsisInstaller(options: {
 	const setupFileName = getWindowsSetupFileName(appName, buildEnvironment);
 	const outputExePath = join(buildFolder, setupFileName);
 	const nsisScriptPath = join(buildFolder, `${setupFileName}.nsi`);
-	const installRoot = `$LOCALAPPDATA\\${appIdentifier}\\${buildEnvironment}`;
-	const appInstallDir = "$INSTDIR\\app";
 	const shortcutName =
 		buildEnvironment === "stable" ? appName : `${appName} ${buildEnvironment}`;
+	const installRoot = `$LOCALAPPDATA\\Programs\\${shortcutName}`;
+	const appInstallDir = "$INSTDIR\\app";
+	const legacyInstallRoot = `$LOCALAPPDATA\\${appIdentifier}\\${buildEnvironment}`;
+	const legacyAppInstallDir = `${legacyInstallRoot}\\app`;
+	const appFileName = getAppFileName(appName, buildEnvironment);
+	const launcherFileName = getWindowsLauncherFileName(appFileName);
+	const launcherPath = `${appInstallDir}\\bin\\${launcherFileName}`;
 	const uninstallKey = `${appIdentifier}.${buildEnvironment}`;
 	const iconPath = getWindowsIconPath(projectRoot, icon);
 	const iconLines = iconPath
 		? `Icon "${escapeNsisPath(iconPath)}"\nUninstallIcon "${escapeNsisPath(iconPath)}"\n`
 		: "";
+	const closeScriptFileName = `electrobun-close-${uninstallKey}.ps1`;
+	const closeRunningAppScriptLines = [
+		"$ErrorActionPreference = 'SilentlyContinue'",
+		`$roots = @(([System.IO.Path]::Combine($env:LOCALAPPDATA, '${escapePowerShellSingleQuotedString(`Programs\\${shortcutName}\\app`)}') + '\\'), ([System.IO.Path]::Combine($env:LOCALAPPDATA, '${escapePowerShellSingleQuotedString(`${appIdentifier}\\${buildEnvironment}\\app`)}') + '\\'))`,
+		"for ($i = 0; $i -lt 20; $i++) {",
+		"$running = @(Get-CimInstance Win32_Process | Where-Object { $path = $_.ExecutablePath; $path -and ($roots | Where-Object { $path.StartsWith($_, [System.StringComparison]::OrdinalIgnoreCase) }) })",
+		"if ($running.Count -eq 0) { break }",
+		"$running | ForEach-Object { Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue }",
+		"Start-Sleep -Milliseconds 500",
+		"}",
+	];
+	const closeRunningAppFileWrites = closeRunningAppScriptLines
+		.map((line) => `\tFileWrite $0 "${escapeNsisString(line)}$\\r$\\n"`)
+		.join("\n");
+	const closeRunningAppFunction = (functionName: string) => `Function ${functionName}
+	FileOpen $0 "$TEMP\\${escapeNsisString(closeScriptFileName)}" w
+${closeRunningAppFileWrites}
+	FileClose $0
+	ExecWait '"$SYSDIR\\WindowsPowerShell\\v1.0\\powershell.exe" -NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File "$TEMP\\${escapeNsisString(closeScriptFileName)}"'
+	Delete "$TEMP\\${escapeNsisString(closeScriptFileName)}"
+	Sleep 1000
+FunctionEnd`;
 
 	const nsisScript = `Unicode true
 !include MUI2.nsh
@@ -1791,10 +1823,7 @@ ShowInstDetails hide
 ShowUninstDetails hide
 AutoCloseWindow true
 
-Function CloseRunningApp
-	nsExec::ExecToLog 'powershell -NoProfile -ExecutionPolicy Bypass -Command "$$ErrorActionPreference = ''SilentlyContinue''; Get-Process | Where-Object { $$_.Path -and $$_.Path.StartsWith(''$INSTDIR\\app\\'', [System.StringComparison]::OrdinalIgnoreCase) } | Stop-Process -Force"'
-	Sleep 1000
-FunctionEnd
+${closeRunningAppFunction("CloseRunningApp")}
 
 Section "Install"
 	SetShellVarContext current
@@ -1806,24 +1835,28 @@ Section "Install"
 	CreateDirectory "${appInstallDir}"
 	SetOutPath "${appInstallDir}"
 	File /r "${escapeNsisPath(appBundleFolderPath)}\\*.*"
+	RMDir /r "${legacyAppInstallDir}"
+	Delete "${legacyInstallRoot}\\update.bat"
+	Delete "${legacyInstallRoot}\\update.vbs"
+	Delete "${legacyInstallRoot}\\update.log"
 
 	WriteUninstaller "$INSTDIR\\Uninstall.exe"
 
 	CreateDirectory "$SMPROGRAMS\\${escapeNsisString(shortcutName)}"
-	CreateShortcut "$SMPROGRAMS\\${escapeNsisString(shortcutName)}\\${escapeNsisString(shortcutName)}.lnk" "${appInstallDir}\\bin\\launcher.exe" "" "${appInstallDir}\\bin\\launcher.exe" 0
-	CreateShortcut "$DESKTOP\\${escapeNsisString(shortcutName)}.lnk" "${appInstallDir}\\bin\\launcher.exe" "" "${appInstallDir}\\bin\\launcher.exe" 0
+	CreateShortcut "$SMPROGRAMS\\${escapeNsisString(shortcutName)}\\${escapeNsisString(shortcutName)}.lnk" "${launcherPath}" "" "${launcherPath}" 0
+	CreateShortcut "$DESKTOP\\${escapeNsisString(shortcutName)}.lnk" "${launcherPath}" "" "${launcherPath}" 0
 
 	WriteRegStr HKCU "Software\\Microsoft\\Windows\\CurrentVersion\\Uninstall\\${escapeNsisString(uninstallKey)}" "DisplayName" "${escapeNsisString(shortcutName)}"
 	WriteRegStr HKCU "Software\\Microsoft\\Windows\\CurrentVersion\\Uninstall\\${escapeNsisString(uninstallKey)}" "DisplayVersion" "${escapeNsisString(appVersion)}"
 	WriteRegStr HKCU "Software\\Microsoft\\Windows\\CurrentVersion\\Uninstall\\${escapeNsisString(uninstallKey)}" "Publisher" "${escapeNsisString(appName)}"
 	WriteRegStr HKCU "Software\\Microsoft\\Windows\\CurrentVersion\\Uninstall\\${escapeNsisString(uninstallKey)}" "InstallLocation" "$INSTDIR"
-	WriteRegStr HKCU "Software\\Microsoft\\Windows\\CurrentVersion\\Uninstall\\${escapeNsisString(uninstallKey)}" "DisplayIcon" "${appInstallDir}\\bin\\launcher.exe"
+	WriteRegStr HKCU "Software\\Microsoft\\Windows\\CurrentVersion\\Uninstall\\${escapeNsisString(uninstallKey)}" "DisplayIcon" "${launcherPath}"
 	WriteRegStr HKCU "Software\\Microsoft\\Windows\\CurrentVersion\\Uninstall\\${escapeNsisString(uninstallKey)}" "UninstallString" "$\\"$INSTDIR\\Uninstall.exe$\\""
 	WriteRegDWORD HKCU "Software\\Microsoft\\Windows\\CurrentVersion\\Uninstall\\${escapeNsisString(uninstallKey)}" "NoModify" 1
 	WriteRegDWORD HKCU "Software\\Microsoft\\Windows\\CurrentVersion\\Uninstall\\${escapeNsisString(uninstallKey)}" "NoRepair" 1
 
 	IfSilent +2 0
-	Exec '"${appInstallDir}\\bin\\launcher.exe"'
+	Exec '"${launcherPath}"'
 SectionEnd
 
 Section "Uninstall"
@@ -1835,16 +1868,16 @@ Section "Uninstall"
 
 	RMDir /r "$INSTDIR\\app"
 	RMDir /r "$INSTDIR\\self-extraction"
+	RMDir /r "${legacyAppInstallDir}"
 	Delete "$INSTDIR\\update.bat"
+	Delete "$INSTDIR\\update.vbs"
+	Delete "$INSTDIR\\update.log"
 	Delete "$INSTDIR\\Uninstall.exe"
 	DeleteRegKey HKCU "Software\\Microsoft\\Windows\\CurrentVersion\\Uninstall\\${escapeNsisString(uninstallKey)}"
 	RMDir "$INSTDIR"
 SectionEnd
 
-Function un.CloseRunningApp
-	nsExec::ExecToLog 'powershell -NoProfile -ExecutionPolicy Bypass -Command "$$ErrorActionPreference = ''SilentlyContinue''; Get-Process | Where-Object { $$_.Path -and $$_.Path.StartsWith(''$INSTDIR\\app\\'', [System.StringComparison]::OrdinalIgnoreCase) } | Stop-Process -Force"'
-	Sleep 1000
-FunctionEnd
+${closeRunningAppFunction("un.CloseRunningApp")}
 `;
 
 	writeFileSync(nsisScriptPath, nsisScript);
@@ -2787,8 +2820,15 @@ usageDescriptions : ""}${urlTypes ? "\n" + urlTypes : ""}${documentTypes ?
 		// cpSync(zigLauncherBinarySource, zigLauncherDestination, {recursive: true, dereference: true});
 		// Copy zig launcher for all platforms
 		const bunCliLauncherBinarySource = targetPaths.LAUNCHER_RELEASE;
+		const windowsLauncherFileName = getWindowsLauncherFileName(appFileName);
+		const legacyWindowsLauncherDestination = join(
+			appBundleMacOSPath,
+			"launcher.exe",
+		);
 		const bunCliLauncherDestination =
-			join(appBundleMacOSPath, "launcher") + targetBinExt;
+			targetOS === "win"
+				? join(appBundleMacOSPath, windowsLauncherFileName)
+				: join(appBundleMacOSPath, "launcher") + targetBinExt;
 		const destLauncherFolder = dirname(bunCliLauncherDestination);
 		if (!existsSync(destLauncherFolder)) {
 			mkdirSync(destLauncherFolder, { recursive: true });
@@ -2797,34 +2837,13 @@ usageDescriptions : ""}${urlTypes ? "\n" + urlTypes : ""}${documentTypes ?
 		if (targetOS === "win") {
 			rmSync(join(appBundleMacOSPath, "launcher"), { force: true });
 			rmSync(bunCliLauncherDestination, { force: true });
+			rmSync(legacyWindowsLauncherDestination, { force: true });
 		}
 
 		cpSync(bunCliLauncherBinarySource, bunCliLauncherDestination, {
 			recursive: true,
 			dereference: true,
 		});
-
-		// On Windows, ensure launcher has .exe extension
-		// Bun's cpSync on Windows may create files without .exe despite the destination path having it
-		if (targetOS === "win") {
-			const launcherWithoutExt = join(appBundleMacOSPath, "launcher");
-
-			// Use PowerShell to force rename and add .exe extension
-			// This bypasses Bun's PATHEXT behavior that treats launcher and launcher.exe as the same
-			try {
-				if (!existsSync(bunCliLauncherDestination) && existsSync(launcherWithoutExt)) {
-					execSync(
-						`powershell -Command "Rename-Item -Path '${launcherWithoutExt}' -NewName 'launcher.exe' -Force"`,
-						{ stdio: "pipe" },
-					);
-				}
-				console.log(`Ensured launcher has .exe extension on Windows`);
-			} catch (error) {
-				console.warn(
-					`Warning: Could not rename launcher to launcher.exe: ${error}`,
-				);
-			}
-		}
 
 		// Embed icon into launcher.exe on Windows
 		if (targetOS === "win" && config.build.win?.icon) {
@@ -2835,7 +2854,7 @@ usageDescriptions : ""}${urlTypes ? "\n" + urlTypes : ""}${documentTypes ?
 					: join(projectRoot, config.build.win.icon);
 
 			if (existsSync(iconSourcePath)) {
-				console.log(`Embedding icon into launcher.exe: ${iconSourcePath}`);
+				console.log(`Embedding icon into ${windowsLauncherFileName}: ${iconSourcePath}`);
 				try {
 					let iconPath = iconSourcePath;
 
@@ -2870,12 +2889,12 @@ usageDescriptions : ""}${urlTypes ? "\n" + urlTypes : ""}${documentTypes ?
 						config.app.identifier,
 						"--set-version-string",
 						"InternalName",
-						"launcher",
+						windowsLauncherFileName.replace(/\.exe$/i, ""),
 						"--set-version-string",
 						"OriginalFilename",
-						"launcher.exe",
+						windowsLauncherFileName,
 					]);
-					console.log(`Successfully embedded icon into launcher.exe`);
+					console.log(`Successfully embedded icon into ${windowsLauncherFileName}`);
 
 					// Clean up temp ICO file
 					if (iconPath !== iconSourcePath && existsSync(iconPath)) {
@@ -2883,10 +2902,19 @@ usageDescriptions : ""}${urlTypes ? "\n" + urlTypes : ""}${documentTypes ?
 					}
 				} catch (error) {
 					console.warn(
-						`Warning: Failed to embed icon into launcher.exe: ${error}`,
+						`Warning: Failed to embed icon into ${windowsLauncherFileName}: ${error}`,
 					);
 				}
 			}
+		}
+
+		if (targetOS === "win") {
+			// Transitional compatibility: older updaters still relaunch bin\launcher.exe
+			// after moving in the updated bundle. New shortcuts and update scripts use
+			// the app-specific launcher name.
+			cpSync(bunCliLauncherDestination, legacyWindowsLauncherDestination, {
+				dereference: true,
+			});
 		}
 
 		cpSync(targetPaths.MAIN_JS, join(appBundleFolderResourcesPath, "main.js"), {

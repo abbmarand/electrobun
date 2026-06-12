@@ -106,6 +106,15 @@ export function getWindowsSetupFileName(
 }
 
 /**
+ * Generates the app-specific Windows launcher executable name.
+ * The Bun runtime keeps the app name (e.g. "MyApp.exe"), while the small
+ * bootstrapper gets an app-prefixed name instead of the generic launcher.exe.
+ */
+export function getWindowsLauncherFileName(appFileName: string): string {
+	return `${appFileName.replace(/[<>:"/\\|?*]/g, "_")}Launcher.exe`;
+}
+
+/**
  * Generates the Linux AppImage wrapper name (without extension).
  * Preserves spaces in app name for user-friendly display.
  * Format: "App Name-Setup" (stable) or "App Name-Setup-channel" (non-stable)
