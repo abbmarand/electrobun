@@ -33,17 +33,25 @@ export function initLifecycleEvents() {
 		emitWebviewEvent("did-navigate-in-page", window.location.href);
 	}
 
-	function wrapHistoryMethod(method: "pushState" | "replaceState") {
-		const original = history[method];
-		history[method] = function (data: unknown, unused: string, url?: string | URL | null) {
-			const result = original.call(history, data, unused, url);
-			emitInPageNavigation();
-			return result;
-		};
-	}
+	const originalPushState = history.pushState;
+	history.pushState = function (
+		this: History,
+		...args: [data: unknown, unused: string, url?: string | URL | null]
+	) {
+		const result = originalPushState.apply(this, args);
+		emitInPageNavigation();
+		return result;
+	};
 
-	wrapHistoryMethod("pushState");
-	wrapHistoryMethod("replaceState");
+	const originalReplaceState = history.replaceState;
+	history.replaceState = function (
+		this: History,
+		...args: [data: unknown, unused: string, url?: string | URL | null]
+	) {
+		const result = originalReplaceState.apply(this, args);
+		emitInPageNavigation();
+		return result;
+	};
 
 	// Emit dom-ready when page loads (top-level window only)
 	window.addEventListener("load", () => {
