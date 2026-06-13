@@ -269,6 +269,32 @@ async function runMsvcCommand(command: string) {
 	}
 }
 
+function getWindowsCefWrapperLibPath() {
+	const releasePath = join(
+		process.cwd(),
+		"vendors",
+		"cef",
+		"build",
+		"libcef_dll_wrapper",
+		"Release",
+		"libcef_dll_wrapper.lib",
+	);
+	if (existsSync(releasePath)) return releasePath;
+
+	return join(
+		process.cwd(),
+		"vendors",
+		"cef",
+		"build",
+		"libcef_dll_wrapper",
+		"libcef_dll_wrapper.lib",
+	);
+}
+
+function hasWindowsCefWrapperLib() {
+	return existsSync(getWindowsCefWrapperLibPath());
+}
+
 async function installWindowsDeps() {
 	const scriptPath = join(process.cwd(), "scripts", "install-windows-deps.ps1");
 	if (!existsSync(scriptPath)) {
@@ -1552,29 +1578,37 @@ async function vendorCEF() {
 		}
 
 		// Build CEF wrapper library for Windows
-		if (
-			!existsSync(
-				join(
-					process.cwd(),
-					"vendors",
-					"cef",
-					"build",
-					"libcef_dll_wrapper",
-					"Release",
-					"libcef_dll_wrapper.lib",
-				),
-			)
-		) {
+		if (!hasWindowsCefWrapperLib()) {
 			// Clean and create build directory
 			await $`cd vendors/cef && powershell -command "if (Test-Path build) { Remove-Item -Recurse -Force build }"`;
 			await $`cd vendors/cef && mkdir build`;
-			// Generate Visual Studio project with sandbox disabled
-			await $`cd vendors/cef/build && "${CMAKE_BIN}" -G "Visual Studio 17 2022" -A x64 -DCEF_USE_SANDBOX=OFF -DCMAKE_BUILD_TYPE=Release ..`;
-			// Build the wrapper library only
-			// await $`cd vendors/cef/build && msbuild cef.sln /p:Configuration=Release /p:Platform=x64 /target:libcef_dll_wrapper`;
-			// const msbuildPath = await $`"C:\\Program Files (x86)\\Microsoft Visual Studio\\Installer\\vswhere.exe" -latest -requires Microsoft.Component.MSBuild -find MSBuild\\**\\Bin\\MSBuild.exe | head -n 1`.text();
-			// await $`cd vendors/cef/build && "${msbuildPath.trim()}" cef.sln /p:Configuration=Release /p:Platform=x64 /target:libcef_dll_wrapper`;
-			await $`cd vendors/cef/build && "${CMAKE_BIN}" --build . --config Release --target libcef_dll_wrapper`;
+			try {
+				await runMsvcCommand(
+					`cd /d vendors\\cef\\build && "${CMAKE_BIN}" -G "Ninja Multi-Config" -DCEF_USE_SANDBOX=OFF ..`,
+				);
+				await runMsvcCommand(
+					`cd /d vendors\\cef\\build && "${CMAKE_BIN}" --build . --config Release --target libcef_dll_wrapper`,
+				);
+			} catch (error) {
+				console.warn(
+					"CEF Ninja build failed, falling back to Visual Studio generator:",
+					error,
+				);
+				await $`cd vendors/cef && powershell -command "if (Test-Path build) { Remove-Item -Recurse -Force build }"`;
+				await $`cd vendors/cef && mkdir build`;
+				await runMsvcCommand(
+					`cd /d vendors\\cef\\build && "${CMAKE_BIN}" -G "Visual Studio 17 2022" -A x64 -DCEF_USE_SANDBOX=OFF -DCMAKE_BUILD_TYPE=Release ..`,
+				);
+				await runMsvcCommand(
+					`cd /d vendors\\cef\\build && "${CMAKE_BIN}" --build . --config Release --target libcef_dll_wrapper`,
+				);
+			}
+
+			if (!hasWindowsCefWrapperLib()) {
+				throw new Error(
+					`CEF wrapper library not found at ${getWindowsCefWrapperLibPath()}`,
+				);
+			}
 		}
 
 		// Build process_helper binary for Windows
@@ -1587,7 +1621,7 @@ async function vendorCEF() {
 
 			const cefInclude = `./vendors/cef`;
 			const cefLib = `./vendors/cef/Release/libcef.lib`;
-			const cefWrapperLib = `./vendors/cef/build/libcef_dll_wrapper/Release/libcef_dll_wrapper.lib`;
+			const cefWrapperLib = getWindowsCefWrapperLibPath();
 
 			// Compile the Windows helper process
 			await runMsvcCommand(
@@ -1852,7 +1886,7 @@ async function buildNative() {
 		const webview2Lib = `./vendors/webview2/Microsoft.Web.WebView2/build/native/${webview2Arch}/WebView2LoaderStatic.lib`;
 		const cefInclude = `./vendors/cef`;
 		const cefLib = `./vendors/cef/Release/libcef.lib`;
-		const cefWrapperLib = `./vendors/cef/build/libcef_dll_wrapper/Release/libcef_dll_wrapper.lib`;
+		const cefWrapperLib = getWindowsCefWrapperLibPath();
 
 		const wgpuIncludeDir = join(
 			process.cwd(),
