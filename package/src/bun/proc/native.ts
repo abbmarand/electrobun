@@ -479,10 +479,20 @@ export const native = (() => {
 				args: [FFIType.cstring, FFIType.cstring],
 				returns: FFIType.void
 			},
-			showNativePermissionSheet: {
-				args: [FFIType.ptr, FFIType.cstring, FFIType.cstring, FFIType.cstring, FFIType.cstring],
-				returns: FFIType.void
-			},
+			...(process.platform === "darwin"
+				? {
+						showNativePermissionSheet: {
+							args: [
+								FFIType.ptr,
+								FFIType.cstring,
+								FFIType.cstring,
+								FFIType.cstring,
+								FFIType.cstring
+							],
+							returns: FFIType.void
+						}
+					}
+				: {}),
 			wgpuViewSetFrame: {
 				args: [FFIType.ptr, FFIType.f64, FFIType.f64, FFIType.f64, FFIType.f64],
 				returns: FFIType.void
@@ -786,14 +796,18 @@ export const native = (() => {
 				args: [FFIType.cstring, FFIType.cstring, FFIType.bool],
 				returns: FFIType.int
 			},
-			requestMacMediaPermission: {
-				args: [FFIType.cstring],
-				returns: FFIType.int
-			},
-			getCurrentLocationJson: {
-				args: [FFIType.f64],
-				returns: FFIType.cstring
-			},
+			...(process.platform === "darwin"
+				? {
+						requestMacMediaPermission: {
+							args: [FFIType.cstring],
+							returns: FFIType.int
+						},
+						getCurrentLocationJson: {
+							args: [FFIType.f64],
+							returns: FFIType.cstring
+						}
+					}
+				: {}),
 			closeMacPermissionDragGuide: {
 				args: [],
 				returns: FFIType.void
@@ -2020,15 +2034,16 @@ window.__electrobunBunBridge = window.__electrobunBunBridge || window.webkit?.me
 			native_.symbols.showItemInFolder(toCString(path));
 		},
 		removeImageBackground: (params: { inputPath: string; outputPath: string }): boolean => {
-			if (!("removeImageBackground" in native_.symbols)) return false;
-			return native_.symbols.removeImageBackground(
-				toCString(params.inputPath),
-				toCString(params.outputPath)
-			);
+			const symbolName: string = "removeImageBackground";
+			const removeImageBackground = Reflect.get(native_.symbols, symbolName);
+			if (typeof removeImageBackground !== "function") return false;
+			return removeImageBackground(toCString(params.inputPath), toCString(params.outputPath));
 		},
 		shareFile: (params: { path: string }): void => {
-			if (!("shareFile" in native_.symbols)) return;
-			native_.symbols.shareFile(toCString(params.path));
+			const symbolName: string = "shareFile";
+			const shareFile = Reflect.get(native_.symbols, symbolName);
+			if (typeof shareFile !== "function") return;
+			shareFile(toCString(params.path));
 		},
 		openExternal: (params: { url: string }): boolean => {
 			const { url } = params;
@@ -2228,10 +2243,22 @@ window.__electrobunBunBridge = window.__electrobunBunBridge || window.webkit?.me
 			};
 		},
 		requestMacMediaPermission: (params: { kind: MacPermissionKind }): boolean => {
-			return native_.symbols.requestMacMediaPermission(toCString(params.kind)) === 1;
+			const symbolName: string = "requestMacMediaPermission";
+			const requestMacMediaPermission = Reflect.get(native_.symbols, symbolName);
+			if (typeof requestMacMediaPermission !== "function") return false;
+			return requestMacMediaPermission(toCString(params.kind)) === 1;
 		},
 		getCurrentLocation: (params: { timeoutSeconds?: number }): CurrentLocationResult => {
-			const result = native_.symbols.getCurrentLocationJson(params.timeoutSeconds ?? 8);
+			const symbolName: string = "getCurrentLocationJson";
+			const getCurrentLocationJson = Reflect.get(native_.symbols, symbolName);
+			if (typeof getCurrentLocationJson !== "function") {
+				return {
+					ok: false,
+					name: "PositionUnavailableError",
+					message: "Location is unavailable."
+				};
+			}
+			const result = getCurrentLocationJson(params.timeoutSeconds ?? 8);
 			if (!result) {
 				return {
 					ok: false,
@@ -2338,13 +2365,19 @@ window.__electrobunBunBridge = window.__electrobunBunBridge || window.webkit?.me
 			if (!contentBlockerNative?.canLoadRuleListByIdentifier) return;
 			const { identifier } = params;
 			if (!identifier) return;
-			contentBlockerNative.lib.symbols.loadContentBlockerRuleList(toCString(identifier));
+			const symbolName: string = "loadContentBlockerRuleList";
+			const loadContentBlockerRuleList = Reflect.get(contentBlockerNative.lib.symbols, symbolName);
+			if (typeof loadContentBlockerRuleList !== "function") return;
+			loadContentBlockerRuleList(toCString(identifier));
 		},
 		setContentBlockerStorePath: (params: { path: string }) => {
 			if (!contentBlockerNative?.canSetStorePath) return;
 			const { path } = params;
 			if (!path) return;
-			contentBlockerNative.lib.symbols.setContentBlockerStorePath(toCString(path));
+			const symbolName: string = "setContentBlockerStorePath";
+			const setContentBlockerStorePath = Reflect.get(contentBlockerNative.lib.symbols, symbolName);
+			if (typeof setContentBlockerStorePath !== "function") return;
+			setContentBlockerStorePath(toCString(path));
 		},
 		canLoadContentBlockerRuleList: (): boolean => {
 			return contentBlockerNative?.canLoadRuleListByIdentifier ?? false;
@@ -2363,15 +2396,33 @@ window.__electrobunBunBridge = window.__electrobunBunBridge || window.webkit?.me
 		},
 		getContentBlockerCompiledCount: (): number => {
 			if (!contentBlockerNative) return 0;
-			return contentBlockerNative.lib.symbols.getContentBlockerCompiledCount();
+			const symbolName: string = "getContentBlockerCompiledCount";
+			const getContentBlockerCompiledCount = Reflect.get(
+				contentBlockerNative.lib.symbols,
+				symbolName
+			);
+			if (typeof getContentBlockerCompiledCount !== "function") return 0;
+			return Number(getContentBlockerCompiledCount()) || 0;
 		},
 		getContentBlockerLoadCompletionCount: (): number => {
 			if (!contentBlockerNative?.canReadLoadStats) return 0;
-			return contentBlockerNative.lib.symbols.getContentBlockerLoadCompletionCount();
+			const symbolName: string = "getContentBlockerLoadCompletionCount";
+			const getContentBlockerLoadCompletionCount = Reflect.get(
+				contentBlockerNative.lib.symbols,
+				symbolName
+			);
+			if (typeof getContentBlockerLoadCompletionCount !== "function") return 0;
+			return Number(getContentBlockerLoadCompletionCount()) || 0;
 		},
 		getContentBlockerLoadFailureCount: (): number => {
 			if (!contentBlockerNative?.canReadLoadStats) return 0;
-			return contentBlockerNative.lib.symbols.getContentBlockerLoadFailureCount();
+			const symbolName: string = "getContentBlockerLoadFailureCount";
+			const getContentBlockerLoadFailureCount = Reflect.get(
+				contentBlockerNative.lib.symbols,
+				symbolName
+			);
+			if (typeof getContentBlockerLoadFailureCount !== "function") return 0;
+			return Number(getContentBlockerLoadFailureCount()) || 0;
 		}
 	},
 	// Internal functions for menu data management

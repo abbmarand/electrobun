@@ -456,7 +456,11 @@ export class BrowserView<T extends RPCWithTransport = RPCWithTransport> {
 		permissionsJson: string
 	) {
 		if (!this.ptr) return;
-		native!.symbols.showNativePermissionSheet(
+		if (!native) return;
+		const symbolName: string = "showNativePermissionSheet";
+		const showNativePermissionSheet = Reflect.get(native.symbols, symbolName);
+		if (typeof showNativePermissionSheet !== "function") return;
+		showNativePermissionSheet(
 			this.ptr,
 			toCString(requestId),
 			toCString(origin),
