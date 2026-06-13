@@ -13237,14 +13237,22 @@ extern "C" ELECTROBUN_EXPORT const uint8_t* captureScreenExcludingWindow(void *w
         SetWindowDisplayAffinity(excludeHwnd, WDA_EXCLUDEFROMCAPTURE);
     }
 
-    int screenW = GetSystemMetrics(SM_CXSCREEN);
-    int screenH = GetSystemMetrics(SM_CYSCREEN);
+    int screenX = GetSystemMetrics(SM_XVIRTUALSCREEN);
+    int screenY = GetSystemMetrics(SM_YVIRTUALSCREEN);
+    int screenW = GetSystemMetrics(SM_CXVIRTUALSCREEN);
+    int screenH = GetSystemMetrics(SM_CYVIRTUALSCREEN);
+    if (screenW <= 0 || screenH <= 0) {
+        screenX = 0;
+        screenY = 0;
+        screenW = GetSystemMetrics(SM_CXSCREEN);
+        screenH = GetSystemMetrics(SM_CYSCREEN);
+    }
 
     HDC screenDC = GetDC(NULL);
     HDC memDC = CreateCompatibleDC(screenDC);
     HBITMAP hBitmap = CreateCompatibleBitmap(screenDC, screenW, screenH);
     HBITMAP oldBitmap = (HBITMAP)SelectObject(memDC, hBitmap);
-    BitBlt(memDC, 0, 0, screenW, screenH, screenDC, 0, 0, SRCCOPY);
+    BitBlt(memDC, 0, 0, screenW, screenH, screenDC, screenX, screenY, SRCCOPY | CAPTUREBLT);
     SelectObject(memDC, oldBitmap);
 
     if (excludeHwnd && IsWindow(excludeHwnd)) {
@@ -13261,9 +13269,11 @@ extern "C" ELECTROBUN_EXPORT const uint8_t* captureScreenExcludingWindow(void *w
 
     const int maxDim = 1920;
     int newW = screenW, newH = screenH;
-    if (newW > maxDim) {
-        float ratio = (float)maxDim / (float)newW;
-        newW = maxDim;
+    if (newW > maxDim || newH > maxDim) {
+        float ratioW = (float)maxDim / (float)newW;
+        float ratioH = (float)maxDim / (float)newH;
+        float ratio = ratioW < ratioH ? ratioW : ratioH;
+        newW = (int)(screenW * ratio);
         newH = (int)(screenH * ratio);
     }
 

@@ -11726,7 +11726,8 @@ extern "C" BOOL requestScreenRecordingPermission(void) {
 // Uses the legacy CGWindowList API loaded via dlsym to avoid ScreenCaptureKit's
 // recording indicator. The functions still exist in CoreGraphics at runtime even
 // though the macOS 15 SDK marks them as obsoleted.
-// Captures the display under the mouse cursor (multi-monitor aware).
+// Captures the full virtual desktop across all displays, preserving their
+// relative arrangement in the OS display coordinate space.
 // window: NSWindow* to exclude (or NULL to capture the entire screen)
 // outSize: receives the byte length of the returned PNG buffer
 // Returns: malloc'd PNG data (caller must free), or NULL on failure
@@ -11765,20 +11766,23 @@ extern "C" const uint8_t* captureScreenExcludingWindow(NSWindow *window, size_t 
             }
         }
 
-        CGDirectDisplayID targetDisplay = CGMainDisplayID();
-        NSPoint mouse = [NSEvent mouseLocation];
+        CGRect desktopBounds = CGRectNull;
         for (NSScreen *screen in [NSScreen screens]) {
-            if (NSPointInRect(mouse, [screen frame])) {
-                NSDictionary *desc = [screen deviceDescription];
-                NSNumber *displayId = desc[@"NSScreenNumber"];
-                if (displayId) {
-                    targetDisplay = [displayId unsignedIntValue];
-                }
-                break;
+            NSDictionary *desc = [screen deviceDescription];
+            NSNumber *displayId = desc[@"NSScreenNumber"];
+            if (displayId) {
+                CGRect displayBounds = CGDisplayBounds([displayId unsignedIntValue]);
+                desktopBounds = CGRectIsNull(desktopBounds)
+                    ? displayBounds
+                    : CGRectUnion(desktopBounds, displayBounds);
             }
         }
-        CGRect screenBounds = CGDisplayBounds(targetDisplay);
-        CGImageRef image = imageCreate(screenBounds, filtered, kCGWindowImageDefault);
+        if (CGRectIsNull(desktopBounds) || CGRectIsEmpty(desktopBounds)) {
+            desktopBounds = CGDisplayBounds(CGMainDisplayID());
+        }
+        desktopBounds = CGRectIntegral(desktopBounds);
+
+        CGImageRef image = imageCreate(desktopBounds, filtered, kCGWindowImageDefault);
         CFRelease(filtered);
         if (!image) return;
 

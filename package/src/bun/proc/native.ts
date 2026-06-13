@@ -3143,7 +3143,7 @@ export const Screen = {
 	/**
 	 * Capture the screen as PNG, optionally excluding a window by its ID.
 	 * Uses CGWindowListCreateImageFromArray to composite all on-screen windows
-	 * minus the excluded one. Captures the display under the mouse cursor.
+	 * minus the excluded one. Captures the full virtual desktop across displays.
 	 * @param excludeWinId - Electrobun window ID to exclude, or null for full capture
 	 * @returns PNG data as Uint8Array, or null on failure
 	 */
