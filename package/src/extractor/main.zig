@@ -95,6 +95,31 @@ const AppMetadata = struct {
     hash: ?[]const u8 = null,
 };
 
+fn getWindowsLauncherFileName(allocator: std.mem.Allocator, app_name: []const u8) ![]const u8 {
+    var launcher_name = std.ArrayList(u8).init(allocator);
+    for (app_name) |ch| {
+        switch (ch) {
+            '<', '>', ':', '"', '/', '\\', '|', '?', '*' => try launcher_name.append('_'),
+            else => try launcher_name.append(ch),
+        }
+    }
+    try launcher_name.appendSlice("Launcher.exe");
+    return launcher_name.toOwnedSlice();
+}
+
+fn getPreferredWindowsLauncherPath(allocator: std.mem.Allocator, app_dir: []const u8, metadata: AppMetadata) ![]const u8 {
+    const preferred_name = try getWindowsLauncherFileName(allocator, metadata.name);
+    defer allocator.free(preferred_name);
+
+    const preferred_path = try std.fs.path.join(allocator, &.{ app_dir, "bin", preferred_name });
+    std.fs.cwd().access(preferred_path, .{}) catch {
+        allocator.free(preferred_path);
+        return std.fs.path.join(allocator, &.{ app_dir, "bin", "launcher.exe" });
+    };
+
+    return preferred_path;
+}
+
 // Progress indicator for extraction
 const ProgressIndicator = struct {
     child_process: ?std.process.Child,
@@ -116,8 +141,6 @@ const ProgressIndicator = struct {
 
         return self;
     }
-
-
 
     fn startProgressDialog(self: *ProgressIndicator, metadata: AppMetadata) !void {
         // On Windows, use simple console output (no spinner thread to avoid deadlock)
@@ -457,12 +480,12 @@ fn extractAndInstall(allocator: std.mem.Allocator, compressed_data: []const u8, 
     var buffer: [4096]u8 = undefined;
     var bytes_processed: usize = 0;
     const dot_interval = 10 * 1024 * 1024; // Print dot every 10MB
-    
+
     while (true) {
         const read_size = try decompressor.reader().read(&buffer);
         if (read_size == 0) break;
         try decompressed_data.appendSlice(buffer[0..read_size]);
-        
+
         bytes_processed += read_size;
         if (bytes_processed >= dot_interval) {
             std.debug.print(".", .{});
@@ -652,11 +675,11 @@ fn extractAndInstall(allocator: std.mem.Allocator, compressed_data: []const u8, 
 
     // Auto-launch the app after installation (like Electron installers)
     if (builtin.os.tag == .windows) {
-        const launcher_path = try std.fs.path.join(allocator, &.{ app_dir, "bin", "launcher.exe" });
+        const launcher_path = try getPreferredWindowsLauncherPath(allocator, app_dir, metadata);
         defer allocator.free(launcher_path);
 
         std.fs.cwd().access(launcher_path, .{}) catch {
-            std.debug.print("Warning: launcher.exe not found at {s}, skipping auto-launch\n", .{launcher_path});
+            std.debug.print("Warning: launcher not found at {s}, skipping auto-launch\n", .{launcher_path});
             const err_msg = std.unicode.utf8ToUtf16LeWithNull(allocator, "Installation succeeded but the app could not be found to launch. Please launch it from the Start Menu or Desktop shortcut.") catch return true;
             defer allocator.free(err_msg);
             const caption = std.unicode.utf8ToUtf16LeWithNull(allocator, metadata.name) catch return true;
@@ -1126,13 +1149,13 @@ fn createDesktopShortcut(allocator: std.mem.Allocator, app_dir: []const u8, meta
             if (!icon_path_allocated) {
                 const resources_path = try std.fs.path.join(allocator, &.{ app_dir, "Resources" });
                 defer allocator.free(resources_path);
-                
+
                 var resources_dir_handle = std.fs.cwd().openDir(resources_path, .{ .iterate = true }) catch |err| blk: {
                     // Resources directory doesn't exist, that's okay
                     if (err == error.FileNotFound) break :blk null;
                     return err;
                 };
-                
+
                 if (resources_dir_handle) |*res_handle| {
                     defer res_handle.close();
                     var res_icon_iterator = res_handle.iterate();
@@ -1357,13 +1380,13 @@ fn createWindowsShortcut(allocator: std.mem.Allocator, app_dir: []const u8, meta
         // Continue anyway, might work
     };
 
-    // Point directly to launcher.exe (no more run.bat wrapper)
-    const target_path = try std.fs.path.join(allocator, &.{ app_dir, "bin", "launcher.exe" });
+    // Prefer the app-specific launcher name, with legacy launcher.exe fallback.
+    const target_path = try getPreferredWindowsLauncherPath(allocator, app_dir, metadata);
     defer allocator.free(target_path);
 
     // Check if target exists
     std.fs.cwd().access(target_path, .{}) catch |err| {
-        std.debug.print("Warning: Could not find launcher.exe at {s}: {}\n", .{ target_path, err });
+        std.debug.print("Warning: Could not find launcher at {s}: {}\n", .{ target_path, err });
         return;
     };
 
@@ -1371,7 +1394,7 @@ fn createWindowsShortcut(allocator: std.mem.Allocator, app_dir: []const u8, meta
     const working_dir = try std.fs.path.join(allocator, &.{ app_dir, "bin" });
     defer allocator.free(working_dir);
 
-    // Icon is embedded in launcher.exe, so use it directly as icon source
+    // Icon is embedded in the launcher, so use it directly as icon source
     const icon_to_use = target_path;
 
     // Create desktop shortcut
@@ -1638,7 +1661,6 @@ pub fn main() !void {
     //     std.debug.print("No compressed bundle found: \n", .{});
     // }
 }
-
 
 // Note: zig stdlib's untar function doesn't support file modes. They don't plan on adding it later,
 // or at least not for windows in the near future which we expect to support in the future. In the meantime this is a patched
@@ -1924,6 +1946,9 @@ fn createWindowsLauncherScript(allocator: std.mem.Allocator, app_dir: []const u8
     const run_bat_path = try std.fs.path.join(allocator, &.{ parent_dir, "run.bat" });
     defer allocator.free(run_bat_path);
 
+    const launcher_name = try getWindowsLauncherFileName(allocator, metadata.name);
+    defer allocator.free(launcher_name);
+
     // Create launcher batch file content
     const launcher_content = try std.fmt.allocPrint(allocator,
         \\@echo off
@@ -1946,9 +1971,13 @@ fn createWindowsLauncherScript(allocator: std.mem.Allocator, app_dir: []const u8
         \\
         \\:: Launch the app
         \\cd /d "%APP_DIR%\bin"
-        \\start "" launcher.exe
+        \\if exist "{s}" (
+        \\    start "" "{s}"
+        \\) else (
+        \\    start "" launcher.exe
+        \\)
         \\
-    , .{metadata.hash orelse "unknown"});
+    , .{ metadata.hash orelse "unknown", launcher_name, launcher_name });
     defer allocator.free(launcher_content);
 
     // Write the launcher batch file
