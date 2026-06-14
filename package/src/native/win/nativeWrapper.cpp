@@ -9930,6 +9930,21 @@ ELECTROBUN_EXPORT void setWindowFrame(NSWindow *window, double x, double y, doub
     SetWindowPos(hwnd, NULL, (int)x, (int)y, (int)width, (int)height, SWP_NOZORDER | SWP_NOACTIVATE);
 }
 
+ELECTROBUN_EXPORT void setWindowGlassSurfaceFrame(NSWindow *window, double x, double y, double width, double height, double cornerRadius) {
+    (void)window;
+    (void)x;
+    (void)y;
+    (void)width;
+    (void)height;
+    (void)cornerRadius;
+    // Native glass surfaces are currently macOS-only.
+}
+
+ELECTROBUN_EXPORT void clearWindowGlassSurface(NSWindow *window) {
+    (void)window;
+    // Native glass surfaces are currently macOS-only.
+}
+
 ELECTROBUN_EXPORT void getWindowFrame(NSWindow *window, double *outX, double *outY, double *outWidth, double *outHeight) {
     HWND hwnd = reinterpret_cast<HWND>(window);
     if (!IsWindow(hwnd)) {

@@ -392,6 +392,27 @@ export class BrowserWindow<T extends RPCWithTransport = RPCWithTransport> {
 		return ffi.request.setWindowFrame({ winId: this.id, x, y, width, height });
 	}
 
+	setGlassSurfaceFrame(
+		x: number,
+		y: number,
+		width: number,
+		height: number,
+		cornerRadius = 0
+	) {
+		return ffi.request.setWindowGlassSurfaceFrame({
+			winId: this.id,
+			x,
+			y,
+			width,
+			height,
+			cornerRadius
+		});
+	}
+
+	clearGlassSurface() {
+		return ffi.request.clearWindowGlassSurface({ winId: this.id });
+	}
+
 	getFrame(): { x: number; y: number; width: number; height: number } {
 		const frame = ffi.request.getWindowFrame({ winId: this.id });
 		// Update internal state

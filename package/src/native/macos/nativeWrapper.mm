@@ -539,6 +539,7 @@ static const void *kTrafficLightAppliedOffsetYKey = &kTrafficLightAppliedOffsetY
 
 static const void *kTrafficLightTitleBarStyleKey = &kTrafficLightTitleBarStyleKey;
 static const void *kWindowCornerRadiusKey = &kWindowCornerRadiusKey;
+static const void *kWindowGlassSurfaceKey = &kWindowGlassSurfaceKey;
 
 static void applyContinuousCornerRadiusToView(NSView *view, CGFloat radius) {
     if (!view) return;
@@ -569,6 +570,11 @@ static void setConfiguredWindowCornerRadius(NSWindow *window, double cornerRadiu
 static double getConfiguredWindowCornerRadius(NSWindow *window) {
     NSNumber *radius = objc_getAssociatedObject(window, kWindowCornerRadiusKey);
     return radius ? radius.doubleValue : 0;
+}
+
+static bool supportsWindowGlassSurface() {
+    NSOperatingSystemVersion version = [[NSProcessInfo processInfo] operatingSystemVersion];
+    return version.majorVersion >= 26;
 }
 
 static bool shouldManageTrafficLights(NSWindow *window) {
@@ -10289,6 +10295,57 @@ extern "C" void getWindowFrame(NSWindow *window, double *outX, double *outY, dou
     *outY = screenHeight - frame.origin.y - frame.size.height;
     *outWidth = frame.size.width;
     *outHeight = frame.size.height;
+}
+
+static void removeWindowGlassSurface(NSWindow *window) {
+    if (!window) return;
+    NSVisualEffectView *glassView = objc_getAssociatedObject(window, kWindowGlassSurfaceKey);
+    if (!glassView) return;
+    [glassView removeFromSuperview];
+    objc_setAssociatedObject(window, kWindowGlassSurfaceKey, nil, OBJC_ASSOCIATION_ASSIGN);
+}
+
+extern "C" void clearWindowGlassSurface(NSWindow *window) {
+    dispatch_async(dispatch_get_main_queue(), ^{
+        removeWindowGlassSurface(window);
+    });
+}
+
+extern "C" void setWindowGlassSurfaceFrame(NSWindow *window, double x, double y, double width, double height, double cornerRadius) {
+    dispatch_async(dispatch_get_main_queue(), ^{
+        if (!window) return;
+        if (!supportsWindowGlassSurface()) {
+            removeWindowGlassSurface(window);
+            return;
+        }
+        if (isnan(x) || isinf(x) || isnan(y) || isinf(y) || isnan(width) || isinf(width) || isnan(height) || isinf(height) || width <= 0 || height <= 0) {
+            removeWindowGlassSurface(window);
+            return;
+        }
+
+        NSView *contentView = window.contentView;
+        if (!contentView) return;
+
+        NSVisualEffectView *glassView = objc_getAssociatedObject(window, kWindowGlassSurfaceKey);
+        if (!glassView) {
+            glassView = [[NSVisualEffectView alloc] initWithFrame:NSZeroRect];
+            glassView.material = NSVisualEffectMaterialPopover;
+            glassView.blendingMode = NSVisualEffectBlendingModeBehindWindow;
+            glassView.state = NSVisualEffectStateActive;
+            glassView.wantsLayer = YES;
+            glassView.layer.masksToBounds = YES;
+            [contentView addSubview:glassView positioned:NSWindowBelow relativeTo:nil];
+            objc_setAssociatedObject(window, kWindowGlassSurfaceKey, glassView, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+        }
+
+        CGFloat adjustedY = contentView.bounds.size.height - (CGFloat)y - (CGFloat)height;
+        glassView.frame = NSMakeRect((CGFloat)x, adjustedY, (CGFloat)width, (CGFloat)height);
+        CGFloat radius = MAX((CGFloat)cornerRadius, 0);
+        glassView.layer.cornerRadius = radius;
+        if (radius > 0) {
+            glassView.layer.cornerCurve = kCACornerCurveContinuous;
+        }
+    });
 }
 
 extern "C" void resizeWebview(AbstractView *abstractView, double x, double y, double width, double height, const char *masksJson) {

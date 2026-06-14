@@ -272,6 +272,14 @@ export const native = (() => {
 				args: [FFIType.ptr, FFIType.ptr, FFIType.ptr, FFIType.ptr, FFIType.ptr],
 				returns: FFIType.void
 			},
+			setWindowGlassSurfaceFrame: {
+				args: [FFIType.ptr, FFIType.f64, FFIType.f64, FFIType.f64, FFIType.f64, FFIType.f64],
+				returns: FFIType.void
+			},
+			clearWindowGlassSurface: {
+				args: [FFIType.ptr],
+				returns: FFIType.void
+			},
 			// webview
 			initWebview: {
 				args: [
@@ -1607,6 +1615,33 @@ const _ffiImpl = {
 				width: widthBuf[0]!,
 				height: heightBuf[0]!
 			};
+		},
+
+		setWindowGlassSurfaceFrame: (params: {
+			winId: number;
+			x: number;
+			y: number;
+			width: number;
+			height: number;
+			cornerRadius: number;
+		}) => {
+			const { winId, x, y, width, height, cornerRadius } = params;
+			const windowPtr = getWindowPtr(winId);
+
+			if (!windowPtr) {
+				throw `Can't set window glass surface frame. Window no longer exists`;
+			}
+
+			native_.symbols.setWindowGlassSurfaceFrame(windowPtr, x, y, width, height, cornerRadius);
+		},
+
+		clearWindowGlassSurface: (params: { winId: number }) => {
+			const { winId } = params;
+			const windowPtr = getWindowPtr(winId);
+
+			if (!windowPtr) return;
+
+			native_.symbols.clearWindowGlassSurface(windowPtr);
 		},
 
 		showFindBar: (params: { winId: number }) => {

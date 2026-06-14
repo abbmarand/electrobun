@@ -11097,6 +11097,21 @@ ELECTROBUN_EXPORT void setWindowFrame(void* window, double x, double y, double w
     });
 }
 
+ELECTROBUN_EXPORT void setWindowGlassSurfaceFrame(void* window, double x, double y, double width, double height, double cornerRadius) {
+    (void)window;
+    (void)x;
+    (void)y;
+    (void)width;
+    (void)height;
+    (void)cornerRadius;
+    // Native glass surfaces are currently macOS-only.
+}
+
+ELECTROBUN_EXPORT void clearWindowGlassSurface(void* window) {
+    (void)window;
+    // Native glass surfaces are currently macOS-only.
+}
+
 ELECTROBUN_EXPORT void getWindowFrame(void* window, double* outX, double* outY, double* outWidth, double* outHeight) {
     if (!window) {
         *outX = 0;
