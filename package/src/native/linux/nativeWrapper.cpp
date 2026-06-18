@@ -11097,13 +11097,19 @@ ELECTROBUN_EXPORT void setWindowFrame(void* window, double x, double y, double w
     });
 }
 
-ELECTROBUN_EXPORT void setWindowGlassSurfaceFrame(void* window, double x, double y, double width, double height, double cornerRadius) {
+ELECTROBUN_EXPORT void setWindowGlassSurfaceFrame(void* window, double x, double y, double width, double height, double cornerRadius, double tintRed, double tintGreen, double tintBlue, double tintAlpha, const char* surfaceId, const char* groupId) {
     (void)window;
     (void)x;
     (void)y;
     (void)width;
     (void)height;
     (void)cornerRadius;
+    (void)tintRed;
+    (void)tintGreen;
+    (void)tintBlue;
+    (void)tintAlpha;
+    (void)surfaceId;
+    (void)groupId;
     // Native glass surfaces are currently macOS-only.
 }
 

@@ -55,13 +55,20 @@ export type WindowOptionsType<T = undefined> = {
 	partition?: string;
 };
 
+export type GlassSurfaceTint = {
+	red: number;
+	green: number;
+	blue: number;
+	alpha: number;
+};
+
 const defaultOptions: WindowOptionsType = {
 	title: "Electrobun",
 	frame: {
 		x: 0,
 		y: 0,
 		width: 800,
-		height: 600,
+		height: 600
 	},
 	url: "https://electrobun.dev",
 	html: null,
@@ -74,7 +81,7 @@ const defaultOptions: WindowOptionsType = {
 	cornerRadius: 0,
 	hidden: false,
 	navigationRules: null,
-	sandbox: false,
+	sandbox: false
 };
 
 export const BrowserWindowMap: {
@@ -94,7 +101,7 @@ electrobunEventEmitter.on("close", (event: { data: { id: number } }) => {
 	}
 
 	// Clean up all WGPU views associated with this window
-	const wgpuViews = WGPUView.getAll().filter(v => v.windowId === windowId);
+	const wgpuViews = WGPUView.getAll().filter((v) => v.windowId === windowId);
 	for (const view of wgpuViews) {
 		try {
 			// If ptr is null, the view was already cleaned up by the renderer or native cleanup
@@ -111,8 +118,7 @@ electrobunEventEmitter.on("close", (event: { data: { id: number } }) => {
 		}
 	}
 
-	const exitOnLastWindowClosed =
-		buildConfig.runtime?.exitOnLastWindowClosed ?? true;
+	const exitOnLastWindowClosed = buildConfig.runtime?.exitOnLastWindowClosed ?? true;
 
 	if (
 		exitOnLastWindowClosed &&
@@ -150,7 +156,7 @@ export class BrowserWindow<T extends RPCWithTransport = RPCWithTransport> {
 		x: 0,
 		y: 0,
 		width: 800,
-		height: 600,
+		height: 600
 	};
 	// todo (yoav): make this an array of ids or something
 	webviewId!: number;
@@ -171,7 +177,7 @@ export class BrowserWindow<T extends RPCWithTransport = RPCWithTransport> {
 		this.hidden = options.hidden ?? false;
 		this.trafficLightOffset = {
 			x: options.trafficLightOffset?.x ?? 0,
-			y: options.trafficLightOffset?.y ?? 0,
+			y: options.trafficLightOffset?.y ?? 0
 		};
 		this.navigationRules = options.navigationRules || null;
 		this.sandbox = options.sandbox ?? false;
@@ -189,7 +195,7 @@ export class BrowserWindow<T extends RPCWithTransport = RPCWithTransport> {
 		hidden,
 		contentBlocker,
 		partition,
-		activate,
+		activate
 	}: Partial<WindowOptionsType<T>>) {
 		this.ptr = ffi.request.createWindow({
 			id: this.id,
@@ -199,7 +205,7 @@ export class BrowserWindow<T extends RPCWithTransport = RPCWithTransport> {
 				width: this.frame.width,
 				height: this.frame.height,
 				x: this.frame.x,
-				y: this.frame.y,
+				y: this.frame.y
 			},
 			styleMask: {
 				Borderless: false,
@@ -218,15 +224,15 @@ export class BrowserWindow<T extends RPCWithTransport = RPCWithTransport> {
 				...(titleBarStyle === "hiddenInset"
 					? {
 							Titled: true,
-							FullSizeContentView: true,
+							FullSizeContentView: true
 						}
 					: {}),
 				...(titleBarStyle === "hidden"
 					? {
 							Titled: true,
-							FullSizeContentView: true,
+							FullSizeContentView: true
 						}
-					: {}),
+					: {})
 			},
 			titleBarStyle: titleBarStyle || "default",
 			transparent: transparent ?? false,
@@ -234,7 +240,7 @@ export class BrowserWindow<T extends RPCWithTransport = RPCWithTransport> {
 			toolbar: toolbar ?? false,
 			hidden: hidden ?? false,
 			activate: activate ?? true,
-			trafficLightOffset: this.trafficLightOffset,
+			trafficLightOffset: this.trafficLightOffset
 		}) as Pointer;
 
 		BrowserWindowMap[this.id] = this;
@@ -255,7 +261,7 @@ export class BrowserWindow<T extends RPCWithTransport = RPCWithTransport> {
 				x: 0,
 				y: 0,
 				width: this.frame.width,
-				height: this.frame.height,
+				height: this.frame.height
 			},
 			rpc,
 			// todo: we need to send the window here and attach it in one go
@@ -267,7 +273,7 @@ export class BrowserWindow<T extends RPCWithTransport = RPCWithTransport> {
 			sandbox: this.sandbox,
 			contentBlocker: contentBlocker ?? false,
 			startPassthrough: this.passthrough,
-			partition: partition || null,
+			partition: partition || null
 		});
 
 		this.webviewId = webview.id;
@@ -297,9 +303,7 @@ export class BrowserWindow<T extends RPCWithTransport = RPCWithTransport> {
 	}
 
 	focus() {
-		console.log(
-			"[electrobun] BrowserWindow.focus() is deprecated. Use window.activate() instead.",
-		);
+		console.log("[electrobun] BrowserWindow.focus() is deprecated. Use window.activate() instead.");
 		return this.activate();
 	}
 
@@ -358,13 +362,16 @@ export class BrowserWindow<T extends RPCWithTransport = RPCWithTransport> {
 	isAlwaysOnTop(): boolean {
 		return ffi.request.isWindowAlwaysOnTop({ winId: this.id });
 	}
-	
+
 	setVisibleOnAllWorkspaces(visibleOnAllWorkspaces: boolean) {
 		return ffi.request.setWindowVisibleOnAllWorkspaces({ winId: this.id, visibleOnAllWorkspaces });
 	}
 
 	setHiddenFromMissionControl(hiddenFromMissionControl: boolean) {
-		return ffi.request.setWindowHiddenFromMissionControl({ winId: this.id, hiddenFromMissionControl });
+		return ffi.request.setWindowHiddenFromMissionControl({
+			winId: this.id,
+			hiddenFromMissionControl
+		});
 	}
 
 	isVisibleOnAllWorkspaces(): boolean {
@@ -397,7 +404,10 @@ export class BrowserWindow<T extends RPCWithTransport = RPCWithTransport> {
 		y: number,
 		width: number,
 		height: number,
-		cornerRadius = 0
+		cornerRadius = 0,
+		tint?: GlassSurfaceTint,
+		surfaceId = "default",
+		groupId = "default"
 	) {
 		return ffi.request.setWindowGlassSurfaceFrame({
 			winId: this.id,
@@ -405,7 +415,13 @@ export class BrowserWindow<T extends RPCWithTransport = RPCWithTransport> {
 			y,
 			width,
 			height,
-			cornerRadius
+			cornerRadius,
+			tintRed: tint?.red ?? 0,
+			tintGreen: tint?.green ?? 0,
+			tintBlue: tint?.blue ?? 0,
+			tintAlpha: tint?.alpha ?? 0,
+			surfaceId,
+			groupId
 		});
 	}
 

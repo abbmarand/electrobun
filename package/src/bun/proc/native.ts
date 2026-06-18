@@ -273,7 +273,20 @@ export const native = (() => {
 				returns: FFIType.void
 			},
 			setWindowGlassSurfaceFrame: {
-				args: [FFIType.ptr, FFIType.f64, FFIType.f64, FFIType.f64, FFIType.f64, FFIType.f64],
+				args: [
+					FFIType.ptr,
+					FFIType.f64,
+					FFIType.f64,
+					FFIType.f64,
+					FFIType.f64,
+					FFIType.f64,
+					FFIType.f64,
+					FFIType.f64,
+					FFIType.f64,
+					FFIType.f64,
+					FFIType.cstring,
+					FFIType.cstring
+				],
 				returns: FFIType.void
 			},
 			clearWindowGlassSurface: {
@@ -1624,15 +1637,47 @@ const _ffiImpl = {
 			width: number;
 			height: number;
 			cornerRadius: number;
+			tintRed: number;
+			tintGreen: number;
+			tintBlue: number;
+			tintAlpha: number;
+			surfaceId: string;
+			groupId: string;
 		}) => {
-			const { winId, x, y, width, height, cornerRadius } = params;
+			const {
+				winId,
+				x,
+				y,
+				width,
+				height,
+				cornerRadius,
+				tintRed,
+				tintGreen,
+				tintBlue,
+				tintAlpha,
+				surfaceId,
+				groupId
+			} = params;
 			const windowPtr = getWindowPtr(winId);
 
 			if (!windowPtr) {
 				throw `Can't set window glass surface frame. Window no longer exists`;
 			}
 
-			native_.symbols.setWindowGlassSurfaceFrame(windowPtr, x, y, width, height, cornerRadius);
+			native_.symbols.setWindowGlassSurfaceFrame(
+				windowPtr,
+				x,
+				y,
+				width,
+				height,
+				cornerRadius,
+				tintRed,
+				tintGreen,
+				tintBlue,
+				tintAlpha,
+				toCString(surfaceId),
+				toCString(groupId)
+			);
 		},
 
 		clearWindowGlassSurface: (params: { winId: number }) => {

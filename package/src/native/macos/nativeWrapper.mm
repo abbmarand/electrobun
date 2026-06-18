@@ -540,6 +540,7 @@ static const void *kTrafficLightAppliedOffsetYKey = &kTrafficLightAppliedOffsetY
 static const void *kTrafficLightTitleBarStyleKey = &kTrafficLightTitleBarStyleKey;
 static const void *kWindowCornerRadiusKey = &kWindowCornerRadiusKey;
 static const void *kWindowGlassSurfaceKey = &kWindowGlassSurfaceKey;
+static const void *kWindowGlassSurfaceContainerKey = &kWindowGlassSurfaceContainerKey;
 
 static void applyContinuousCornerRadiusToView(NSView *view, CGFloat radius) {
     if (!view) return;
@@ -10299,10 +10300,170 @@ extern "C" void getWindowFrame(NSWindow *window, double *outX, double *outY, dou
 
 static void removeWindowGlassSurface(NSWindow *window) {
     if (!window) return;
-    NSVisualEffectView *glassView = objc_getAssociatedObject(window, kWindowGlassSurfaceKey);
-    if (!glassView) return;
-    [glassView removeFromSuperview];
+    NSMutableDictionary<NSString *, NSView *> *glassViews = objc_getAssociatedObject(window, kWindowGlassSurfaceKey);
+    for (NSView *glassView in glassViews.allValues) {
+        [glassView removeFromSuperview];
+    }
+    NSMutableDictionary<NSString *, NSView *> *containerViews = objc_getAssociatedObject(window, kWindowGlassSurfaceContainerKey);
+    for (NSView *containerView in containerViews.allValues) {
+        [containerView removeFromSuperview];
+    }
     objc_setAssociatedObject(window, kWindowGlassSurfaceKey, nil, OBJC_ASSOCIATION_ASSIGN);
+    objc_setAssociatedObject(window, kWindowGlassSurfaceContainerKey, nil, OBJC_ASSOCIATION_ASSIGN);
+}
+
+static NSString *windowGlassSurfaceIdentifier(const char *surfaceId) {
+    if (!surfaceId || strlen(surfaceId) == 0) return @"default";
+    NSString *identifier = [NSString stringWithUTF8String:surfaceId];
+    return identifier.length > 0 ? identifier : @"default";
+}
+
+static NSMutableDictionary<NSString *, NSView *> *windowGlassSurfaceViews(NSWindow *window) {
+    NSMutableDictionary<NSString *, NSView *> *glassViews = objc_getAssociatedObject(window, kWindowGlassSurfaceKey);
+    if (!glassViews) {
+        glassViews = [NSMutableDictionary dictionary];
+        objc_setAssociatedObject(window, kWindowGlassSurfaceKey, glassViews, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+    }
+    return glassViews;
+}
+
+static NSMutableDictionary<NSString *, NSView *> *windowGlassSurfaceContainers(NSWindow *window) {
+    NSMutableDictionary<NSString *, NSView *> *containerViews = objc_getAssociatedObject(window, kWindowGlassSurfaceContainerKey);
+    if (!containerViews) {
+        containerViews = [NSMutableDictionary dictionary];
+        objc_setAssociatedObject(window, kWindowGlassSurfaceContainerKey, containerViews, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+    }
+    return containerViews;
+}
+
+static NSString *windowGlassSurfaceKey(NSString *groupIdentifier, NSString *surfaceIdentifier) {
+    return [NSString stringWithFormat:@"%@\n%@", groupIdentifier, surfaceIdentifier];
+}
+
+static bool isDefaultWindowGlassSurfaceGroup(NSString *groupIdentifier) {
+    return [groupIdentifier isEqualToString:@"default"];
+}
+
+static void orderWindowGlassSurfaceContainer(NSView *contentView, NSMutableDictionary<NSString *, NSView *> *containerViews, NSString *groupIdentifier, NSView *containerView) {
+    NSView *defaultContainer = containerViews[@"default"];
+    if (!isDefaultWindowGlassSurfaceGroup(groupIdentifier) && defaultContainer) {
+        [contentView addSubview:containerView positioned:NSWindowAbove relativeTo:defaultContainer];
+        return;
+    }
+    [contentView addSubview:containerView positioned:NSWindowBelow relativeTo:nil];
+}
+
+static void applyWindowGlassContainerClip(NSWindow *window, NSString *groupIdentifier) {
+    if (!window || isDefaultWindowGlassSurfaceGroup(groupIdentifier)) return;
+
+    NSMutableDictionary<NSString *, NSView *> *containerViews = objc_getAssociatedObject(window, kWindowGlassSurfaceContainerKey);
+    NSView *containerView = containerViews[groupIdentifier];
+    if (!containerView) return;
+
+    NSMutableDictionary<NSString *, NSView *> *glassViews = objc_getAssociatedObject(window, kWindowGlassSurfaceKey);
+    NSView *defaultGlassView = glassViews[windowGlassSurfaceKey(@"default", @"default")];
+    if (!defaultGlassView) {
+        containerView.layer.mask = nil;
+        return;
+    }
+
+    containerView.wantsLayer = YES;
+    CAShapeLayer *maskLayer = [CAShapeLayer layer];
+    maskLayer.frame = containerView.bounds;
+
+    CGFloat radius = MAX(defaultGlassView.layer.cornerRadius, 0);
+    CGRect clipRect = CGRectMake(
+        defaultGlassView.frame.origin.x,
+        defaultGlassView.frame.origin.y,
+        defaultGlassView.frame.size.width,
+        defaultGlassView.frame.size.height
+    );
+    CGMutablePathRef path = CGPathCreateMutable();
+    CGPathAddRoundedRect(path, NULL, clipRect, radius, radius);
+    maskLayer.path = path;
+    CGPathRelease(path);
+    containerView.layer.mask = maskLayer;
+}
+
+static void applyWindowGlassContainerClips(NSWindow *window) {
+    NSMutableDictionary<NSString *, NSView *> *containerViews = objc_getAssociatedObject(window, kWindowGlassSurfaceContainerKey);
+    for (NSString *groupIdentifier in containerViews.allKeys) {
+        applyWindowGlassContainerClip(window, groupIdentifier);
+    }
+}
+
+static NSView *windowGlassSurfaceContainer(NSWindow *window, NSView *contentView, NSString *groupIdentifier) {
+    NSMutableDictionary<NSString *, NSView *> *containerViews = windowGlassSurfaceContainers(window);
+    NSView *containerView = containerViews[groupIdentifier];
+    if (containerView) {
+        containerView.frame = contentView.bounds;
+        orderWindowGlassSurfaceContainer(contentView, containerViews, groupIdentifier, containerView);
+        return containerView;
+    }
+
+    Class containerClass = NSClassFromString(@"NSGlassEffectContainerView");
+    containerView = containerClass ? [[containerClass alloc] initWithFrame:contentView.bounds] : [[NSView alloc] initWithFrame:contentView.bounds];
+    containerView.wantsLayer = YES;
+    containerView.autoresizingMask = NSViewWidthSizable | NSViewHeightSizable;
+    containerViews[groupIdentifier] = containerView;
+    orderWindowGlassSurfaceContainer(contentView, containerViews, groupIdentifier, containerView);
+    return containerView;
+}
+
+static NSView *createWindowGlassSurfaceView() {
+    Class glassEffectViewClass = NSClassFromString(@"NSGlassEffectView");
+    if (glassEffectViewClass) {
+        NSView *glassView = [[glassEffectViewClass alloc] initWithFrame:NSZeroRect];
+        @try {
+            [glassView setValue:@0 forKey:@"style"];
+        } @catch (NSException *exception) {
+            (void)exception;
+        }
+        glassView.wantsLayer = YES;
+        glassView.layer.masksToBounds = YES;
+        return glassView;
+    }
+
+    NSVisualEffectView *glassView = [[NSVisualEffectView alloc] initWithFrame:NSZeroRect];
+    glassView.material = NSVisualEffectMaterialPopover;
+    glassView.blendingMode = NSVisualEffectBlendingModeBehindWindow;
+    glassView.state = NSVisualEffectStateActive;
+    glassView.wantsLayer = YES;
+    glassView.layer.masksToBounds = YES;
+    return glassView;
+}
+
+static CGFloat normalizedGlassTintComponent(double value) {
+    if (isnan(value) || isinf(value)) return 0;
+    return (CGFloat)(fmin(fmax(value, 0), 255) / 255.0);
+}
+
+static CGFloat normalizedGlassTintAlpha(double value) {
+    if (isnan(value) || isinf(value)) return 0;
+    return (CGFloat)fmin(fmax(value, 0), 1);
+}
+
+static void applyWindowGlassSurfaceTint(NSView *glassView, double tintRed, double tintGreen, double tintBlue, double tintAlpha) {
+    if (!glassView) return;
+    CGFloat alpha = normalizedGlassTintAlpha(tintAlpha);
+    NSColor *tintColor = nil;
+    if (alpha > 0) {
+        tintColor = [NSColor colorWithCalibratedRed:normalizedGlassTintComponent(tintRed)
+                                              green:normalizedGlassTintComponent(tintGreen)
+                                               blue:normalizedGlassTintComponent(tintBlue)
+                                              alpha:alpha];
+    }
+
+    if ([glassView isKindOfClass:NSClassFromString(@"NSGlassEffectView")]) {
+        @try {
+            [glassView setValue:tintColor forKey:@"tintColor"];
+        } @catch (NSException *exception) {
+            (void)exception;
+        }
+        return;
+    }
+
+    glassView.layer.backgroundColor = tintColor ? tintColor.CGColor : nil;
 }
 
 extern "C" void clearWindowGlassSurface(NSWindow *window) {
@@ -10311,7 +10472,9 @@ extern "C" void clearWindowGlassSurface(NSWindow *window) {
     });
 }
 
-extern "C" void setWindowGlassSurfaceFrame(NSWindow *window, double x, double y, double width, double height, double cornerRadius) {
+extern "C" void setWindowGlassSurfaceFrame(NSWindow *window, double x, double y, double width, double height, double cornerRadius, double tintRed, double tintGreen, double tintBlue, double tintAlpha, const char *surfaceId, const char *groupId) {
+    NSString *surfaceIdentifier = [windowGlassSurfaceIdentifier(surfaceId) copy];
+    NSString *groupIdentifier = [windowGlassSurfaceIdentifier(groupId) copy];
     dispatch_async(dispatch_get_main_queue(), ^{
         if (!window) return;
         if (!supportsWindowGlassSurface()) {
@@ -10326,24 +10489,37 @@ extern "C" void setWindowGlassSurfaceFrame(NSWindow *window, double x, double y,
         NSView *contentView = window.contentView;
         if (!contentView) return;
 
-        NSVisualEffectView *glassView = objc_getAssociatedObject(window, kWindowGlassSurfaceKey);
+        NSString *identifier = surfaceIdentifier;
+        NSString *group = groupIdentifier;
+        NSString *surfaceKey = windowGlassSurfaceKey(group, identifier);
+        NSView *containerView = windowGlassSurfaceContainer(window, contentView, group);
+        NSMutableDictionary<NSString *, NSView *> *glassViews = windowGlassSurfaceViews(window);
+        NSView *glassView = glassViews[surfaceKey];
         if (!glassView) {
-            glassView = [[NSVisualEffectView alloc] initWithFrame:NSZeroRect];
-            glassView.material = NSVisualEffectMaterialPopover;
-            glassView.blendingMode = NSVisualEffectBlendingModeBehindWindow;
-            glassView.state = NSVisualEffectStateActive;
-            glassView.wantsLayer = YES;
-            glassView.layer.masksToBounds = YES;
-            [contentView addSubview:glassView positioned:NSWindowBelow relativeTo:nil];
-            objc_setAssociatedObject(window, kWindowGlassSurfaceKey, glassView, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+            glassView = createWindowGlassSurfaceView();
+            [containerView addSubview:glassView];
+            glassViews[surfaceKey] = glassView;
         }
 
         CGFloat adjustedY = contentView.bounds.size.height - (CGFloat)y - (CGFloat)height;
         glassView.frame = NSMakeRect((CGFloat)x, adjustedY, (CGFloat)width, (CGFloat)height);
+        applyWindowGlassSurfaceTint(glassView, tintRed, tintGreen, tintBlue, tintAlpha);
         CGFloat radius = MAX((CGFloat)cornerRadius, 0);
+        if ([glassView isKindOfClass:NSClassFromString(@"NSGlassEffectView")]) {
+            @try {
+                [glassView setValue:@(radius) forKey:@"cornerRadius"];
+            } @catch (NSException *exception) {
+                (void)exception;
+            }
+        }
         glassView.layer.cornerRadius = radius;
         if (radius > 0) {
             glassView.layer.cornerCurve = kCACornerCurveContinuous;
+        }
+        if (isDefaultWindowGlassSurfaceGroup(group)) {
+            applyWindowGlassContainerClips(window);
+        } else {
+            applyWindowGlassContainerClip(window, group);
         }
     });
 }
