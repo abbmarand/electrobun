@@ -11659,14 +11659,29 @@ static NSRect permissionGuidePanelFrame(CGFloat width, CGFloat height, BOOL *att
     [[NSColor colorWithWhite:1 alpha:0.16] setStroke];
     [pill stroke];
 
-    NSRect iconRect = NSMakeRect(12, NSMidY(self.bounds) - 16, 32, 32);
-    [self.appIcon drawInRect:iconRect];
-
+    NSMutableParagraphStyle *paragraphStyle = [[NSMutableParagraphStyle alloc] init];
+    paragraphStyle.lineBreakMode = NSLineBreakByTruncatingTail;
     NSDictionary *attrs = @{
         NSFontAttributeName: [NSFont systemFontOfSize:13 weight:NSFontWeightSemibold],
         NSForegroundColorAttributeName: [NSColor labelColor],
+        NSParagraphStyleAttributeName: paragraphStyle,
     };
-    NSRect textRect = NSMakeRect(54, NSMidY(self.bounds) - 9, self.bounds.size.width - 66, 18);
+    NSSize textSize = [self.appName sizeWithAttributes:attrs];
+    CGFloat iconSize = 32;
+    CGFloat contentGap = 12;
+    CGFloat maxTextWidth = MAX(0, self.bounds.size.width - 64);
+    CGFloat textWidth = MIN(textSize.width, maxTextWidth);
+    CGFloat contentWidth = iconSize + contentGap + textWidth;
+    CGFloat contentX = MAX(12, NSMidX(self.bounds) - (contentWidth / 2));
+    NSRect iconRect = NSMakeRect(contentX, NSMidY(self.bounds) - 16, iconSize, iconSize);
+    [self.appIcon drawInRect:iconRect];
+
+    NSRect textRect = NSMakeRect(
+        contentX + iconSize + contentGap,
+        NSMidY(self.bounds) - 9,
+        textWidth,
+        18
+    );
     [self.appName drawInRect:textRect withAttributes:attrs];
 }
 
@@ -11732,8 +11747,8 @@ static NSString *fallbackAppName(NSString *appName) {
 }
 
 static void showMacPermissionGuidePanel(EBMacPermissionKind kind, NSURL *bundleURL, NSString *appName) {
-    CGFloat width = 340;
-    CGFloat height = 112;
+    CGFloat width = 400;
+    CGFloat height = 128;
 
     if (g_macPermissionGuidePanel) {
         if (g_macPermissionGuideAttachedToSource && g_macPermissionSourceWindow) {
@@ -11771,9 +11786,11 @@ static void showMacPermissionGuidePanel(EBMacPermissionKind kind, NSURL *bundleU
     background.state = NSVisualEffectStateActive;
     [content addSubview:background];
 
-    NSView *arrowBubble = [[NSView alloc] initWithFrame:NSMakeRect(18, 66, 28, 28)];
+    CGFloat arrowBubbleSize = 30;
+    CGFloat arrowX = (width - arrowBubbleSize) / 2;
+    NSView *arrowBubble = [[NSView alloc] initWithFrame:NSMakeRect(arrowX, 88, arrowBubbleSize, arrowBubbleSize)];
     arrowBubble.wantsLayer = YES;
-    arrowBubble.layer.cornerRadius = 14;
+    arrowBubble.layer.cornerRadius = arrowBubbleSize / 2;
     arrowBubble.layer.backgroundColor = [[NSColor systemBlueColor] colorWithAlphaComponent:0.18].CGColor;
     [content addSubview:arrowBubble];
 
@@ -11781,32 +11798,26 @@ static void showMacPermissionGuidePanel(EBMacPermissionKind kind, NSURL *bundleU
     arrow.font = [NSFont systemFontOfSize:22 weight:NSFontWeightSemibold];
     arrow.textColor = [NSColor systemBlueColor];
     arrow.alignment = NSTextAlignmentCenter;
-    arrow.frame = NSMakeRect(18, 65, 28, 28);
+    arrow.frame = NSMakeRect(arrowX, 88, arrowBubbleSize, arrowBubbleSize);
     [content addSubview:arrow];
 
     NSTextField *title = [NSTextField labelWithString:[NSString stringWithFormat:@"Drag %@ into the list above.", fallbackAppName(appName)]];
     title.font = [NSFont systemFontOfSize:13 weight:NSFontWeightSemibold];
     title.textColor = [NSColor labelColor];
-    title.frame = NSMakeRect(58, 76, width - 76, 18);
+    title.alignment = NSTextAlignmentCenter;
+    title.frame = NSMakeRect(24, 66, width - 48, 18);
     title.lineBreakMode = NSLineBreakByTruncatingTail;
     [content addSubview:title];
 
     NSTextField *subtitle = [NSTextField labelWithString:macPermissionGuideInstruction(kind)];
     subtitle.font = [NSFont systemFontOfSize:11 weight:NSFontWeightRegular];
     subtitle.textColor = [NSColor secondaryLabelColor];
-    subtitle.frame = NSMakeRect(58, 58, width - 76, 16);
+    subtitle.alignment = NSTextAlignmentCenter;
+    subtitle.frame = NSMakeRect(24, 48, width - 48, 16);
     subtitle.lineBreakMode = NSLineBreakByTruncatingTail;
     [content addSubview:subtitle];
 
-    NSButton *backButton = [[NSButton alloc] initWithFrame:NSMakeRect(18, 18, 30, 30)];
-    backButton.title = @"‹";
-    backButton.font = [NSFont systemFontOfSize:20 weight:NSFontWeightRegular];
-    backButton.bezelStyle = NSBezelStyleCircular;
-    backButton.target = panel;
-    backButton.action = @selector(close);
-    [content addSubview:backButton];
-
-    EBMacPermissionDragView *dragView = [[EBMacPermissionDragView alloc] initWithFrame:NSMakeRect(58, 18, width - 76, 40)
+    EBMacPermissionDragView *dragView = [[EBMacPermissionDragView alloc] initWithFrame:NSMakeRect(44, 12, width - 88, 40)
                                                                              bundleURL:bundleURL
                                                                                appName:fallbackAppName(appName)];
     [content addSubview:dragView];
