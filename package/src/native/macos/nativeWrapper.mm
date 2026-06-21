@@ -12827,6 +12827,98 @@ extern "C" bool getAppIconToPath(const char* appPath, const char* outputPath, in
     return success;
 }
 
+static CGRect contentCropRectForMacAppIcon(CGImageRef image) {
+    if (!image) return CGRectMake(0, 0, 1, 1);
+
+    const int sampleSize = 128;
+    std::vector<uint8_t> pixels(sampleSize * sampleSize * 4, 0);
+    CGColorSpaceRef colorSpace = CGColorSpaceCreateDeviceRGB();
+    CGContextRef sampleCtx = CGBitmapContextCreate(
+        pixels.data(),
+        sampleSize,
+        sampleSize,
+        8,
+        sampleSize * 4,
+        colorSpace,
+        kCGImageAlphaPremultipliedLast | kCGBitmapByteOrder32Big
+    );
+    CGColorSpaceRelease(colorSpace);
+    if (!sampleCtx) return CGRectMake(0, 0, 1, 1);
+
+    CGContextDrawImage(sampleCtx, CGRectMake(0, 0, sampleSize, sampleSize), image);
+    CGContextRelease(sampleCtx);
+
+    auto pixelAt = [&](int x, int y, int channel) -> int {
+        return pixels[((y * sampleSize + x) * 4) + channel];
+    };
+    int background[4] = {
+        (pixelAt(0, 0, 0) + pixelAt(sampleSize - 1, 0, 0) + pixelAt(0, sampleSize - 1, 0) + pixelAt(sampleSize - 1, sampleSize - 1, 0)) / 4,
+        (pixelAt(0, 0, 1) + pixelAt(sampleSize - 1, 0, 1) + pixelAt(0, sampleSize - 1, 1) + pixelAt(sampleSize - 1, sampleSize - 1, 1)) / 4,
+        (pixelAt(0, 0, 2) + pixelAt(sampleSize - 1, 0, 2) + pixelAt(0, sampleSize - 1, 2) + pixelAt(sampleSize - 1, sampleSize - 1, 2)) / 4,
+        (pixelAt(0, 0, 3) + pixelAt(sampleSize - 1, 0, 3) + pixelAt(0, sampleSize - 1, 3) + pixelAt(sampleSize - 1, sampleSize - 1, 3)) / 4
+    };
+
+    auto maxCornerDistance = [&]() -> int {
+        int result = 0;
+        const int corners[4][2] = {
+            {0, 0},
+            {sampleSize - 1, 0},
+            {0, sampleSize - 1},
+            {sampleSize - 1, sampleSize - 1}
+        };
+        for (const auto& corner : corners) {
+            for (int channel = 0; channel < 4; channel++) {
+                result = std::max(result, abs(pixelAt(corner[0], corner[1], channel) - background[channel]));
+            }
+        }
+        return result;
+    };
+    if (maxCornerDistance() > 24) return CGRectMake(0, 0, 1, 1);
+
+    int minX = sampleSize;
+    int minY = sampleSize;
+    int maxX = -1;
+    int maxY = -1;
+    int foregroundPixels = 0;
+    for (int y = 0; y < sampleSize; y++) {
+        for (int x = 0; x < sampleSize; x++) {
+            int colorDistance = 0;
+            for (int channel = 0; channel < 4; channel++) {
+                colorDistance = std::max(colorDistance, abs(pixelAt(x, y, channel) - background[channel]));
+            }
+            if (colorDistance <= 36) continue;
+            minX = std::min(minX, x);
+            minY = std::min(minY, y);
+            maxX = std::max(maxX, x);
+            maxY = std::max(maxY, y);
+            foregroundPixels++;
+        }
+    }
+    if (foregroundPixels < 16 || maxX < minX || maxY < minY) return CGRectMake(0, 0, 1, 1);
+
+    CGFloat contentWidth = (CGFloat)(maxX - minX + 1);
+    CGFloat contentHeight = (CGFloat)(maxY - minY + 1);
+    CGFloat contentMax = MAX(contentWidth, contentHeight);
+    CGFloat currentRatio = contentMax / (CGFloat)sampleSize;
+    const CGFloat targetRatio = 0.76;
+    if (currentRatio >= targetRatio * 0.95) return CGRectMake(0, 0, 1, 1);
+
+    CGFloat cropSize = MIN((CGFloat)sampleSize, contentMax / targetRatio);
+    CGFloat centerX = ((CGFloat)minX + (CGFloat)maxX + 1.0) / 2.0;
+    CGFloat centerY = ((CGFloat)minY + (CGFloat)maxY + 1.0) / 2.0;
+    CGFloat cropX = centerX - cropSize / 2.0;
+    CGFloat cropY = centerY - cropSize / 2.0;
+    cropX = MAX(0, MIN(cropX, (CGFloat)sampleSize - cropSize));
+    cropY = MAX(0, MIN(cropY, (CGFloat)sampleSize - cropSize));
+
+    return CGRectMake(
+        cropX / (CGFloat)sampleSize,
+        cropY / (CGFloat)sampleSize,
+        cropSize / (CGFloat)sampleSize,
+        cropSize / (CGFloat)sampleSize
+    );
+}
+
 static CGImageRef createMacAppIconCGImage(NSString *imagePath, int canvasSize) {
     if (!imagePath || canvasSize <= 0) return NULL;
 
@@ -12834,7 +12926,7 @@ static CGImageRef createMacAppIconCGImage(NSString *imagePath, int canvasSize) {
     if (!favicon) return NULL;
 
     CGFloat canvas = (CGFloat)canvasSize;
-    CGFloat iconSize = canvas * 832.0 / 1024.0;
+    CGFloat iconSize = canvas;
     CGFloat radius = canvas * 183.0 / 1024.0;
     CGFloat offset = (canvas - iconSize) / 2.0;
 
@@ -12865,6 +12957,7 @@ static CGImageRef createMacAppIconCGImage(NSString *imagePath, int canvasSize) {
 
     layer.contents = (__bridge id)faviconCG;
     layer.contentsGravity = kCAGravityResizeAspectFill;
+    layer.contentsRect = contentCropRectForMacAppIcon(faviconCG);
 
     CGContextTranslateCTM(ctx, offset, offset);
     CGContextSetShadowWithColor(
