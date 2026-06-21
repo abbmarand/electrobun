@@ -11748,7 +11748,7 @@ static NSString *fallbackAppName(NSString *appName) {
 
 static void showMacPermissionGuidePanel(EBMacPermissionKind kind, NSURL *bundleURL, NSString *appName) {
     CGFloat width = 400;
-    CGFloat height = 128;
+    CGFloat height = 144;
 
     if (g_macPermissionGuidePanel) {
         if (g_macPermissionGuideAttachedToSource && g_macPermissionSourceWindow) {
@@ -11788,7 +11788,7 @@ static void showMacPermissionGuidePanel(EBMacPermissionKind kind, NSURL *bundleU
 
     CGFloat arrowBubbleSize = 30;
     CGFloat arrowX = (width - arrowBubbleSize) / 2;
-    NSView *arrowBubble = [[NSView alloc] initWithFrame:NSMakeRect(arrowX, 88, arrowBubbleSize, arrowBubbleSize)];
+    NSView *arrowBubble = [[NSView alloc] initWithFrame:NSMakeRect(arrowX, 102, arrowBubbleSize, arrowBubbleSize)];
     arrowBubble.wantsLayer = YES;
     arrowBubble.layer.cornerRadius = arrowBubbleSize / 2;
     arrowBubble.layer.backgroundColor = [[NSColor systemBlueColor] colorWithAlphaComponent:0.18].CGColor;
@@ -11798,14 +11798,14 @@ static void showMacPermissionGuidePanel(EBMacPermissionKind kind, NSURL *bundleU
     arrow.font = [NSFont systemFontOfSize:22 weight:NSFontWeightSemibold];
     arrow.textColor = [NSColor systemBlueColor];
     arrow.alignment = NSTextAlignmentCenter;
-    arrow.frame = NSMakeRect(arrowX, 88, arrowBubbleSize, arrowBubbleSize);
+    arrow.frame = NSMakeRect(arrowX, 102, arrowBubbleSize, arrowBubbleSize);
     [content addSubview:arrow];
 
     NSTextField *title = [NSTextField labelWithString:[NSString stringWithFormat:@"Drag %@ into the list above.", fallbackAppName(appName)]];
     title.font = [NSFont systemFontOfSize:13 weight:NSFontWeightSemibold];
     title.textColor = [NSColor labelColor];
     title.alignment = NSTextAlignmentCenter;
-    title.frame = NSMakeRect(24, 66, width - 48, 18);
+    title.frame = NSMakeRect(24, 78, width - 48, 18);
     title.lineBreakMode = NSLineBreakByTruncatingTail;
     [content addSubview:title];
 
@@ -11813,7 +11813,7 @@ static void showMacPermissionGuidePanel(EBMacPermissionKind kind, NSURL *bundleU
     subtitle.font = [NSFont systemFontOfSize:11 weight:NSFontWeightRegular];
     subtitle.textColor = [NSColor secondaryLabelColor];
     subtitle.alignment = NSTextAlignmentCenter;
-    subtitle.frame = NSMakeRect(24, 48, width - 48, 16);
+    subtitle.frame = NSMakeRect(24, 58, width - 48, 16);
     subtitle.lineBreakMode = NSLineBreakByTruncatingTail;
     [content addSubview:subtitle];
 
