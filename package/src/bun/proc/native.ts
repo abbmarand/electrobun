@@ -869,6 +869,10 @@ export const native = (() => {
 				args: [FFIType.cstring, FFIType.cstring, FFIType.i32],
 				returns: FFIType.bool
 			},
+			renderMacAppIconToPath: {
+				args: [FFIType.cstring, FFIType.cstring, FFIType.i32],
+				returns: FFIType.bool
+			},
 
 			// Session/Cookie API
 			sessionGetCookies: {
@@ -2428,6 +2432,13 @@ window.__electrobunBunBridge = window.__electrobunBunBridge || window.webkit?.me
 		getAppIconToPath: (params: { appPath: string; outputPath: string; size: number }): boolean => {
 			return !!native_.symbols.getAppIconToPath(
 				toCString(params.appPath),
+				toCString(params.outputPath),
+				params.size
+			);
+		},
+		renderMacAppIconToPath: (params: { imagePath: string; outputPath: string; size: number }): boolean => {
+			return !!native_.symbols.renderMacAppIconToPath(
+				toCString(params.imagePath),
 				toCString(params.outputPath),
 				params.size
 			);

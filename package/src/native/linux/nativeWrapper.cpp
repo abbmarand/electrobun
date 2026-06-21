@@ -10109,6 +10109,10 @@ ELECTROBUN_EXPORT bool getAppIconToPath(const char* appPath, const char* destPat
     });
 }
 
+ELECTROBUN_EXPORT bool renderMacAppIconToPath(const char* imagePath, const char* outputPath, int size) {
+    return false;
+}
+
 // NOTE: Removed deferred tray creation code - now creating TrayItem synchronously
 // The TrayItem constructor handles deferred AppIndicator creation internally
 

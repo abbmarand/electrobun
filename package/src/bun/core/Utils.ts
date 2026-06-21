@@ -536,6 +536,18 @@ export const getAppIconToPath = (
 	return ffi.request.getAppIconToPath({ appPath, outputPath, size });
 };
 
+/**
+ * Render a site/favicon image into Cachy's macOS app-icon shape and save it as a PNG.
+ * No-op on non-macOS platforms.
+ */
+export const renderMacAppIconToPath = (
+	imagePath: string,
+	outputPath: string,
+	size: number,
+): boolean => {
+	return ffi.request.renderMacAppIconToPath({ imagePath, outputPath, size });
+};
+
 // ============================================================================
 // Paths API — cross-platform OS directories and app-scoped directories
 // ============================================================================

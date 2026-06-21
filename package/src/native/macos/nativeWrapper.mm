@@ -12827,6 +12827,91 @@ extern "C" bool getAppIconToPath(const char* appPath, const char* outputPath, in
     return success;
 }
 
+static CGImageRef createMacAppIconCGImage(NSString *imagePath, int canvasSize) {
+    if (!imagePath || canvasSize <= 0) return NULL;
+
+    NSImage *favicon = [[NSImage alloc] initWithContentsOfFile:imagePath];
+    if (!favicon) return NULL;
+
+    CGFloat canvas = (CGFloat)canvasSize;
+    CGFloat iconSize = canvas * 832.0 / 1024.0;
+    CGFloat radius = canvas * 183.0 / 1024.0;
+    CGFloat offset = (canvas - iconSize) / 2.0;
+
+    CGColorSpaceRef colorSpace = CGColorSpaceCreateDeviceRGB();
+    CGContextRef ctx = CGBitmapContextCreate(
+        NULL,
+        canvasSize,
+        canvasSize,
+        8,
+        canvasSize * 4,
+        colorSpace,
+        kCGImageAlphaPremultipliedLast
+    );
+    CGColorSpaceRelease(colorSpace);
+    if (!ctx) return NULL;
+
+    CALayer *layer = [CALayer layer];
+    layer.frame = CGRectMake(0, 0, iconSize, iconSize);
+    layer.cornerRadius = radius;
+    layer.cornerCurve = kCACornerCurveContinuous;
+    layer.masksToBounds = YES;
+
+    CGImageRef faviconCG = [favicon CGImageForProposedRect:NULL context:nil hints:nil];
+    if (!faviconCG) {
+        CGContextRelease(ctx);
+        return NULL;
+    }
+
+    layer.contents = (__bridge id)faviconCG;
+    layer.contentsGravity = kCAGravityResizeAspectFill;
+
+    CGContextTranslateCTM(ctx, offset, offset);
+    CGContextSetShadowWithColor(
+        ctx,
+        CGSizeMake(0, -10.0 * canvas / 1024.0),
+        10.0 * canvas / 1024.0,
+        [[NSColor colorWithCalibratedRed:0 green:0 blue:0 alpha:0.3] CGColor]
+    );
+    [layer renderInContext:ctx];
+
+    CGImageRef renderedCG = CGBitmapContextCreateImage(ctx);
+    CGContextRelease(ctx);
+    return renderedCG;
+}
+
+extern "C" bool renderMacAppIconToPath(const char* imagePath, const char* outputPath, int size) {
+    if (!imagePath || !outputPath || size <= 0) return false;
+
+    __block bool success = false;
+
+    bool (^render)(void) = ^bool {
+        NSString *path = [NSString stringWithUTF8String:imagePath];
+        NSString *outPath = [NSString stringWithUTF8String:outputPath];
+        CGImageRef renderedCG = createMacAppIconCGImage(path, size);
+        if (!renderedCG) return false;
+
+        NSBitmapImageRep *bitmapRep = [[NSBitmapImageRep alloc] initWithCGImage:renderedCG];
+        NSData *pngData = [bitmapRep representationUsingType:NSBitmapImageFileTypePNG properties:@{}];
+        bool wroteFile = false;
+        if (pngData) {
+            wroteFile = [pngData writeToFile:outPath atomically:YES];
+        }
+        CGImageRelease(renderedCG);
+        return wroteFile;
+    };
+
+    if ([NSThread isMainThread]) {
+        success = render();
+    } else {
+        dispatch_sync(dispatch_get_main_queue(), ^{
+            success = render();
+        });
+    }
+
+    return success;
+}
+
 // ============================================================================
 // URL Scheme / Deep Linking API
 // ============================================================================
@@ -12854,37 +12939,8 @@ extern "C" void setDockIcon(const char* imagePath) {
     void (^apply)(void) = ^{
         if (imagePath && strlen(imagePath) > 0) {
             NSString *path = [NSString stringWithUTF8String:imagePath];
-            NSImage *favicon = [[NSImage alloc] initWithContentsOfFile:path];
-            if (!favicon) return;
-
-            CGFloat canvasSize = 1024;
-            CGFloat iconSize = 832;
-            CGFloat radius = 183;
-            CGFloat offset = (canvasSize - iconSize) / 2;
-
-            CGColorSpaceRef colorSpace = CGColorSpaceCreateDeviceRGB();
-            CGContextRef ctx = CGBitmapContextCreate(NULL, canvasSize, canvasSize, 8, canvasSize * 4,
-                colorSpace, kCGImageAlphaPremultipliedLast);
-            CGColorSpaceRelease(colorSpace);
-            if (!ctx) return;
-
-            CALayer *layer = [CALayer layer];
-            layer.frame = CGRectMake(0, 0, iconSize, iconSize);
-            layer.cornerRadius = radius;
-            layer.cornerCurve = kCACornerCurveContinuous;
-            layer.masksToBounds = YES;
-
-            CGImageRef faviconCG = [favicon CGImageForProposedRect:NULL context:nil hints:nil];
-            layer.contents = (__bridge id)faviconCG;
-            layer.contentsGravity = kCAGravityResizeAspectFill;
-
-            CGContextTranslateCTM(ctx, offset, offset);
-            CGContextSetShadowWithColor(ctx, CGSizeMake(0, -10), 10,
-                [[NSColor colorWithCalibratedRed:0 green:0 blue:0 alpha:0.3] CGColor]);
-            [layer renderInContext:ctx];
-
-            CGImageRef renderedCG = CGBitmapContextCreateImage(ctx);
-            CGContextRelease(ctx);
+            CGImageRef renderedCG = createMacAppIconCGImage(path, 1024);
+            if (!renderedCG) return;
 
             NSImage *icon = [[NSImage alloc] initWithCGImage:renderedCG size:NSMakeSize(512, 512)];;
             CGImageRelease(renderedCG);

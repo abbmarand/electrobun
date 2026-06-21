@@ -11362,6 +11362,10 @@ ELECTROBUN_EXPORT bool getAppIconToPath(const char* appPath, const char* destPat
     return (status == Gdiplus::Ok);
 }
 
+ELECTROBUN_EXPORT bool renderMacAppIconToPath(const char* imagePath, const char* outputPath, int size) {
+    return false;
+}
+
 // Window procedure for handling tray messages
 LRESULT CALLBACK TrayWindowProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
     switch (msg) {
