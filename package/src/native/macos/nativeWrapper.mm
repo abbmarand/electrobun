@@ -985,6 +985,7 @@ void releaseObjCObject(id objcObject) {
     - (void)setTransparent:(BOOL)transparent;
     - (void)setPassthrough:(BOOL)enable;
     - (void)setHidden:(BOOL)hidden;
+    - (void)toggleMirrorMode:(BOOL)enable;
 
     - (BOOL)canGoBack;
     - (BOOL)canGoForward;
@@ -1001,6 +1002,7 @@ void releaseObjCObject(id objcObject) {
 
     - (void)resize:(NSRect)frame withMasksJSON:(const char *)masksJson;
     - (void)resizeWithFrame:(NSRect)frame parsedMasks:(NSArray *)parsedMasks;
+    - (BOOL)shouldDeferFullSizeResize;
 
     - (void)setNavigationRulesFromJSON:(const char*)rulesJson;
     - (BOOL)shouldAllowNavigationToURL:(NSString *)url;
@@ -1135,6 +1137,8 @@ static NSMutableDictionary<NSString *, NativePopupWindowController *> *globalNam
 @interface WKWebViewImpl : AbstractView
     @property (nonatomic, strong) WKWebView *webView;
     @property (nonatomic, assign) WebviewEventHandler zigEventHandler;
+    @property (nonatomic, assign) BOOL inspectorLayoutActive;
+    @property (nonatomic, assign) NSTimeInterval inspectorLayoutActivatedAt;
 
     - (instancetype)initWithWebviewId:(uint32_t)webviewId
                             window:(NSWindow *)window
@@ -1152,6 +1156,8 @@ static NSMutableDictionary<NSString *, NativePopupWindowController *> *globalNam
                 viewsRoot:(const char *)viewsRoot
                 transparent:(bool)transparent
                 sandbox:(bool)sandbox;
+    - (id)webInspector;
+    - (void)setInspectorDelegate:(id)inspector;
 @end
 
 @interface WGPUViewImpl : AbstractView
@@ -1587,6 +1593,10 @@ NSArray<NSValue *> *addOverlapRects(NSArray<NSDictionary *> *rectsArray, CGFloat
         NSPoint currentMousePosition = [self.nsView.window mouseLocationOutsideOfEventStream];
         ContainerView *containerView = (ContainerView *)self.nsView.superview;
         [containerView updateActiveWebviewForMousePosition:currentMousePosition];
+    }
+
+    - (BOOL)shouldDeferFullSizeResize {
+        return NO;
     }
 
     - (void)setNavigationRulesFromJSON:(const char*)rulesJson {
@@ -4550,6 +4560,7 @@ runOpenPanelWithParameters:(WKOpenPanelParameters *)parameters
                 
                 [self.webView addObserver:self forKeyPath:@"fullscreenState" options:NSKeyValueObservingOptionNew | NSKeyValueObservingOptionOld context:nil];
                 [self.webView addObserver:self forKeyPath:@"title" options:NSKeyValueObservingOptionNew context:nil];
+                [self setInspectorDelegate:[self webInspector]];
 
                 if (autoResize) {
                     self.fullSize = YES;
@@ -5172,11 +5183,123 @@ runOpenPanelWithParameters:(WKOpenPanelParameters *)parameters
         return YES;
     }
 
+    - (id)webInspector {
+        if (![self.webView respondsToSelector:@selector(_inspector)]) return nil;
+        return [self.webView performSelector:@selector(_inspector)];
+    }
+
+    - (BOOL)inspectorIsVisible:(id)inspector {
+        if (!inspector || ![inspector respondsToSelector:@selector(isVisible)]) {
+            return self.inspectorLayoutActive;
+        }
+        BOOL (*isVisibleFn)(id, SEL) = (BOOL (*)(id, SEL))[inspector methodForSelector:@selector(isVisible)];
+        if (!isVisibleFn) return self.inspectorLayoutActive;
+        return isVisibleFn(inspector, @selector(isVisible));
+    }
+
+    - (BOOL)inspectorIsConnected:(id)inspector {
+        if (!inspector || ![inspector respondsToSelector:@selector(isConnected)]) {
+            return NO;
+        }
+        BOOL (*isConnectedFn)(id, SEL) = (BOOL (*)(id, SEL))[inspector methodForSelector:@selector(isConnected)];
+        if (!isConnectedFn) return NO;
+        return isConnectedFn(inspector, @selector(isConnected));
+    }
+
+    - (BOOL)isInspectorVisible {
+        id inspector = [self webInspector];
+        return [self inspectorIsVisible:inspector];
+    }
+
+    - (BOOL)needsInspectorLayout {
+        id inspector = [self webInspector];
+        return [self inspectorIsVisible:inspector] || [self inspectorIsConnected:inspector];
+    }
+
+    - (void)setInspectorDelegate:(id)inspector {
+        if (!inspector || ![inspector respondsToSelector:@selector(setDelegate:)]) return;
+        void (*setDelegateFn)(id, SEL, id) = (void (*)(id, SEL, id))[inspector methodForSelector:@selector(setDelegate:)];
+        if (setDelegateFn) setDelegateFn(inspector, @selector(setDelegate:), self);
+    }
+
+    - (void)restoreFullSizeLayoutAfterInspector {
+        self.inspectorLayoutActive = NO;
+        if (self.webView) {
+            self.webView.autoresizingMask = NSViewNotSizable;
+        }
+        if (self.fullSize && self.webView && self.webView.superview) {
+            [super resizeWithFrame:self.webView.superview.bounds parsedMasks:nil];
+        }
+    }
+
+    - (void)inspectorFrontendLoaded:(id)inspector {
+        [self beginInspectorLayout];
+    }
+
+    - (void)scheduleInspectorLayoutCheck {
+        __weak WKWebViewImpl *weakSelf = self;
+        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(0.5 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+            WKWebViewImpl *strongSelf = weakSelf;
+            if (!strongSelf || !strongSelf.inspectorLayoutActive) return;
+            if (![strongSelf needsInspectorLayout]) {
+                [strongSelf restoreFullSizeLayoutAfterInspector];
+                return;
+            }
+            [strongSelf scheduleInspectorLayoutCheck];
+        });
+    }
+
+    - (void)beginInspectorLayout {
+        BOOL wasActive = self.inspectorLayoutActive;
+        self.inspectorLayoutActive = YES;
+        self.inspectorLayoutActivatedAt = [[NSDate date] timeIntervalSince1970];
+        [super toggleMirrorMode:NO];
+        if (self.fullSize && self.webView) {
+            self.webView.autoresizingMask = NSViewWidthSizable | NSViewHeightSizable;
+        }
+        if (!wasActive) {
+            [self scheduleInspectorLayoutCheck];
+        }
+    }
+
+    - (void)toggleMirrorMode:(BOOL)enable {
+        // Web Inspector attaches as a native sibling view; moving over it must not
+        // mirror the inspected WKWebView offscreen.
+        if (enable && (self.inspectorLayoutActive || [self needsInspectorLayout])) {
+            return;
+        }
+        [super toggleMirrorMode:enable];
+    }
+
+    - (BOOL)shouldDeferFullSizeResize {
+        if (!self.fullSize) return NO;
+
+        if ([self needsInspectorLayout]) {
+            [self beginInspectorLayout];
+            return YES;
+        }
+
+        if (!self.inspectorLayoutActive) return NO;
+
+        NSTimeInterval elapsed = [[NSDate date] timeIntervalSince1970] - self.inspectorLayoutActivatedAt;
+        if (elapsed < 2.0) return YES;
+
+        [self restoreFullSizeLayoutAfterInspector];
+        return NO;
+    }
+
+    - (void)resizeWithFrame:(NSRect)frame parsedMasks:(NSArray *)parsedMasks {
+        if ([self shouldDeferFullSizeResize]) return;
+        [super resizeWithFrame:frame parsedMasks:parsedMasks];
+    }
+
     - (void)openDevTools {
         dispatch_async(dispatch_get_main_queue(), ^{
             // WKWebView doesn't have public DevTools API, but we can use private API if available
-            if ([self.webView respondsToSelector:@selector(_inspector)]) {
-                id inspector = [self.webView performSelector:@selector(_inspector)];
+            id inspector = [self webInspector];
+            if (inspector) {
+                [self setInspectorDelegate:inspector];
+                [self beginInspectorLayout];
                 if ([inspector respondsToSelector:@selector(show)]) {
                     [inspector performSelector:@selector(show)];
                 }
@@ -5186,28 +5309,23 @@ runOpenPanelWithParameters:(WKOpenPanelParameters *)parameters
 
     - (void)closeDevTools {
         dispatch_async(dispatch_get_main_queue(), ^{
-            if ([self.webView respondsToSelector:@selector(_inspector)]) {
-                id inspector = [self.webView performSelector:@selector(_inspector)];
+            id inspector = [self webInspector];
+            if (inspector) {
                 if ([inspector respondsToSelector:@selector(close)]) {
                     [inspector performSelector:@selector(close)];
                 }
+                [self restoreFullSizeLayoutAfterInspector];
             }
         });
     }
 
     - (void)toggleDevTools {
         dispatch_async(dispatch_get_main_queue(), ^{
-            if ([self.webView respondsToSelector:@selector(_inspector)]) {
-                id inspector = [self.webView performSelector:@selector(_inspector)];
-                if ([inspector respondsToSelector:@selector(isVisible)]) {
-                    BOOL isVisible = [[inspector performSelector:@selector(isVisible)] boolValue];
-                    if (isVisible) {
-                        [self closeDevTools];
-                    } else {
-                        [self openDevTools];
-                    }
+            id inspector = [self webInspector];
+            if (inspector) {
+                if ([self inspectorIsVisible:inspector]) {
+                    [self closeDevTools];
                 } else {
-                    // Fallback: just try to open
                     [self openDevTools];
                 }
             }
@@ -8857,6 +8975,7 @@ CefRefPtr<CefRequestContext> CreateRequestContextForPartition(const char* partit
 
         for (AbstractView *abstractView in containerView.abstractViews) {
             if (abstractView.fullSize) {
+                if ([abstractView shouldDeferFullSizeResize]) continue;
                 [abstractView resize:fullFrame withMasksJSON:""];
             }
         }
