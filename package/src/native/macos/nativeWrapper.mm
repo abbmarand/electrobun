@@ -11409,6 +11409,26 @@ static BOOL g_hasMacPermissionSourceFrame = NO;
 static BOOL g_macPermissionGuideAttachedToSource = NO;
 static NSInteger g_macPermissionGuideRequestID = 0;
 
+static void closeMacPermissionGuidePanel(BOOL activateSourceWindow) {
+    g_macPermissionGuideRequestID++;
+    NSWindow *sourceWindow = g_macPermissionSourceWindow;
+    if (g_macPermissionGuidePanel) {
+        if (g_macPermissionGuideAttachedToSource && sourceWindow) {
+            [sourceWindow removeChildWindow:g_macPermissionGuidePanel];
+        }
+        [g_macPermissionGuidePanel close];
+        g_macPermissionGuidePanel = nil;
+    }
+    g_macPermissionSourceWindow = nil;
+    g_hasMacPermissionSourceFrame = NO;
+    g_macPermissionGuideAttachedToSource = NO;
+
+    if (activateSourceWindow && sourceWindow && sourceWindow.isVisible) {
+        [NSApp activateIgnoringOtherApps:YES];
+        [sourceWindow makeKeyAndOrderFront:nil];
+    }
+}
+
 static EBMacPermissionKind macPermissionKindFromCString(const char *kind) {
     if (!kind) return EBMacPermissionKindUnknown;
     if (strcmp(kind, "accessibility") == 0) return EBMacPermissionKindAccessibility;
@@ -11859,6 +11879,20 @@ static NSRect permissionGuidePanelFrame(CGFloat width, CGFloat height, BOOL *att
 
 @end
 
+@interface EBMacPermissionGuideDismissTarget : NSObject
+- (void)dismissGuide:(id)sender;
+@end
+
+@implementation EBMacPermissionGuideDismissTarget
+
+- (void)dismissGuide:(id)sender {
+    closeMacPermissionGuidePanel(YES);
+}
+
+@end
+
+static EBMacPermissionGuideDismissTarget *g_macPermissionGuideDismissTarget = nil;
+
 static NSString *fallbackAppName(NSString *appName) {
     if (appName && appName.length > 0) return appName;
     NSString *processName = [[NSProcessInfo processInfo] processName];
@@ -11870,12 +11904,7 @@ static void showMacPermissionGuidePanel(EBMacPermissionKind kind, NSURL *bundleU
     CGFloat height = 144;
 
     if (g_macPermissionGuidePanel) {
-        if (g_macPermissionGuideAttachedToSource && g_macPermissionSourceWindow) {
-            [g_macPermissionSourceWindow removeChildWindow:g_macPermissionGuidePanel];
-        }
-        [g_macPermissionGuidePanel close];
-        g_macPermissionGuidePanel = nil;
-        g_macPermissionGuideAttachedToSource = NO;
+        closeMacPermissionGuidePanel(NO);
     }
 
     BOOL attachToSourceWindow = NO;
@@ -11904,6 +11933,18 @@ static void showMacPermissionGuidePanel(EBMacPermissionKind kind, NSURL *bundleU
     background.blendingMode = NSVisualEffectBlendingModeBehindWindow;
     background.state = NSVisualEffectStateActive;
     [content addSubview:background];
+
+    if (!g_macPermissionGuideDismissTarget) {
+        g_macPermissionGuideDismissTarget = [[EBMacPermissionGuideDismissTarget alloc] init];
+    }
+    NSButton *backButton = [NSButton buttonWithTitle:@"Back"
+                                             target:g_macPermissionGuideDismissTarget
+                                             action:@selector(dismissGuide:)];
+    backButton.frame = NSMakeRect(12, height - 38, 64, 26);
+    backButton.bezelStyle = NSBezelStyleRounded;
+    backButton.font = [NSFont systemFontOfSize:12 weight:NSFontWeightMedium];
+    backButton.contentTintColor = [NSColor secondaryLabelColor];
+    [content addSubview:backButton];
 
     CGFloat arrowBubbleSize = 30;
     CGFloat arrowX = (width - arrowBubbleSize) / 2;
@@ -12058,17 +12099,7 @@ extern "C" int requestMacPermissionDragGuide(const char *kindCString, const char
 
 extern "C" void closeMacPermissionDragGuide(void) {
     dispatch_async(dispatch_get_main_queue(), ^{
-        g_macPermissionGuideRequestID++;
-        if (g_macPermissionGuidePanel) {
-            if (g_macPermissionGuideAttachedToSource && g_macPermissionSourceWindow) {
-                [g_macPermissionSourceWindow removeChildWindow:g_macPermissionGuidePanel];
-            }
-            [g_macPermissionGuidePanel close];
-            g_macPermissionGuidePanel = nil;
-        }
-        g_macPermissionSourceWindow = nil;
-        g_hasMacPermissionSourceFrame = NO;
-        g_macPermissionGuideAttachedToSource = NO;
+        closeMacPermissionGuidePanel(NO);
     });
 }
 
