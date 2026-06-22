@@ -9817,7 +9817,10 @@ static void applyAppearanceToWindow(NSWindow *window, NSAppearance *appearance) 
     if (!window) return;
     NSNumber *adaptiveTheme = objc_getAssociatedObject(window, "adaptiveTheme");
     // Browser windows with native toolbars derive chrome contrast from page pixels.
-    if (adaptiveTheme && adaptiveTheme.boolValue) return;
+    if (adaptiveTheme && adaptiveTheme.boolValue) {
+        applyAppearanceToViewTree(window.contentView, appearance);
+        return;
+    }
     window.appearance = appearance;
     applyAppearanceToViewTree(window.contentView, appearance);
 }
