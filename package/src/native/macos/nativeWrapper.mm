@@ -10239,8 +10239,14 @@ extern "C" void setWindowCloaked(NSWindow *window, bool cloaked) {
 
         NSNumber *savedAlpha = objc_getAssociatedObject(window, kWindowCloakSavedAlphaKey);
         NSNumber *savedIgnoresMouse = objc_getAssociatedObject(window, kWindowCloakSavedIgnoresMouseKey);
-        [window setAlphaValue:savedAlpha ? [savedAlpha doubleValue] : 1.0];
-        [window setIgnoresMouseEvents:savedIgnoresMouse ? [savedIgnoresMouse boolValue] : NO];
+        double alpha = savedAlpha ? [savedAlpha doubleValue] : 1.0;
+        BOOL ignoresMouse = savedIgnoresMouse ? [savedIgnoresMouse boolValue] : NO;
+        if (alpha <= 0.01) {
+            alpha = 1.0;
+            ignoresMouse = NO;
+        }
+        [window setAlphaValue:alpha];
+        [window setIgnoresMouseEvents:ignoresMouse];
         objc_setAssociatedObject(window, kWindowCloakSavedAlphaKey, nil, OBJC_ASSOCIATION_ASSIGN);
         objc_setAssociatedObject(window, kWindowCloakSavedIgnoresMouseKey, nil, OBJC_ASSOCIATION_ASSIGN);
     });
