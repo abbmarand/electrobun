@@ -9916,6 +9916,21 @@ ELECTROBUN_EXPORT void setWindowButtonPosition(NSWindow *window, double x, doubl
     // Not applicable on Windows - no-op
 }
 
+ELECTROBUN_EXPORT void setWindowResizable(NSWindow *window, bool resizable) {
+    HWND hwnd = reinterpret_cast<HWND>(window);
+    if (!IsWindow(hwnd)) return;
+
+    LONG_PTR style = GetWindowLongPtr(hwnd, GWL_STYLE);
+    if (resizable) {
+        style |= WS_THICKFRAME | WS_MAXIMIZEBOX;
+    } else {
+        style &= ~(WS_THICKFRAME | WS_MAXIMIZEBOX);
+    }
+    SetWindowLongPtr(hwnd, GWL_STYLE, style);
+    SetWindowPos(hwnd, NULL, 0, 0, 0, 0,
+        SWP_FRAMECHANGED | SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE);
+}
+
 ELECTROBUN_EXPORT void setWindowSize(NSWindow *window, double width, double height) {
     HWND hwnd = reinterpret_cast<HWND>(window);
     if (!IsWindow(hwnd)) return;

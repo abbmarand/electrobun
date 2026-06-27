@@ -388,6 +388,10 @@ export class BrowserWindow<T extends RPCWithTransport = RPCWithTransport> {
 		return ffi.request.setWindowButtonPosition({ winId: this.id, x, y });
 	}
 
+	setResizable(resizable: boolean) {
+		return ffi.request.setWindowResizable({ winId: this.id, resizable });
+	}
+
 	setSize(width: number, height: number) {
 		this.frame.width = width;
 		this.frame.height = height;

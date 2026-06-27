@@ -260,6 +260,10 @@ export const native = (() => {
 				args: [FFIType.ptr, FFIType.f64, FFIType.f64],
 				returns: FFIType.void
 			},
+			setWindowResizable: {
+				args: [FFIType.ptr, FFIType.bool],
+				returns: FFIType.void
+			},
 			setWindowSize: {
 				args: [FFIType.ptr, FFIType.f64, FFIType.f64],
 				returns: FFIType.void
@@ -1572,6 +1576,17 @@ const _ffiImpl = {
 			}
 
 			native_.symbols.setWindowButtonPosition(windowPtr, x, y);
+		},
+
+		setWindowResizable: (params: { winId: number; resizable: boolean }) => {
+			const { winId, resizable } = params;
+			const windowPtr = getWindowPtr(winId);
+
+			if (!windowPtr) {
+				throw `Can't set window resizable. Window no longer exists`;
+			}
+
+			native_.symbols.setWindowResizable(windowPtr, resizable);
 		},
 
 		setWindowSize: (params: { winId: number; width: number; height: number }) => {

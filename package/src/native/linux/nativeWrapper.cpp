@@ -11062,6 +11062,41 @@ ELECTROBUN_EXPORT void setWindowButtonPosition(void* window, double x, double y)
     // Not applicable on Linux - no-op
 }
 
+ELECTROBUN_EXPORT void setWindowResizable(void* window, bool resizable) {
+    if (!window) return;
+
+    dispatch_sync_main_void([=]() {
+        if (GTK_IS_WIDGET(window)) {
+            GtkWidget* gtkWindow = static_cast<GtkWidget*>(window);
+            if (GTK_IS_WINDOW(gtkWindow)) {
+                gtk_window_set_resizable(GTK_WINDOW(gtkWindow), resizable ? TRUE : FALSE);
+            }
+        } else {
+            X11Window* x11win = static_cast<X11Window*>(window);
+            if (x11win && x11win->display && x11win->window) {
+                XSizeHints* sizeHints = XAllocSizeHints();
+                if (sizeHints) {
+                    sizeHints->flags = PPosition | PSize;
+                    sizeHints->x = x11win->x;
+                    sizeHints->y = x11win->y;
+                    sizeHints->width = x11win->width;
+                    sizeHints->height = x11win->height;
+                    if (!resizable) {
+                        sizeHints->flags |= PMinSize | PMaxSize;
+                        sizeHints->min_width = x11win->width;
+                        sizeHints->max_width = x11win->width;
+                        sizeHints->min_height = x11win->height;
+                        sizeHints->max_height = x11win->height;
+                    }
+                    XSetWMNormalHints(x11win->display, x11win->window, sizeHints);
+                    XFree(sizeHints);
+                }
+                XFlush(x11win->display);
+            }
+        }
+    });
+}
+
 ELECTROBUN_EXPORT void setWindowSize(void* window, double width, double height) {
     if (!window) return;
 

@@ -673,6 +673,26 @@ static void applyWindowButtonPosition(NSWindow *window, double x, double y) {
     [zoomBtn setFrameOrigin:NSMakePoint(x + 2 * buttonSpacing, adjustedY)];
 }
 
+static BOOL windowUsesHiddenTitleBar(NSWindow *window) {
+    NSString *titleBarStyle = objc_getAssociatedObject(window, kTrafficLightTitleBarStyleKey);
+    return [titleBarStyle isEqualToString:@"hidden"] ||
+        [titleBarStyle isEqualToString:@"hiddenInset"];
+}
+
+static void applyHiddenTitleBarButtonVisibility(NSWindow *window) {
+    if (!window || !windowUsesHiddenTitleBar(window)) {
+        return;
+    }
+
+    NSWindowStyleMask styleMask = [window styleMask];
+    BOOL hasClose = (styleMask & NSWindowStyleMaskClosable) != 0;
+    BOOL hasMini = (styleMask & NSWindowStyleMaskMiniaturizable) != 0;
+    BOOL hasZoom = (styleMask & NSWindowStyleMaskResizable) != 0;
+    [[window standardWindowButton:NSWindowCloseButton] setHidden:!hasClose];
+    [[window standardWindowButton:NSWindowMiniaturizeButton] setHidden:!hasMini];
+    [[window standardWindowButton:NSWindowZoomButton] setHidden:!hasZoom || (!hasClose && !hasMini)];
+}
+
 // Window, tray, menu, and snapshot callbacks are defined in shared/callbacks.h
 // Platform-specific aliases
 typedef SnapshotCallback zigSnapshotCallback;
@@ -10002,7 +10022,7 @@ NSWindow *createNSWindowWithFrameAndStyle(uint32_t windowId,
         window.titleVisibility = NSWindowTitleHidden;
         if (!hasClose) [[window standardWindowButton:NSWindowCloseButton] setHidden:YES];
         if (!hasMini)  [[window standardWindowButton:NSWindowMiniaturizeButton] setHidden:YES];
-        if (!hasZoom)  [[window standardWindowButton:NSWindowZoomButton] setHidden:YES];
+        if (!hasZoom || (!hasClose && !hasMini)) [[window standardWindowButton:NSWindowZoomButton] setHidden:YES];
 
         if (hasNoTrafficLights) {
             NSWindowCollectionBehavior behavior = [window collectionBehavior];
@@ -10022,6 +10042,7 @@ NSWindow *createNSWindowWithFrameAndStyle(uint32_t windowId,
     objc_setAssociatedObject(window, kTrafficLightOffsetYKey, @(config.trafficLightOffsetY), OBJC_ASSOCIATION_RETAIN_NONATOMIC);
     objc_setAssociatedObject(window, kTrafficLightAppliedOffsetXKey, @(0), OBJC_ASSOCIATION_RETAIN_NONATOMIC);
     objc_setAssociatedObject(window, kTrafficLightAppliedOffsetYKey, @(0), OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+    applyHiddenTitleBarButtonVisibility(window);
     WindowDelegate *delegate = [[WindowDelegate alloc] init];
     delegate.closeHandler = zigCloseHandler;
     delegate.resizeHandler = zigResizeHandler;
@@ -10380,6 +10401,20 @@ extern "C" void setWindowButtonPosition(NSWindow *window, double x, double y) {
         }
 
         applyWindowButtonPosition(window, x, y);
+    });
+}
+
+extern "C" void setWindowResizable(NSWindow *window, bool resizable) {
+    dispatch_async(dispatch_get_main_queue(), ^{
+        if (!window) return;
+        NSWindowStyleMask styleMask = [window styleMask];
+        if (resizable) {
+            styleMask |= NSWindowStyleMaskResizable;
+        } else {
+            styleMask &= ~NSWindowStyleMaskResizable;
+        }
+        [window setStyleMask:styleMask];
+        applyHiddenTitleBarButtonVisibility(window);
     });
 }
 
