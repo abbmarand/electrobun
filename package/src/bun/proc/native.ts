@@ -3215,7 +3215,7 @@ export const Screen = {
 	},
 
 	/**
-	 * Open the matching System Settings pane and show a native draggable app guide.
+	 * Open an addable System Settings privacy pane and show a native draggable app guide.
 	 */
 	requestMacPermissionDragGuide: (
 		kind: MacPermissionKind,

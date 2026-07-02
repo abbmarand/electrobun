@@ -11642,37 +11642,26 @@ static NSString *macPermissionGuideInstruction(EBMacPermissionKind kind) {
             return @"Then click Quit & Reopen.";
         case EBMacPermissionKindFullDiskAccess:
             return @"Then turn Cachy on and relaunch the command.";
-        case EBMacPermissionKindFilesAndFolders:
-        case EBMacPermissionKindDesktopFolder:
-        case EBMacPermissionKindDocumentsFolder:
-        case EBMacPermissionKindDownloadsFolder:
-        case EBMacPermissionKindRemovableVolumes:
-            return @"Then turn Cachy on for the needed folders.";
-        case EBMacPermissionKindCamera:
-        case EBMacPermissionKindMicrophone:
-        case EBMacPermissionKindContacts:
-        case EBMacPermissionKindAutomation:
         case EBMacPermissionKindInputMonitoring:
-        case EBMacPermissionKindLocation:
-        case EBMacPermissionKindCalendar:
-        case EBMacPermissionKindReminders:
-        case EBMacPermissionKindPhotos:
         case EBMacPermissionKindBluetooth:
-        case EBMacPermissionKindSpeechRecognition:
-        case EBMacPermissionKindLocalNetwork:
-        case EBMacPermissionKindMediaLibrary:
-        case EBMacPermissionKindMotionFitness:
-        case EBMacPermissionKindHomeKit:
-        case EBMacPermissionKindFocusStatus:
-        case EBMacPermissionKindRemoteDesktop:
-        case EBMacPermissionKindDeveloperTools:
-        case EBMacPermissionKindAppManagement:
-        case EBMacPermissionKindPasskeyAccess:
             return @"Then turn Cachy on and try again.";
         case EBMacPermissionKindAccessibility:
             return @"Then return to Cachy and click Done.";
         default:
             return @"Then return to Cachy.";
+    }
+}
+
+static BOOL macPermissionSupportsDragGuide(EBMacPermissionKind kind) {
+    switch (kind) {
+        case EBMacPermissionKindAccessibility:
+        case EBMacPermissionKindScreenRecording:
+        case EBMacPermissionKindFullDiskAccess:
+        case EBMacPermissionKindInputMonitoring:
+        case EBMacPermissionKindBluetooth:
+            return YES;
+        default:
+            return NO;
     }
 }
 
@@ -12096,7 +12085,7 @@ extern "C" int requestMacMediaPermission(const char *kindCString) {
 // Return codes:
 //   1  already granted
 //   0  guide shown
-//  -1  unsupported permission kind
+//  -1  unsupported permission kind or a permission pane without manual app adding
 //  -2  current process is not running from a .app bundle
 //  -3  failed to open System Settings
 extern "C" int requestMacPermissionDragGuide(const char *kindCString, const char *appNameCString, BOOL forceGuide) {
@@ -12104,6 +12093,11 @@ extern "C" int requestMacPermissionDragGuide(const char *kindCString, const char
     dispatch_sync(dispatch_get_main_queue(), ^{
         EBMacPermissionKind kind = macPermissionKindFromCString(kindCString);
         if (kind == EBMacPermissionKindUnknown) {
+            result = -1;
+            return;
+        }
+
+        if (!macPermissionSupportsDragGuide(kind)) {
             result = -1;
             return;
         }
