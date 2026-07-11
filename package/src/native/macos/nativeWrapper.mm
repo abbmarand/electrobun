@@ -1057,6 +1057,14 @@ static NSMutableDictionary<NSNumber *, AbstractView *> *globalAbstractViews = ni
 static NSMutableSet<NativePopupWindowController *> *globalNativePopupControllers = nil;
 static NSMutableDictionary<NSString *, NativePopupWindowController *> *globalNamedNativePopupControllers = nil;
 
+static void focusTopInteractiveView(NSWindow *window);
+static void focusTopInteractiveViewIfNeeded(NSWindow *window);
+
+static BOOL shouldAcceptFirstMouseForWindow(NSWindow *window) {
+    if (!window) return NO;
+    return ([window styleMask] & NSWindowStyleMaskNonactivatingPanel) != 0;
+}
+
 // OSR (Off-Screen Rendering) View for transparent CEF windows
 @interface CEFOSRView : NSView {
     @private
@@ -1073,6 +1081,9 @@ static NSMutableDictionary<NSString *, NativePopupWindowController *> *globalNam
 
 - (void)updateBuffer:(const void*)buffer width:(int)width height:(int)height;
 - (void)setCefBrowser:(void*)browser;
+@end
+
+@interface ElectrobunWKWebView : WKWebView
 @end
 
 @interface ContainerView : NSView
@@ -1778,6 +1789,10 @@ static void schedulePendingResizeDrain() {
         [self updateActiveWebviewForMousePosition:mouseLocation];
     }
 
+    - (BOOL)acceptsFirstMouse:(NSEvent *)event {
+        return shouldAcceptFirstMouseForWindow(self.window);
+    }
+
     // This function tries to figure out which "abstractView" should be interactive
     // vs mirrored, based on mouse position and layering.
     - (void)updateActiveWebviewForMousePosition:(NSPoint)mouseLocation {    
@@ -1947,6 +1962,9 @@ static NSString * const FindBarAssociatedKey = @"ElectrobunFindBar";
     self.hidden = YES;
     [self removeFromSuperview];
     if (self.parentWindow) {
+        if (view.nsView && [view.nsView acceptsFirstResponder]) {
+            [self.parentWindow makeFirstResponder:view.nsView];
+        }
         objc_setAssociatedObject(self.parentWindow, FindBarAssociatedKey.UTF8String, nil, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
     }
 }
@@ -2065,6 +2083,10 @@ static NSString * const FindBarAssociatedKey = @"ElectrobunFindBar";
 
 - (BOOL)canBecomeKeyView {
     return YES;
+}
+
+- (BOOL)acceptsFirstMouse:(NSEvent *)event {
+    return shouldAcceptFirstMouseForWindow(self.window);
 }
 
 - (void)setCefBrowser:(void*)browser {
@@ -4511,6 +4533,14 @@ runOpenPanelWithParameters:(WKOpenPanelParameters *)parameters
     }
 @end
 
+@implementation ElectrobunWKWebView
+
+- (BOOL)acceptsFirstMouse:(NSEvent *)event {
+    return shouldAcceptFirstMouseForWindow(self.window);
+}
+
+@end
+
 // ----------------------- WKWebViewImpl -----------------------
 
 
@@ -4564,7 +4594,7 @@ runOpenPanelWithParameters:(WKOpenPanelParameters *)parameters
                 [configuration setURLSchemeHandler:assetSchemeHandler forURLScheme:@"views"];
                 
                 // create WKWebView
-                self.webView = [[WKWebView alloc] initWithFrame:frame configuration:configuration];
+                self.webView = [[ElectrobunWKWebView alloc] initWithFrame:frame configuration:configuration];
 
                 // Only transparent windows should make the page canvas transparent.
                 // Normal site/app windows need WebKit's opaque background so pages
@@ -4664,6 +4694,10 @@ runOpenPanelWithParameters:(WKOpenPanelParameters *)parameters
                 
                 // Note: in WkWebkit the webview is an NSView
                 self.nsView = self.webView;
+
+                if (autoResize && [window isKeyWindow]) {
+                    focusTopInteractiveViewIfNeeded(window);
+                }
 
                 // Apply deferred initial transparent/passthrough state now that nsView is set
                 if (self.pendingStartTransparent) {
@@ -9089,9 +9123,10 @@ CefRefPtr<CefRequestContext> CreateRequestContextForPartition(const char* partit
         for (AbstractView *abstractView in containerView.abstractViews) {
             if (abstractView.nsView && [abstractView.nsView isKindOfClass:[WGPUInputView class]]) {
                 [window makeFirstResponder:abstractView.nsView];
-                break;
+                return;
             }
         }
+        focusTopInteractiveViewIfNeeded(window);
     }
     - (void)windowDidResignKey:(NSNotification *)notification {
         if (self.blurHandler) {
@@ -10098,6 +10133,20 @@ static void focusTopInteractiveView(NSWindow *window) {
             [window makeFirstResponder:view];
             return;
         }
+    }
+}
+
+static void focusTopInteractiveViewIfNeeded(NSWindow *window) {
+    NSResponder *firstResponder = window.firstResponder;
+    if (!firstResponder || firstResponder == window || firstResponder == window.contentView) {
+        focusTopInteractiveView(window);
+        return;
+    }
+
+    if (![firstResponder isKindOfClass:[NSView class]]) return;
+    NSView *firstResponderView = (NSView *)firstResponder;
+    if (firstResponderView.window != window) {
+        focusTopInteractiveView(window);
     }
 }
 
