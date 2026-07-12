@@ -4831,6 +4831,24 @@ void handleApplicationMenuSelection(UINT menuId) {
 }
 
 
+static void focusWebView2ForWindow(HWND hwnd) {
+    auto containerIt = g_containerViews.find(hwnd);
+    if (containerIt == g_containerViews.end()) {
+        return;
+    }
+
+    HWND containerHwnd = containerIt->second->GetHwnd();
+    auto webviewIt = g_webview2Views.find(containerHwnd);
+    if (webviewIt == g_webview2Views.end()) {
+        return;
+    }
+
+    auto* webview = static_cast<WebView2View*>(webviewIt->second);
+    if (webview && webview->getController()) {
+        webview->getController()->MoveFocus(COREWEBVIEW2_MOVE_FOCUS_REASON_PROGRAMMATIC);
+    }
+}
+
 // Window procedure that will handle events and call your handlers
 LRESULT CALLBACK WindowProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
     // Get our custom data
@@ -5036,21 +5054,7 @@ LRESULT CALLBACK WindowProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
                 if (data && data->focusHandler) {
                     data->focusHandler(data->windowId);
                 }
-                // Propagate focus into the WebView2 controller so the web input
-                // field receives keyboard events immediately.
-                {
-                    auto cit = g_containerViews.find(hwnd);
-                    if (cit != g_containerViews.end()) {
-                        HWND containerHwnd = cit->second->GetHwnd();
-                        auto wit = g_webview2Views.find(containerHwnd);
-                        if (wit != g_webview2Views.end()) {
-                            auto* wv2 = static_cast<WebView2View*>(wit->second);
-                            if (wv2 && wv2->getController()) {
-                                wv2->getController()->MoveFocus(COREWEBVIEW2_MOVE_FOCUS_REASON_PROGRAMMATIC);
-                            }
-                        }
-                    }
-                }
+                focusWebView2ForWindow(hwnd);
             }
             break;
 
@@ -9442,13 +9446,13 @@ ELECTROBUN_EXPORT HWND createWindowWithFrameAndStyleFromWorker(
         if (titleBarStyle && strcmp(titleBarStyle, "hidden") == 0) {
             // "hidden" = borderless window (no titlebar, no native controls)
             // This is for completely custom chrome
-            windowStyle = WS_POPUP | WS_VISIBLE;
+            windowStyle = WS_POPUP;
         } else if (titleBarStyle && strcmp(titleBarStyle, "hiddenInset") == 0) {
             // "hiddenInset" = frameless window with resize borders and DWM shadow.
             // We use WS_CAPTION | WS_THICKFRAME so the system treats it as a
             // standard framed window (giving us shadow and border resizing),
             // then remove the caption bar area in WM_NCCALCSIZE.
-            windowStyle = WS_VISIBLE | WS_CAPTION | WS_THICKFRAME | WS_CLIPCHILDREN | WS_CLIPSIBLINGS;
+            windowStyle = WS_CAPTION | WS_THICKFRAME | WS_CLIPCHILDREN | WS_CLIPSIBLINGS;
             data->chromeStyle = ChromeStyle::HiddenInset;
         }
         // else: default titleBarStyle = WS_OVERLAPPEDWINDOW (standard window)
@@ -9519,10 +9523,6 @@ ELECTROBUN_EXPORT HWND createWindowWithFrameAndStyleFromWorker(
                 SetWindowPos(hwnd, NULL, 0, 0, 0, 0,
                     SWP_FRAMECHANGED | SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE);
             }
-
-            // Show the window
-            ShowWindow(hwnd, SW_SHOW);
-            UpdateWindow(hwnd);
         } else {
             // Clean up if window creation failed
             free(data);
@@ -9588,18 +9588,7 @@ ELECTROBUN_EXPORT void showWindow(void *window, bool activate) {
 
         if (activate) {
             activateVisibleWindow(hwnd);
-            // Focus the WebView2 controller so the web input field gets keyboard input.
-            auto cit = g_containerViews.find(hwnd);
-            if (cit != g_containerViews.end()) {
-                HWND containerHwnd = cit->second->GetHwnd();
-                auto wit = g_webview2Views.find(containerHwnd);
-                if (wit != g_webview2Views.end()) {
-                    auto* wv2 = static_cast<WebView2View*>(wit->second);
-                    if (wv2 && wv2->getController()) {
-                        wv2->getController()->MoveFocus(COREWEBVIEW2_MOVE_FOCUS_REASON_PROGRAMMATIC);
-                    }
-                }
-            }
+            focusWebView2ForWindow(hwnd);
         } else {
             SetWindowPos(hwnd, HWND_TOP, 0, 0, 0, 0,
                         SWP_NOMOVE | SWP_NOSIZE | SWP_SHOWWINDOW | SWP_NOACTIVATE);
@@ -9617,6 +9606,7 @@ ELECTROBUN_EXPORT void activateWindow(void *window) {
 
     MainThreadDispatcher::dispatch_sync([=]() {
         activateVisibleWindow(hwnd);
+        focusWebView2ForWindow(hwnd);
     });
 }
 
