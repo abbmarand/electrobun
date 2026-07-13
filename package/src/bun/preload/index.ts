@@ -23,6 +23,7 @@ import {
 	initLifecycleEvents,
 	initCmdClickHandling,
 	initOverscrollPrevention,
+	initTargetUrlTracking,
 } from "./events";
 
 // Initialize encryption first (async)
@@ -60,6 +61,7 @@ window.__electrobunSendToHost = (message: unknown) => {
 initLifecycleEvents();
 initCmdClickHandling();
 initOverscrollPrevention();
+initTargetUrlTracking();
 initDragRegions();
 initWebviewTag();
 initWgpuTag();

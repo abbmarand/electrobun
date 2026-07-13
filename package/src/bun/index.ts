@@ -9,6 +9,7 @@ import {
 	type BrowserPermissionRequestDetail,
 	type BrowserPermissionResponseDecision,
 	type BrowserPermissionType,
+	type BrowserTargetUrlEvent,
 	type BrowserViewOptions
 } from "./core/BrowserView";
 import {
@@ -297,6 +298,7 @@ export {
 	type BrowserPermissionRequestDetail,
 	type BrowserPermissionResponseDecision,
 	type BrowserPermissionType,
+	type BrowserTargetUrlEvent,
 	type BrowserViewLayoutCalculation,
 	type BrowserViewLayoutDivider,
 	type BrowserViewLayoutDirection,

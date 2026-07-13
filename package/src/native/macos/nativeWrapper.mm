@@ -3231,6 +3231,12 @@ extern "C" void webviewRespondToPermissionRequest(const char *requestId, const c
         NSWindow *window = webView.window;
         NSNumber *adaptiveTheme = objc_getAssociatedObject(window, "adaptiveTheme");
         if (!adaptiveTheme || !adaptiveTheme.boolValue) return;
+        // Only the primary page drives adaptive toolbar color. Transparent
+        // browser-chrome children must not be sampled as page content.
+        if (![window.contentView isKindOfClass:[ContainerView class]]) return;
+        ContainerView *containerView = (ContainerView *)window.contentView;
+        AbstractView *primaryView = containerView.abstractViews.lastObject;
+        if (!primaryView || primaryView.nsView != webView) return;
 
         WKSnapshotConfiguration *config = [[WKSnapshotConfiguration alloc] init];
         config.rect = CGRectMake(0, 0, webView.bounds.size.width, 5);
@@ -10149,7 +10155,7 @@ static void focusTopInteractiveView(NSWindow *window) {
     ContainerView *containerView = (ContainerView *)window.contentView;
     for (AbstractView *abstractView in containerView.abstractViews) {
         NSView *view = abstractView.nsView;
-        if (!view || view.hidden) continue;
+        if (!view || view.hidden || abstractView.isMousePassthroughEnabled) continue;
 
         if ([view acceptsFirstResponder]) {
             [window makeFirstResponder:view];

@@ -97,6 +97,7 @@ type BrowserViewEventName =
 	| "did-navigate-in-page"
 	| "did-commit-navigation"
 	| "dom-ready"
+	| "update-target-url"
 	| "new-window-open"
 	| "host-message"
 	| "download-started"
@@ -128,10 +129,15 @@ export type BrowserDownloadEvent = ElectrobunEvent<
 	{ detail: BrowserDownloadEventDetail },
 	Record<string, never>
 >;
-type BrowserViewEvent<Name extends BrowserViewEventName> = Name extends "permission-requested"
-	? BrowserPermissionRequestEvent
-	: Name extends "permission-decided"
-		? BrowserPermissionDecidedEvent
+export type BrowserTargetUrlEvent = ElectrobunEvent<{ detail: string }, Record<string, never>>;
+type BrowserViewTypedEventMap = {
+	"permission-requested": BrowserPermissionRequestEvent;
+	"permission-decided": BrowserPermissionDecidedEvent;
+	"update-target-url": BrowserTargetUrlEvent;
+};
+type BrowserViewEvent<Name extends BrowserViewEventName> =
+	Name extends keyof BrowserViewTypedEventMap
+		? BrowserViewTypedEventMap[Name]
 		: Name extends BrowserDownloadEventName
 			? BrowserDownloadEvent
 			: unknown;
@@ -436,6 +442,14 @@ export class BrowserView<T extends RPCWithTransport = RPCWithTransport> {
 	) {
 		const specificName = `${name}-${this.id}`;
 		electrobunEventEmitter.on(specificName, handler);
+	}
+
+	off<Name extends BrowserViewEventName>(
+		name: Name,
+		handler: (event: BrowserViewEvent<Name>) => void
+	) {
+		const specificName = `${name}-${this.id}`;
+		electrobunEventEmitter.off(specificName, handler);
 	}
 
 	static respondToPermissionRequest(

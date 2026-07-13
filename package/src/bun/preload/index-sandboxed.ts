@@ -14,6 +14,7 @@ import {
 	initLifecycleEvents,
 	initCmdClickHandling,
 	initOverscrollPrevention,
+	initTargetUrlTracking,
 } from "./events";
 
 // Initialize minimal features for sandboxed webviews
@@ -24,3 +25,4 @@ import {
 initLifecycleEvents();
 initCmdClickHandling();
 initOverscrollPrevention();
+initTargetUrlTracking();

@@ -106,6 +106,8 @@ export default {
 	didCommitNavigation: (data: DetailData) =>
 		new ElectrobunEvent<DetailData, {}>("did-commit-navigation", data),
 	domReady: (data: DetailData) => new ElectrobunEvent<DetailData, {}>("dom-ready", data),
+	updateTargetUrl: (data: DetailData) =>
+		new ElectrobunEvent<DetailData, {}>("update-target-url", data),
 	newWindowOpen: (data: NewWindowOpenData) =>
 		new ElectrobunEvent<NewWindowOpenData, {}>("new-window-open", data),
 	hostMessage: (data: DetailData) => new ElectrobunEvent<DetailData, {}>("host-message", data),

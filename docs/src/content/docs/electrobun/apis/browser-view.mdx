@@ -563,6 +563,15 @@ webview.toggleDevTools();
 ### on(name, handler)
   <p>Subscribe to BrowserView events (see below).</p>
 
+### off(name, handler)
+  <p>Remove a BrowserView event subscription. Pass the same handler function that was given to <code>on</code>.</p>
+
+```typescript
+const handleTarget = (event) => console.log(event.data.detail);
+webview.on("update-target-url", handleTarget);
+webview.off("update-target-url", handleTarget);
+```
+
 ## Properties
 
 ### id
@@ -687,6 +696,16 @@ event.data = {
 
 ### dom-ready
   <p>The dom ready event is fired from the browser context.</p>
+
+### update-target-url
+  <p>Fired when the pointer enters or leaves a link. <code>event.data.detail</code> is the resolved target URL, or an empty string when no link is under the pointer. The event is available in sandboxed BrowserViews and includes links in child frames.</p>
+
+```typescript
+webview.on("update-target-url", (event) => {
+  const url = event.data.detail;
+  console.log(url || "No link under the pointer");
+});
+```
 
 ### new-window-open
   <p>The browser context is attempting to open a new window. For example a popup or a user right clicked and selected &quot;open in new window&quot;.</p>
@@ -813,4 +832,3 @@ webview.on("download-failed", (event) => {
   console.log("Error:", event.detail.error);
 });
 ```
-

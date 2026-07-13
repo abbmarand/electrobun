@@ -5,6 +5,7 @@ type WebviewEventTypes =
 	| "did-navigate-in-page"
 	| "did-commit-navigation"
 	| "dom-ready"
+	| "update-target-url"
 	| "host-message"
 	| "new-window-open"
 	| "download-started"

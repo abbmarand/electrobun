@@ -89,6 +89,89 @@ function closestAnchor(target: EventTarget | null): HTMLAnchorElement | null {
 	return anchor instanceof HTMLAnchorElement ? anchor : null;
 }
 
+function eventTargetElement(event: PointerEvent): Element | null {
+	try {
+		const path = event.composedPath();
+		for (const candidate of path) {
+			if (candidate instanceof Element) return candidate;
+		}
+	} catch {}
+	if (event.target instanceof Element) return event.target;
+	if (event.target instanceof Node) return event.target.parentElement;
+	return null;
+}
+
+function rootHost(element: Element): Element | null {
+	try {
+		const root = element.getRootNode();
+		return root instanceof ShadowRoot && root.host instanceof Element ? root.host : null;
+	} catch {
+		return null;
+	}
+}
+
+function closestLinkElement(element: Element | null): Element | null {
+	let current = element;
+	while (current) {
+		const tagName = current.tagName;
+		if ((tagName === "A" || tagName === "AREA") && current.hasAttribute("href")) {
+			return current;
+		}
+		current = current.parentElement ?? rootHost(current);
+	}
+	return null;
+}
+
+function targetUrl(element: Element | null): string {
+	const link = closestLinkElement(element);
+	if (!link) return "";
+	const href = link.getAttribute("href");
+	if (!href) return "";
+	try {
+		return new URL(href, link.ownerDocument.baseURI).href;
+	} catch {
+		return "";
+	}
+}
+
+/**
+ * Reports the resolved URL under the pointer without exposing an RPC bridge to
+ * the page. The standard preload runs in every frame, so links inside iframes
+ * use the same event path as links in the top-level document.
+ */
+export function initTargetUrlTracking() {
+	let currentUrl = "";
+
+	function publish(url: string) {
+		if (url === currentUrl) return;
+		currentUrl = url;
+		emitWebviewEvent("update-target-url", url);
+	}
+
+	window.addEventListener(
+		"pointerover",
+		(event) => {
+			publish(targetUrl(eventTargetElement(event)));
+		},
+		true
+	);
+
+	window.addEventListener(
+		"pointerout",
+		(event) => {
+			const related = event.relatedTarget;
+			publish(targetUrl(related instanceof Element ? related : null));
+		},
+		true
+	);
+
+	window.addEventListener("blur", () => publish(""));
+	window.addEventListener("pagehide", () => publish(""));
+	document.addEventListener("visibilitychange", () => {
+		if (document.hidden) publish("");
+	});
+}
+
 // Set up cmd+click detection for opening links in new windows
 export function initCmdClickHandling() {
 	if (isNativeMacWebKit()) return;

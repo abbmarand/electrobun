@@ -11,6 +11,7 @@ type WebviewEventType =
 	| "did-navigate-in-page"
 	| "did-commit-navigation"
 	| "dom-ready"
+	| "update-target-url"
 	| "new-window-open"
 	| "host-message"
 	| "download-started"

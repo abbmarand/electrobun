@@ -3760,6 +3760,8 @@ function createWebviewEvent(
 			return electrobunEventEmitter.events.webview.didCommitNavigation({ detail });
 		case "dom-ready":
 			return electrobunEventEmitter.events.webview.domReady({ detail });
+		case "update-target-url":
+			return electrobunEventEmitter.events.webview.updateTargetUrl({ detail });
 		case "new-window-open":
 			return createNewWindowOpenEvent(detail);
 		case "host-message":
