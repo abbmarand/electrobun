@@ -1672,9 +1672,13 @@ public:
             return;
         }
 
-        CefMouseEvent mouse_event;
-        mouse_event.x = GET_X_LPARAM(lParam);
-        mouse_event.y = GET_Y_LPARAM(lParam);
+        CefMouseEvent mouse_event = {};
+        POINT mouse_point = {GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam)};
+        if (message == WM_MOUSEWHEEL || message == WM_MOUSEHWHEEL) {
+            ScreenToClient(parent_, &mouse_point);
+        }
+        mouse_event.x = mouse_point.x;
+        mouse_event.y = mouse_point.y;
 
         // Set modifiers
         mouse_event.modifiers = 0;
@@ -1715,6 +1719,12 @@ public:
                 host->SendMouseWheelEvent(mouse_event, 0, delta);
                 break;
             }
+
+            case WM_MOUSEHWHEEL: {
+                int delta = GET_WHEEL_DELTA_WPARAM(wParam);
+                host->SendMouseWheelEvent(mouse_event, delta, 0);
+                break;
+            }
         }
     }
 
@@ -1725,7 +1735,7 @@ public:
         CefRefPtr<CefBrowserHost> host = browser_->GetHost();
         if (!host) return;
 
-        CefKeyEvent key_event;
+        CefKeyEvent key_event = {};
         key_event.windows_key_code = (int)wParam;
         key_event.native_key_code = (int)lParam;
         key_event.is_system_key = (message == WM_SYSCHAR || message == WM_SYSKEYDOWN || message == WM_SYSKEYUP);
@@ -1736,6 +1746,8 @@ public:
             key_event.type = KEYEVENT_KEYUP;
         } else if (message == WM_CHAR || message == WM_SYSCHAR) {
             key_event.type = KEYEVENT_CHAR;
+            key_event.character = static_cast<char16_t>(wParam);
+            key_event.unmodified_character = key_event.character;
         }
 
         // Set modifiers
@@ -3772,6 +3784,14 @@ public:
     CefRefPtr<CefBrowser> getBrowser() {
         return browser;
     }
+
+    void setFocus(bool focused) {
+        if (!browser) return;
+        CefRefPtr<CefBrowserHost> host = browser->GetHost();
+        if (host) {
+            host->SetFocus(focused);
+        }
+    }
     
     CefRefPtr<ElectrobunCefClient> getClient() {
         return client;
@@ -4849,6 +4869,30 @@ static void focusWebView2ForWindow(HWND hwnd) {
     }
 }
 
+static bool focusCEFForWindow(HWND hwnd, bool focused) {
+    auto viewIt = g_cefViews.find(hwnd);
+    if (viewIt == g_cefViews.end()) {
+        return false;
+    }
+
+    auto* cefView = static_cast<CEFView*>(viewIt->second);
+    if (!cefView || !cefView->isOSRMode()) {
+        return false;
+    }
+
+    cefView->setFocus(focused);
+    return true;
+}
+
+static void focusRendererForWindow(HWND hwnd, bool focused) {
+    if (focusCEFForWindow(hwnd, focused)) {
+        return;
+    }
+    if (focused) {
+        focusWebView2ForWindow(hwnd);
+    }
+}
+
 // Window procedure that will handle events and call your handlers
 LRESULT CALLBACK WindowProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
     // Get our custom data
@@ -4963,6 +5007,7 @@ LRESULT CALLBACK WindowProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
         case WM_MBUTTONDOWN:
         case WM_MBUTTONUP:
         case WM_MOUSEWHEEL:
+        case WM_MOUSEHWHEEL:
         case WM_KEYDOWN:
         case WM_KEYUP:
         case WM_CHAR:
@@ -4975,6 +5020,10 @@ LRESULT CALLBACK WindowProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
                 if (viewIt != g_cefViews.end()) {
                     auto cefView = static_cast<CEFView*>(viewIt->second);
                     if (cefView && cefView->isOSRMode()) {
+                        if (msg == WM_LBUTTONDOWN || msg == WM_RBUTTONDOWN || msg == WM_MBUTTONDOWN) {
+                            SetFocus(hwnd);
+                            focusRendererForWindow(hwnd, true);
+                        }
                         if (msg == WM_LBUTTONDOWN) {
                             printf("WindowProc: WM_LBUTTONDOWN received for OSR window\n");
                         }
@@ -4995,6 +5044,14 @@ LRESULT CALLBACK WindowProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
                     data->keyHandler(data->windowId, keyCode, modifiers, isDown, isRepeat);
                 }
             }
+            break;
+
+        case WM_SETFOCUS:
+            focusRendererForWindow(hwnd, true);
+            break;
+
+        case WM_KILLFOCUS:
+            focusRendererForWindow(hwnd, false);
             break;
 
         case WM_SYSCOMMAND:
@@ -5047,6 +5104,7 @@ LRESULT CALLBACK WindowProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
 
         case WM_ACTIVATE:
             if (LOWORD(wParam) == WA_INACTIVE) {
+                focusRendererForWindow(hwnd, false);
                 if (data && data->blurHandler) {
                     data->blurHandler(data->windowId);
                 }
@@ -5054,7 +5112,7 @@ LRESULT CALLBACK WindowProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
                 if (data && data->focusHandler) {
                     data->focusHandler(data->windowId);
                 }
-                focusWebView2ForWindow(hwnd);
+                focusRendererForWindow(hwnd, true);
             }
             break;
 
@@ -9588,7 +9646,7 @@ ELECTROBUN_EXPORT void showWindow(void *window, bool activate) {
 
         if (activate) {
             activateVisibleWindow(hwnd);
-            focusWebView2ForWindow(hwnd);
+            focusRendererForWindow(hwnd, true);
         } else {
             SetWindowPos(hwnd, HWND_TOP, 0, 0, 0, 0,
                         SWP_NOMOVE | SWP_NOSIZE | SWP_SHOWWINDOW | SWP_NOACTIVATE);
@@ -9606,7 +9664,7 @@ ELECTROBUN_EXPORT void activateWindow(void *window) {
 
     MainThreadDispatcher::dispatch_sync([=]() {
         activateVisibleWindow(hwnd);
-        focusWebView2ForWindow(hwnd);
+        focusRendererForWindow(hwnd, true);
     });
 }
 

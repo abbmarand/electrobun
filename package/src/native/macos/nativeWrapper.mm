@@ -4579,6 +4579,10 @@ runOpenPanelWithParameters:(WKOpenPanelParameters *)parameters
                 
                 // configuration
                 WKWebViewConfiguration *configuration = [[WKWebViewConfiguration alloc] init];
+
+                if (@available(macOS 15.0, *)) {
+                    [configuration setValue:@(NSWritingToolsBehaviorNone) forKey:@"writingToolsBehavior"];
+                }
                 
                 configuration.websiteDataStore = createDataStoreForPartition(partitionIdentifier);
                 
