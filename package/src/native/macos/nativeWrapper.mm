@@ -4581,7 +4581,9 @@ runOpenPanelWithParameters:(WKOpenPanelParameters *)parameters
                 WKWebViewConfiguration *configuration = [[WKWebViewConfiguration alloc] init];
 
                 if (@available(macOS 15.0, *)) {
-                    [configuration setValue:@(NSWritingToolsBehaviorNone) forKey:@"writingToolsBehavior"];
+                    // Use the raw "none" value so builds with a pre-macOS 15 SDK can
+                    // still disable Writing Tools when the app runs on macOS 15+.
+                    [configuration setValue:@(-1) forKey:@"writingToolsBehavior"];
                 }
                 
                 configuration.websiteDataStore = createDataStoreForPartition(partitionIdentifier);
