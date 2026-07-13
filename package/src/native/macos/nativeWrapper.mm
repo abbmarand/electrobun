@@ -4713,6 +4713,22 @@ runOpenPanelWithParameters:(WKOpenPanelParameters *)parameters
                     [self setPassthrough:YES];
                 }
 
+                if (autoResize) {
+                    // Attaching native toolbar items can settle the content view's bounds
+                    // after this webview is created. Reflow once on the next main-loop turn
+                    // so a full-size child view is correct before the first window resize.
+                    __weak WKWebViewImpl *weakSelf = self;
+                    __weak NSWindow *weakWindow = window;
+                    dispatch_async(dispatch_get_main_queue(), ^{
+                        WKWebViewImpl *strongSelf = weakSelf;
+                        NSWindow *strongWindow = weakWindow;
+                        if (!strongSelf || !strongWindow || !strongSelf.fullSize) return;
+
+                        [strongWindow.contentView layoutSubtreeIfNeeded];
+                        [strongSelf resize:strongWindow.contentView.bounds withMasksJSON:""];
+                    });
+                }
+
                 // Polyfill navigator.userAgentData so sites like Google
                 // recognise WKWebView as a Chromium-based browser.
                 static NSString *uaDataPolyfill = @"(function(){"

@@ -11,6 +11,26 @@ import {
 	type BrowserPermissionType,
 	type BrowserViewOptions
 } from "./core/BrowserView";
+import {
+	BrowserViewLayout,
+	calculateBrowserViewLayout,
+	type BrowserViewLayoutCalculation,
+	type BrowserViewLayoutDivider,
+	type BrowserViewLayoutDirection,
+	type BrowserViewLayoutInsets,
+	type BrowserViewLayoutLeafNode,
+	type BrowserViewLayoutManagedView,
+	type BrowserViewLayoutMetrics,
+	type BrowserViewLayoutNode,
+	type BrowserViewLayoutOptions,
+	type BrowserViewLayoutRect,
+	type BrowserViewLayoutSize,
+	type BrowserViewLayoutSnapshot,
+	type BrowserViewLayoutSplitFrame,
+	type BrowserViewLayoutSplitNode,
+	type BrowserViewLayoutViewFrame,
+	type BrowserViewLayoutWindow
+} from "./core/BrowserViewLayout";
 import { GpuWindow, type GpuWindowOptionsType } from "./core/GpuWindow";
 import { WGPUView, type WGPUViewOptions } from "./core/WGPUView";
 import { Tray, type TrayOptions } from "./core/Tray";
@@ -277,6 +297,22 @@ export {
 	type BrowserPermissionRequestDetail,
 	type BrowserPermissionResponseDecision,
 	type BrowserPermissionType,
+	type BrowserViewLayoutCalculation,
+	type BrowserViewLayoutDivider,
+	type BrowserViewLayoutDirection,
+	type BrowserViewLayoutInsets,
+	type BrowserViewLayoutLeafNode,
+	type BrowserViewLayoutManagedView,
+	type BrowserViewLayoutMetrics,
+	type BrowserViewLayoutNode,
+	type BrowserViewLayoutOptions,
+	type BrowserViewLayoutRect,
+	type BrowserViewLayoutSize,
+	type BrowserViewLayoutSnapshot,
+	type BrowserViewLayoutSplitFrame,
+	type BrowserViewLayoutSplitNode,
+	type BrowserViewLayoutViewFrame,
+	type BrowserViewLayoutWindow,
 	type GpuWindowOptionsType,
 	type WGPUViewOptions,
 	type TrayOptions,
@@ -300,6 +336,8 @@ export {
 	defineElectrobunRPC,
 	BrowserWindow,
 	BrowserView,
+	BrowserViewLayout,
+	calculateBrowserViewLayout,
 	GpuWindow,
 	WGPUView,
 	Tray,
@@ -326,6 +364,8 @@ export {
 const Electrobun = {
 	BrowserWindow,
 	BrowserView,
+	BrowserViewLayout,
+	calculateBrowserViewLayout,
 	GpuWindow,
 	WGPUView,
 	Tray,

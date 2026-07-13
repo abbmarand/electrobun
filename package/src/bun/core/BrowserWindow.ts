@@ -8,6 +8,7 @@ import { type RPCWithTransport } from "../../shared/rpc.js";
 import { getNextWindowId } from "./windowIds";
 import { GpuWindowMap } from "./GpuWindow";
 import { WGPUView } from "./WGPUView";
+import type { BrowserWindowEventMap } from "../events/windowEvents";
 
 const buildConfig = await BuildConfig.get();
 
@@ -482,10 +483,19 @@ export class BrowserWindow<T extends RPCWithTransport = RPCWithTransport> {
 		ffi.request.hideFindBar({ winId: this.id });
 	}
 
-	// todo (yoav): move this to a class that also has off, append, prepend, etc.
-	// name should only allow browserWindow events
-	on(name: string, handler: (event: unknown) => void) {
+	on<Name extends keyof BrowserWindowEventMap>(
+		name: Name,
+		handler: (event: BrowserWindowEventMap[Name]) => void
+	) {
 		const specificName = `${name}-${this.id}`;
 		electrobunEventEmitter.on(specificName, handler);
+	}
+
+	off<Name extends keyof BrowserWindowEventMap>(
+		name: Name,
+		handler: (event: BrowserWindowEventMap[Name]) => void
+	) {
+		const specificName = `${name}-${this.id}`;
+		electrobunEventEmitter.off(specificName, handler);
 	}
 }

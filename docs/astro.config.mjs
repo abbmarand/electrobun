@@ -45,6 +45,7 @@ export default defineConfig({
                 { label: "Bun API", link: "/electrobun/apis/bun/" },
                 { label: "BrowserWindow", link: "/electrobun/apis/browser-window/" },
                 { label: "BrowserView", link: "/electrobun/apis/browser-view/" },
+                { label: "BrowserViewLayout", link: "/electrobun/apis/browser-view-layout/" },
                 { label: "WebGPU", link: "/electrobun/apis/webgpu/" },
                 { label: "Utils", link: "/electrobun/apis/utils/" },
                 { label: "Context Menu", link: "/electrobun/apis/context-menu/" },

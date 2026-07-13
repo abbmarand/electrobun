@@ -1,0 +1,117 @@
+---
+title: "BrowserViewLayout API"
+---
+
+`BrowserViewLayout` arranges multiple child `BrowserView`s inside one `BrowserWindow`. It uses a retained row/column tree, keeps pane proportions when the window resizes, and returns divider geometry for a separate browser-chrome overlay.
+
+Use it for durable content panes such as split browsing, document previews, comparison views, and side-by-side tools. Continue using an attached surface or another overlay abstraction for transient popovers and controls.
+
+## Three-pane layout
+
+The window's default webview remains the full-size root view. Every view managed by `BrowserViewLayout` must belong to the same window and must be created with `autoResize: false`.
+
+```typescript
+import {
+	BrowserView,
+	BrowserViewLayout,
+	BrowserWindow,
+	type BrowserViewLayoutNode
+} from "electrobun/bun";
+
+const window = new BrowserWindow({
+	title: "Split workspace",
+	url: "views://layout-chrome/index.html",
+	frame: { x: 100, y: 100, width: 1200, height: 800 }
+});
+
+const tree: BrowserViewLayoutNode = {
+	kind: "split",
+	id: "root",
+	direction: "row",
+	weights: [1, 1],
+	children: [
+		{
+			kind: "split",
+			id: "left-column",
+			direction: "column",
+			weights: [1, 1],
+			children: [
+				{ kind: "leaf", viewId: "reference" },
+				{ kind: "leaf", viewId: "notes" }
+			]
+		},
+		{ kind: "leaf", viewId: "primary" }
+	]
+};
+
+const layout = new BrowserViewLayout({
+	window,
+	tree,
+	contentInsets: { top: 48 },
+	metrics: {
+		gap: 8,
+		dividerHitSize: 12,
+		minimumWidth: 180,
+		minimumHeight: 120
+	},
+	onDidLayout(snapshot) {
+		// snapshot.dividers contains hit rectangles for trusted split handles.
+		// Send these to your browser-chrome overlay when it renders or resizes.
+		console.log(snapshot.dividers);
+	}
+});
+
+function createRemoteView(url: string) {
+	return new BrowserView({
+		windowId: window.id,
+		renderer: window.renderer,
+		url,
+		frame: { x: 0, y: 0, width: 1, height: 1 },
+		autoResize: false,
+		sandbox: true
+	});
+}
+
+layout.attach("reference", createRemoteView("https://developer.mozilla.org"));
+layout.attach("notes", createRemoteView("https://example.com/notes"));
+layout.attach("primary", createRemoteView("https://example.com/work"));
+```
+
+The example produces two stacked panes beside one full-height pane. A row split with three leaf children produces three columns instead.
+
+## Divider dragging
+
+Divider rectangles belong to trusted browser chrome rather than any remote page. On pointer movement, pass the incremental movement along the split axis:
+
+```typescript
+// A row divider moves along the x-axis.
+layout.resizeDivider("root", 0, deltaX);
+
+// A column divider moves along the y-axis.
+layout.resizeDivider("left-column", 0, deltaY);
+```
+
+The layout clamps both adjacent subtrees to their recursive minimum sizes. Disable visual frame transitions while a divider is being dragged; they can make the native views feel like they lag behind the pointer.
+
+## Active and maximized panes
+
+Calling `setActiveView(viewId)` updates the logical active pane for routing navigation and application commands. Native clicking still focuses the clicked webview normally.
+
+Use `maximize(viewId)` to temporarily fill the content rect with one pane and hide its siblings. `restore()` reapplies the retained split tree.
+
+```typescript
+layout.setActiveView("primary");
+layout.maximize("primary");
+layout.restore();
+```
+
+## Lifecycle and security
+
+- `BrowserViewLayout` listens to content-sized `BrowserWindow` resize events and reapplies every managed frame.
+- `contentInsets` reserve space for trusted toolbars or other window chrome.
+- `detach(viewId)` hides the view and stops managing it; it does not destroy the `BrowserView`.
+- `destroy()` removes window listeners but does not destroy or hide attached views.
+- Remote content should use `sandbox: true`. Use `partition` to choose whether panes share cookies and site storage.
+- Keep split handles, PiP buttons, and other privileged controls in a trusted local overlay. Do not place privileged application RPC inside remote panes.
+
+The first layout uses the supplied `contentSize`, or the window's configured size when it is omitted. Subsequent native resize events report the actual content size. Pass `contentSize` explicitly if exact initial geometry is required before the first resize event.
