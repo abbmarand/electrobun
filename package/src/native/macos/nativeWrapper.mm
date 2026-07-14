@@ -13094,6 +13094,11 @@ static CGImageRef createMacAppIconCGImage(NSString *imagePath, int canvasSize) {
     layer.cornerRadius = radius;
     layer.cornerCurve = kCACornerCurveContinuous;
     layer.masksToBounds = YES;
+    // Give transparent favicons a full app-icon footprint. Without a backing
+    // color, macOS treats marks such as YouTube's as legacy freeform artwork
+    // and nests them inside an additional system tile, making them look much
+    // smaller than opaque icons such as X.
+    layer.backgroundColor = [[NSColor colorWithCalibratedWhite:1.0 alpha:1.0] CGColor];
 
     CGImageRef faviconCG = [favicon CGImageForProposedRect:NULL context:nil hints:nil];
     if (!faviconCG) {
