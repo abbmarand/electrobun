@@ -19,7 +19,7 @@ import { createRequire } from "module";
 import * as readline from "readline";
 import { OS, ARCH } from "../shared/platform";
 import { DEFAULT_CEF_VERSION_STRING } from "../shared/cef-version";
-import { BUN_VERSION } from "../shared/bun-version";
+import { BUN_VERSION, getBunReleaseTag } from "../shared/bun-version";
 import { ELECTROBUN_VERSION } from "../shared/electrobun-version";
 import {
 	getAppFileName,
@@ -575,7 +575,8 @@ async function downloadCustomBun(
 	const binExt = platformOS === "win" ? ".exe" : "";
 	const overrideDir = join(ELECTROBUN_CACHE_PATH, "bun-override", `${platformOS}-${platformArch}`);
 	const overrideBinary = join(overrideDir, `bun${binExt}`);
-	const bunUrl = `https://github.com/oven-sh/bun/releases/download/bun-v${bunVersion}/${bunUrlSegment}`;
+	const bunReleaseTag = getBunReleaseTag(bunVersion);
+	const bunUrl = `https://github.com/oven-sh/bun/releases/download/${bunReleaseTag}/${bunUrlSegment}`;
 
 	console.log(`Using custom Bun version: ${bunVersion}`);
 	console.log(`Downloading from: ${bunUrl}`);

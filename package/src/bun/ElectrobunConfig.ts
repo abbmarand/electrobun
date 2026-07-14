@@ -201,7 +201,8 @@ export interface ElectrobunConfig {
 
 		/**
 		 * Override the Bun runtime version.
-		 * Format: semver string (e.g., "1.4.2")
+		 * Format: semver string (e.g., "1.4.2") or "canary" for Bun's official
+		 * moving canary release.
 		 *
 		 * This downloads the specified Bun version from GitHub releases and uses it
 		 * instead of the version bundled with this Electrobun release.
