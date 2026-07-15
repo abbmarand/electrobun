@@ -10257,8 +10257,54 @@ extern "C" NSWindow *createWindowWithFrameAndStyleFromWorker(
     return window;
 }
 
+static void displayWindowContentsAfterReveal(NSWindow *window) {
+    if (window.opaque) return;
+
+    NSView *contentView = window.contentView;
+    if (!contentView) return;
+
+    // Hidden transparent windows can finish their first WKWebView paint while
+    // AppKit has no visible surface to composite. Ordering the window front is
+    // not always enough to invalidate that surface, so the content can remain
+    // fully transparent until a later resize. Force the initial layout and
+    // display pass as part of the reveal instead.
+    [contentView setNeedsLayout:YES];
+    [contentView layoutSubtreeIfNeeded];
+    [contentView setNeedsDisplay:YES];
+
+    for (NSView *subview in contentView.subviews) {
+        [subview setNeedsLayout:YES];
+        [subview layoutSubtreeIfNeeded];
+        [subview setNeedsDisplay:YES];
+    }
+
+    // A same-size setFrame is optimized away and does not wake WKWebView's
+    // remote drawing area. Give the visible window one real layout pulse, then
+    // restore its requested frame on the next display interval. This mirrors
+    // the resize that previously made hidden transparent windows start painting
+    // without leaving the caller with a changed window size.
+    NSRect originalFrame = window.frame;
+    NSRect displayFrame = originalFrame;
+    displayFrame.size.width += 1;
+    [window setFrame:displayFrame display:YES animate:NO];
+
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, 16 * NSEC_PER_MSEC), dispatch_get_main_queue(), ^{
+        if (!window.isVisible) return;
+        NSRect currentFrame = window.frame;
+        if (fabs(currentFrame.size.width - displayFrame.size.width) < 0.5) {
+            currentFrame.size.width = originalFrame.size.width;
+            [window setFrame:currentFrame display:YES animate:NO];
+        }
+        [window.contentView setNeedsLayout:YES];
+        [window.contentView layoutSubtreeIfNeeded];
+        [window.contentView setNeedsDisplay:YES];
+    });
+}
+
 extern "C" void showWindow(NSWindow *window, bool activate) {
     dispatch_sync(dispatch_get_main_queue(), ^{
+        BOOL wasVisible = window.isVisible;
+
         if (activate) {
             if ([window isKindOfClass:[NSPanel class]]) {
                 [window orderFrontRegardless];
@@ -10271,6 +10317,10 @@ extern "C" void showWindow(NSWindow *window, bool activate) {
             }
         } else {
             [window orderFrontRegardless];
+        }
+
+        if (!wasVisible) {
+            displayWindowContentsAfterReveal(window);
         }
 
         dispatch_async(dispatch_get_main_queue(), ^{

@@ -160,4 +160,60 @@ export const chromelessTests = [
       log("Transparent window test completed");
     },
   }),
+
+  defineTest({
+    name: "Hidden transparent native window paints on inactive reveal",
+    category: "Chromeless Windows (Interactive)",
+    description:
+      "Regression test for compact floating UI that was transparent until its first resize",
+    interactive: true,
+    timeout: 120000,
+    async run({ log, showInstructions, waitForUserVerification }) {
+      if (process.platform !== "darwin") {
+        log("Skipping: first-paint regression target is macOS-specific");
+        return;
+      }
+
+      await showInstructions([
+        "A compact purple card will be created while hidden, then shown without activation.",
+        "Verify the card is visible immediately without moving or resizing it.",
+        "Mark the test as failed if the window is empty or fully transparent.",
+      ]);
+
+      const win = new BrowserWindow({
+        title: "Hidden Transparent First Paint",
+        html: `<!doctype html>
+          <style>
+            html, body { margin: 0; width: 100%; height: 100%; background: transparent; }
+            body { display: grid; place-items: center; font: 13px -apple-system, sans-serif; }
+            .card { box-sizing: border-box; width: 100%; height: 100%; padding: 14px 18px; color: white; background: #6d4aff; border-radius: 16px; }
+          </style>
+          <div class="card">Compact window painted before resize</div>`,
+        renderer: "native",
+        frame: { width: 300, height: 60, x: 160, y: 120 },
+        titleBarStyle: "hidden",
+        transparent: true,
+        hidden: true,
+        activate: false,
+      });
+
+      try {
+        await new Promise((resolve) => setTimeout(resolve, 300));
+        win.showInactive();
+        log("Hidden transparent window revealed without resizing");
+
+        const result = await waitForUserVerification();
+        if (result.action === "fail") {
+          throw new Error(result.notes || "Window did not paint on inactive reveal");
+        }
+        if (result.action === "retest") {
+          throw new Error("RETEST: User requested another run");
+        }
+      } finally {
+        win.close();
+      }
+
+      log("Hidden transparent first-paint regression test completed");
+    },
+  }),
 ];
